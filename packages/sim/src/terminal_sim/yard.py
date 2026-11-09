@@ -26,19 +26,31 @@ class Yard:
                         return slot
         return None
 
+    def _check_slot(self, slot: SlotLoc) -> None:
+        spec = self._specs[slot.block]  # KeyError for unknown block
+        if not (
+            1 <= slot.bay <= spec.bays
+            and 1 <= slot.row <= spec.rows
+            and 1 <= slot.tier <= spec.tiers
+        ):
+            raise ValueError("SLOT_OUT_OF_RANGE")
+
     def is_free(self, slot: SlotLoc) -> bool:
+        self._check_slot(slot)
         return slot not in self._by_slot
 
     def occupy(self, slot: SlotLoc, container_id: str) -> None:
-        if slot.block not in self._specs:
-            raise KeyError(slot.block)
+        self._check_slot(slot)
         if slot in self._by_slot:
             raise ValueError("SLOT_OCCUPIED")
+        if container_id in self._by_container:
+            raise ValueError("CONTAINER_PLACED")
         self._by_slot[slot] = container_id
         self._by_container[container_id] = slot
         self._count[slot.block] += 1
 
     def release(self, slot: SlotLoc) -> str:
+        self._check_slot(slot)
         container_id = self._by_slot.pop(slot)  # KeyError if empty
         del self._by_container[container_id]
         self._count[slot.block] -= 1

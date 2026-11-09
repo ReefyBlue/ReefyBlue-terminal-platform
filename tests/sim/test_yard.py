@@ -59,3 +59,41 @@ def test_unknown_block_raises_keyerror(yard: Yard):
         yard.capacity("Z")
     with pytest.raises(KeyError):
         yard.occupancy("Z")
+
+
+@pytest.mark.parametrize(
+    "slot",
+    [
+        SlotLoc("A", 99, 1, 1),
+        SlotLoc("A", 0, 1, 1),
+        SlotLoc("A", 1, 7, 1),
+        SlotLoc("A", 1, 1, 5),
+        SlotLoc("A", 1, 1, 0),
+    ],
+)
+def test_out_of_range_slot_rejected(yard: Yard, slot: SlotLoc):
+    with pytest.raises(ValueError, match="SLOT_OUT_OF_RANGE"):
+        yard.occupy(slot, "X")
+    with pytest.raises(ValueError, match="SLOT_OUT_OF_RANGE"):
+        yard.is_free(slot)
+    with pytest.raises(ValueError, match="SLOT_OUT_OF_RANGE"):
+        yard.release(slot)
+    assert yard.locate("X") is None
+    assert yard.occupancy("A") == 0.0
+    assert yard.find_slot("A") == SlotLoc("A", 1, 1, 1)
+
+
+def test_occupy_already_placed_container_raises(yard: Yard):
+    first, second = SlotLoc("A", 1, 1, 1), SlotLoc("A", 1, 1, 2)
+    yard.occupy(first, "C1")
+    with pytest.raises(ValueError, match="CONTAINER_PLACED"):
+        yard.occupy(second, "C1")
+    assert yard.locate("C1") == first
+    assert yard.is_free(second)
+    assert yard.release(first) == "C1"
+    assert yard.occupancy("A") == 0.0
+
+
+def test_is_free_unknown_block_raises_keyerror(yard: Yard):
+    with pytest.raises(KeyError):
+        yard.is_free(SlotLoc("Z", 1, 1, 1))
