@@ -75,7 +75,7 @@ terminal-platform/
 
 ---
 
-### Taak 1: Workspace + model-typen en locaties
+### Task 1: Workspace + model-typen en locaties
 
 **Files:**
 - Create: `pyproject.toml`, `packages/model/pyproject.toml`, `packages/sim/pyproject.toml`, `packages/ecs/pyproject.toml`, `packages/tos_stub/pyproject.toml`
@@ -135,7 +135,7 @@ def test_parse_rejects(s):
 
 ---
 
-### Taak 2: EquipmentPort-interface
+### Task 2: EquipmentPort-interface
 
 **Files:**
 - Create: `packages/model/src/terminal_model/port.py`
@@ -163,7 +163,7 @@ def test_parse_rejects(s):
 
 ---
 
-### Taak 3: Scenario en layout laden
+### Task 3: Scenario en layout laden
 
 **Files:**
 - Create: `terminal.yaml`, `scenarios/baseline.yaml`, `scenarios/agv4.yaml`, `scenarios/faults.yaml`
@@ -209,7 +209,7 @@ def test_layout_geometry():
 
 ---
 
-### Taak 4: Yard
+### Task 4: Yard
 
 **Files:**
 - Create: `packages/sim/src/terminal_sim/yard.py`
@@ -234,7 +234,7 @@ def test_layout_geometry():
 
 ---
 
-### Taak 5: Grid-routering en reserveringen
+### Task 5: Grid-routering en reserveringen
 
 **Files:**
 - Create: `packages/sim/src/terminal_sim/grid.py`
@@ -258,7 +258,7 @@ def test_layout_geometry():
 
 ---
 
-### Taak 6: Equipment-basis en STS
+### Task 6: Equipment-basis en STS
 
 **Files:**
 - Create: `packages/sim/src/terminal_sim/equipment/{__init__,base,sts}.py`
@@ -301,7 +301,7 @@ def test_cancel_then_reset(env_with_sts):
 
 ---
 
-### Taak 7: AGV
+### Task 7: AGV
 
 **Files:**
 - Create: `packages/sim/src/terminal_sim/equipment/agv.py`
@@ -326,7 +326,7 @@ def test_cancel_then_reset(env_with_sts):
 
 ---
 
-### Taak 8: ASC
+### Task 8: ASC
 
 **Files:**
 - Create: `packages/sim/src/terminal_sim/equipment/asc.py`
@@ -351,7 +351,7 @@ def test_cancel_then_reset(env_with_sts):
 
 ---
 
-### Taak 9: World en SimEquipmentPort
+### Task 9: World en SimEquipmentPort
 
 **Files:**
 - Create: `packages/sim/src/terminal_sim/world.py`
@@ -377,7 +377,7 @@ def test_cancel_then_reset(env_with_sts):
 
 ---
 
-### Taak 10: Storingen
+### Task 10: Storingen
 
 **Files:**
 - Create: `packages/sim/src/terminal_sim/faults.py`
@@ -398,7 +398,7 @@ def test_cancel_then_reset(env_with_sts):
 
 ---
 
-### Taak 11: ECS — werkorders en lossen
+### Task 11: ECS — werkorders en lossen
 
 **Files:**
 - Create: `packages/ecs/src/terminal_ecs/{__init__,workorders,dispatcher}.py`
@@ -446,7 +446,7 @@ def test_slot_occupied_asks_provider():
 
 ---
 
-### Taak 12: ECS — laden, herplanning, watchdog
+### Task 12: ECS — laden, herplanning, watchdog
 
 **Files:**
 - Modify: `packages/ecs/src/terminal_ecs/dispatcher.py`
@@ -469,7 +469,7 @@ def test_slot_occupied_asks_provider():
 
 ---
 
-### Taak 13: TOS-stub
+### Task 13: TOS-stub
 
 **Files:**
 - Create: `packages/tos_stub/src/terminal_tos_stub/{__init__,generator,allocator}.py`
@@ -494,7 +494,7 @@ def test_slot_occupied_asks_provider():
 
 ---
 
-### Taak 14: KPI-collector
+### Task 14: KPI-collector
 
 **Files:**
 - Create: `packages/sim/src/terminal_sim/kpi.py`
@@ -515,7 +515,7 @@ def test_slot_occupied_asks_provider():
 
 ---
 
-### Taak 15: Runner CLI
+### Task 15: Runner CLI
 
 **Files:**
 - Create: `packages/sim/src/terminal_sim/run.py`
@@ -536,7 +536,7 @@ def test_slot_occupied_asks_provider():
 
 ---
 
-### Taak 16: End-to-end en architectuurbewaking
+### Task 16: End-to-end en architectuurbewaking
 
 **Files:**
 - Test: `tests/e2e/test_baseline.py`, `tests/e2e/test_scenarios_compare.py`, `tests/test_architecture.py`
