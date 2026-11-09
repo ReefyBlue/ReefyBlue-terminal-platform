@@ -146,6 +146,31 @@ def test_fail_job_emits_and_idles(rig):
     assert of_kind(rig, EventKind.JOB_FAILED)[0].reason == "BREAKDOWN"
     assert rig.sts.state == State.IDLE
     assert rig.sts.current_job is None
+    rig.grid.try_reserve((4, 0), "AGV-01")
+    rig.env.run(till=400)
+    assert of_kind(rig, EventKind.JOB_COMPLETED) == []
+    assert rig.sts.energy_kwh == 0.0
+    assert rig.sts.state == State.IDLE
+
+
+def test_fail_job_mid_cycle_does_not_complete(rig):
+    rig.grid.try_reserve((4, 0), "AGV-01")
+    rig.sts.assign_job(job())
+    rig.env.run(till=50)
+    rig.sts.fail_job("FAULT")
+    rig.env.run(till=400)
+    assert of_kind(rig, EventKind.JOB_COMPLETED) == []
+    assert rig.sts.energy_kwh == 0.0
+
+
+def test_requires_non_yieldless_env():
+    from types import SimpleNamespace
+
+    with pytest.raises(ValueError, match="yieldless=False"):
+        STS(equipment_id="S", kind=Kind.STS, position=Position(0, 0),
+            rng=random.Random(1), emit=lambda e: None,
+            env=SimpleNamespace(_yieldless=True),
+            lane_cells=((4, 0), (5, 0)), grid=Grid(20, 6, 20.0))
 
 
 def test_snapshot(rig):

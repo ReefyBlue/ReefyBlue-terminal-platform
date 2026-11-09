@@ -29,6 +29,8 @@ class Equipment(salabim.Component):
         emit: Callable[[EquipmentEvent], None],
         env: salabim.Environment,
     ) -> None:
+        if getattr(env, "_yieldless", False):
+            raise ValueError("Equipment requires Environment(yieldless=False)")
         super().__init__(name=equipment_id, env=env, process="")
         self.equipment_id = equipment_id
         self.kind = kind
@@ -89,6 +91,8 @@ class Equipment(salabim.Component):
         job.status = JobStatus.FAILED
         self._emit_event(EventKind.JOB_FAILED, job_id=job.job_id, reason=reason)
         self.current_job = None
+        if self.env.current_component() is not self:
+            self.cancel()  # called from outside: stop the running process
         self.set_state(State.IDLE)
 
     def _emit_event(self, kind: EventKind, **kwargs) -> None:

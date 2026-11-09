@@ -52,6 +52,8 @@ class STS(Equipment):
         while not self.agv_in_lane():
             yield self.hold(AGV_POLL_S)
         yield self.hold(self.rng.triangular(CYCLE_LOW_S, CYCLE_HIGH_S, CYCLE_MODE_S))
+        if self.current_job is None:  # failed/cancelled meanwhile
+            return
         self.energy_kwh += ENERGY_PER_MOVE_KWH
         self.complete_job()
 
