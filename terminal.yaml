@@ -1,0 +1,39 @@
+quay:
+  length_m: 400
+grid:
+  cell_m: 20
+  cols: 20
+  rows: 6
+sts:
+  - {id: STS-01, x: 100, y: 0, lane_cells: [[4, 0], [5, 0]]}
+  - {id: STS-02, x: 250, y: 0, lane_cells: [[12, 0], [13, 0]]}
+blocks:
+  - block: A
+    asc_id: ASC-A
+    tp_ws: {x: 50, y: 120}
+    tp_ws_cell: [2, 5]
+    bays: 40
+    rows: 6
+    tiers: 4
+  - block: B
+    asc_id: ASC-B
+    tp_ws: {x: 150, y: 120}
+    tp_ws_cell: [7, 5]
+    bays: 40
+    rows: 6
+    tiers: 4
+  - block: C
+    asc_id: ASC-C
+    tp_ws: {x: 250, y: 120}
+    tp_ws_cell: [12, 5]
+    bays: 40
+    rows: 6
+    tiers: 4
+  - block: D
+    asc_id: ASC-D
+    tp_ws: {x: 350, y: 120}
+    tp_ws_cell: [17, 5]
+    bays: 40
+    rows: 6
+    tiers: 4
+agv_start_cells: [[0, 2], [1, 2], [2, 2], [3, 2], [4, 2], [5, 2]]

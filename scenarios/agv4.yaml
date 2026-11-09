@@ -1,0 +1,9 @@
+name: agv4
+seed: 1
+n_sts: 2
+n_agv: 4
+n_containers: 200
+share_40ft: 0.6
+discharge_share: 1.0
+speed_factor: 50
+duration_s: 43200
