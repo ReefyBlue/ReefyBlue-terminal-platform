@@ -5,7 +5,19 @@ requires-python = ">=3.12"
 dependencies = []
 
 [dependency-groups]
-dev = ["pytest"]
+dev = [
+    "pytest",
+    "terminal-model",
+    "terminal-sim",
+    "terminal-ecs",
+    "terminal-tos-stub",
+]
+
+[tool.uv.sources]
+terminal-model = { workspace = true }
+terminal-sim = { workspace = true }
+terminal-ecs = { workspace = true }
+terminal-tos-stub = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]

@@ -151,12 +151,22 @@ source = { virtual = "." }
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "terminal-ecs" },
+    { name = "terminal-model" },
+    { name = "terminal-sim" },
+    { name = "terminal-tos-stub" },
 ]
 
 [package.metadata]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest" }]
+dev = [
+    { name = "pytest" },
+    { name = "terminal-ecs", editable = "packages/ecs" },
+    { name = "terminal-model", editable = "packages/model" },
+    { name = "terminal-sim", editable = "packages/sim" },
+    { name = "terminal-tos-stub", editable = "packages/tos_stub" },
+]
 
 [[package]]
 name = "terminal-sim"
