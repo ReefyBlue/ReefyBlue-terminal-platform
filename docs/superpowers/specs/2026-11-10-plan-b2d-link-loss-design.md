@@ -45,7 +45,7 @@ Nieuwe constructor-parameter `auto_release: bool = False`. Nieuwe interne verzam
 - `STATE_CHANGED → OFFLINE`: apparaat in `_offline`; lopende job (uit `_job_eq`) onthouden in `_offline_job`; **geen** herplanning, order blijft in zijn stage; apparaat krijgt geen nieuwe jobs (`_available` is False voor `_offline`); watchdog: voor offline AGV's wordt `_last_progress` bij elke tick op `now` gezet (tijd bevriest).
 - `STATE_CHANGED` met reden `LINK_RESTORED` of `UPSTREAM_RECONNECTED` voor een apparaat in `_offline`:
   - `BUSY`: apparaat uit `_offline`; als `_offline_job` nog in `_job_eq` staat loopt de job gewoon door.
-  - `IDLE`: apparaat uit `_offline`; was er een `_offline_job` die nog in `_job_eq` staat en is er sindsdien geen `JOB_COMPLETED`/`JOB_FAILED` voor gezien, dan `_unknown[job_id] = eid` en `eid` in `_needs_release` (bij `auto_release=True`: direct `resolve_job(job_id, "failed")` en geen `needs_release`). Zonder lopende job: apparaat is weer inzetbaar (tenzij in `_needs_release`).
+  - `IDLE`: apparaat uit `_offline`; was er een `_offline_job` die nog in `_job_eq` staat en is er sindsdien geen `JOB_COMPLETED`/`JOB_FAILED` voor gezien, dan `_unknown[job_id] = eid` en `eid` in `_needs_release` (bij `auto_release=True`: direct `resolve_job(job_id, "completed")` en geen `needs_release` — een job die al liep toen de verbinding wegviel kan alleen in `JOB_COMPLETED` of in een FAULT eindigen; faalt het apparaat, dan meldt het FAULT en niet IDLE). Zonder lopende job: apparaat is weer inzetbaar (tenzij in `_needs_release`).
   - `FAULT`: apparaat uit `_offline`, verder als §5.2.
   - `OFFLINE` (gateway meldt nog steeds offline): blijft in `_offline`.
 - Een `JOB_COMPLETED`/`JOB_FAILED` dat tijdens OFFLINE tóch binnenkomt (kan niet via de port, wel in tests) wordt normaal verwerkt en wist `_offline_job`.
@@ -85,11 +85,11 @@ CLI: `terminal_ecs_service.serve --auto-release` (standaard uit); `terminal_runn
 | `resolve` met ongeldige outcome | 422 |
 | OFFLINE-event voor onbekend apparaat | genegeerd met warning |
 | Reconnect met andere vloot | bestaande `_check_fleet`-melding (runner); service logt ERROR en blijft op de oude vloot |
-| `auto_release=True` en onbekende uitkomst | direct `failed` → herplanning, geen alarm |
+| `auto_release=True` en onbekende uitkomst | direct `completed` → order gaat verder, geen alarm |
 
 ## 8. Tests
 
-- `tests/ecs`: OFFLINE herplant niet en pauzeert de watchdog (600 s offline → geen cancel); terugkeer BUSY/IDLE-met-job/IDLE-zonder-job/FAULT/OFFLINE; FAULT → `needs_release`, IDLE heft niet op; `release` geweigerd bij FAULT en bij open onbekende uitkomst, toegestaan bij IDLE; `resolve_job` completed en failed; `auto_release=True`: alle bestaande dispatcher-tests ongewijzigd groen (fixture draait met `auto_release=True`), onbekende uitkomst → failed; `alarms()`-inhoud en `since`.
+- `tests/ecs`: OFFLINE herplant niet en pauzeert de watchdog (600 s offline → geen cancel); terugkeer BUSY/IDLE-met-job/IDLE-zonder-job/FAULT/OFFLINE; FAULT → `needs_release`, IDLE heft niet op; `release` geweigerd bij FAULT en bij open onbekende uitkomst, toegestaan bij IDLE; `resolve_job` completed en failed; `auto_release=True`: alle bestaande dispatcher-tests ongewijzigd groen (fixture draait met `auto_release=True`), onbekende uitkomst → completed; `alarms()`-inhoud en `since`.
 - `tests/gateway`: OFFLINE i.p.v. FAULT bij verlies; recovery-event ook bij upstream FAULT.
 - `tests/ecs_service`: port LINK_LOST voor alle apparaten bij `unbind`, LINK_RESTORED voor alle bij `bind`; API alarms/release/resolve incl. 404/409/422/503; WS `alarm` raised/cleared; `EcsCore` met FakePort: offline → terug IDLE met job → alarm UNKNOWN_OUTCOME → resolve → release → apparaat weer toegewezen.
 - `tests/e2e`: Plan A-baseline exact (geen storingen); `faults.yaml` in-process met `auto_release=True` → tellingen gelijk aan vóór B2d (nieuwe referentie-fixture voor faults seed 1 vastleggen vóór de wijziging, in Task 1); `e2e_opcua`: proxy-blip sim↔gateway tijdens een run (service `--auto-release`) → run voltooit zonder `stuck`; proxy-blip ECS↔gateway → idem.
