@@ -144,3 +144,14 @@ def test_loaded_agv_gets_next_leg_once_idle_without_rejections(caplog):
     assert [r.getMessage() for r in caplog.records] == []
     port.set_state("AGV-01", State.IDLE)
     assert last(port) == ("AGV-01", "C9-TRANSPORT-2", JobType.TRANSPORT, "TP/A/WS", "STS-01")
+
+
+def test_routine_assignments_and_completions_log_at_debug_only(caplog):
+    caplog.set_level("INFO", logger="terminal_ecs")
+    port = make_port()
+    d = Dispatcher(port, FakeSlots())
+    d.submit([load("C9", slot="A/3/1/1")])
+    for eid in ("ASC-A", "AGV-01", "AGV-01", "STS-01"):
+        port.complete(eid)
+    assert d.completed == ["C9"]
+    assert [r.getMessage() for r in caplog.records] == []

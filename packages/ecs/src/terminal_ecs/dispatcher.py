@@ -280,7 +280,7 @@ class Dispatcher:
             self._last_progress[eid] = self.port.now()
         if self.port.assign_job(eid, job):
             rec.job_counts[job.type] = rec.job_counts.get(job.type, 0) + 1
-            log.info("assign %s -> %s (%s -> %s)", job.job_id, eid, job.from_loc, job.to_loc)
+            log.debug("assign %s -> %s (%s -> %s)", job.job_id, eid, job.from_loc, job.to_loc)
             return True
         log.warning("rejected %s by %s", job.job_id, eid)
         rec.stage, rec.seq = prev
@@ -317,7 +317,7 @@ class Dispatcher:
         if rec is None:
             return
         self._detach(rec)
-        log.info("completed %s on %s", ev.job_id, ev.equipment_id)
+        log.debug("completed %s on %s", ev.job_id, ev.equipment_id)
         agv = rec.agv_id or ev.equipment_id
         match rec.stage:
             case Stage.AGV_EN_ROUTE:
