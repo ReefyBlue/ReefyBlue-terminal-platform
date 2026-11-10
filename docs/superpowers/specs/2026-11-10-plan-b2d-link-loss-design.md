@@ -60,6 +60,10 @@ Nieuwe constructor-parameter `auto_release: bool = False`. Nieuwe interne verzam
 
 - `resolve_job(job_id, outcome: Literal["completed","failed"]) -> None`: `KeyError` als `job_id` niet in `_unknown`. `completed` → zelfde pad als `_on_completed` met een gesynthetiseerd `JOB_COMPLETED` (sim_time = `now`); `failed` → `_replan(rec, eid, "UNKNOWN_OUTCOME")`. Daarna `_unknown.pop(job_id)`; het apparaat blijft in `_needs_release` tot `release`.
 
+### 5.3a Herhaalde mislukkingen
+
+`OrderRecord.replan_streak` telt herplanningen door `JOB_FAILED` (generieke tak van `_on_failed`) en door `FAULT`; een `JOB_COMPLETED` van een job van de order zet hem op 0; watchdog-annuleringen en `resolve_job(…, "failed")` tellen niet mee en resetten niet. Bij `WATCHDOG_MAX_CANCELS` (5) op rij wordt de order gefaald met reden `REPLAN_STREAK` (`_fail_order`: TP en AGV vrij, telt in `failed`/`containers_failed`) met ERROR-log `replan streak: <cid> failed <n> times in a row on <eid> (<reason>); order failed`. `stuck` houdt zijn watchdog-betekenis.
+
 ### 5.4 Status en alarmen
 
 `status()` krijgt `offline` (aantal), `needs_release` (aantal), `unknown_outcomes` (aantal). Nieuw `alarms() -> list[Alarm]` met `Alarm(kind: AlarmKind, equipment_id: str, job_id: str | None, since: float, detail: str)`; `AlarmKind` = `LINK_LOST` (per offline apparaat), `NEEDS_RELEASE`, `UNKNOWN_OUTCOME`. `since` = sim-tijd van ontstaan. Alarmen zijn afgeleid van de verzamelingen (geen aparte opslag); `_alarm_since: dict[tuple[AlarmKind, str], float]` bewaart het ontstaansmoment.

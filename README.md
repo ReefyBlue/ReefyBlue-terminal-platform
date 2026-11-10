@@ -205,7 +205,7 @@ curl -s -X POST http://localhost:8000/equipment/STS-01/release
 # 200 {"released":"STS-01"}; 404 onbekend; 409 {"code":"RELEASE_REFUSED","message":…}; 503 niet verbonden
 ```
 
-Een order waarvan de jobs 5 keer achter elkaar mislukken (JOB_FAILED of FAULT, zonder voltooide job ertussen) wordt geparkeerd als `stuck` (`GET /status`, KPI `containers_stuck`, ERROR in de log): de ECS geeft hem niet opnieuw uit, zodat een direct falende job niet eindeloos herhaald wordt.
+Herhaalde mislukkingen: een order waarvan de jobs 5 keer achter elkaar mislukken (JOB_FAILED of een FAULT-herplanning, zonder voltooide job ertussen; watchdog-annuleringen en `resolve … failed` tellen niet mee) wordt niet eindeloos opnieuw uitgegeven maar gefaald met reden `REPLAN_STREAK`. De operator ziet dat als `failed` in `GET /status` / KPI `containers_failed` en een ERROR `replan streak: <container> failed 5 times in a row on <apparaat> (<reden>); order failed` in de log; TP en AGV van de order komen vrij.
 
 `release` wordt geweigerd (409) zolang het apparaat `FAULT` of `OFFLINE` meldt of er voor dat apparaat nog een onbekende uitkomst openstaat (`"resolve job <id> first"`).
 
