@@ -133,10 +133,14 @@ De ECS draait als eigen proces dat via de gateway met de sim praat en een HTTP/W
 | Proces | CLI | Rol |
 |---|---|---|
 | ecs-service | `python -m terminal_ecs_service.serve --gateway opc.tcp://localhost:4840 --layout terminal.yaml --host 0.0.0.0 --port 8000` | Dispatcher + KPI + API |
-| tos-stub | `python -m terminal_tos_stub.submit scenario.yaml --layout terminal.yaml --ecs http://localhost:8000` | genereert orders uit het scenario (seed) en POST ze naar de service |
+| tos-stub | `python -m terminal_tos_stub.submit scenario.yaml --layout terminal.yaml --ecs http://localhost:8000` | genereert orders uit het scenario (seed) en POST ze naar de service (alleen dat: zie hieronder) |
 | runner | `python -m terminal_runner.run scenario.yaml --port http --ecs http://localhost:8000 --gateway opc.tcp://localhost:4840 --out out/` | orkestreert één run (health, `PrefillYard`, orders, `Start`, pollen, KPI's, `Stop`) |
 
 Alle tijden in sim-seconden.
+
+`terminal_tos_stub.submit` POST alleen de orders: hij plaatst geen LOAD-containers in de yard (`PrefillYard`) en start de sim niet (`Start`). LOAD-orders lopen dan vast op `SLOT_EMPTY`. Gebruik voor een volledige run de runner met `--port http`; `submit` los alleen met scenario's die uitsluitend DISCHARGE-orders hebben (`discharge_share: 1.0`), en start de sim dan zelf.
+
+Eén ECS-proces per sim-run: de service herkent een herstart van de sim niet als nieuwe run (Dispatcher, orders en KPI's blijven van de vorige). Gaat de sim-tijd terug, dan logt de service een ERROR en antwoordt `/health` 503 met `"error": "sim_time_reversed"`; de runner (`--port http`) weigert een service die al orders heeft (`done + open + failed > 0`). Herstart de service dus per run, totdat B2c herstartgedrag vastlegt.
 
 | Endpoint | Antwoord |
 |---|---|
@@ -144,7 +148,7 @@ Alle tijden in sim-seconden.
 | `GET /status` | `Dispatcher.status()` + `sim_time`, `connected`, `uptime_s`, `tick_count` |
 | `GET /kpis` | KPI-snapshot (zelfde sleutels als `finish`, incl. `sim_elapsed_s`), niet-destructief |
 | `GET /equipment` | `[{"equipment_id","kind","vendor","state","position":{"x","y"},"current_job_id","energy_kwh","extra"}]` |
-| `GET /health` | 200 `{"connected": true, "sim_time": t}` of 503 `{"connected": false, "sim_time": null}` |
+| `GET /health` | 200 `{"connected": true, "sim_time": t}`; 503 `{"connected": false, "sim_time": null}`, of 503 `{"connected": true, "sim_time": t, "error": "sim_time_reversed"}` na een sim-herstart |
 | `WS /events` | JSON-berichten, zie hieronder |
 
 Berichten op `WS /events` (veld `type`, geen replay):
@@ -153,14 +157,14 @@ Berichten op `WS /events` (veld `type`, geen replay):
 |---|---|
 | `status` | direct na verbinding en na elke tick (`sim_time` + `Dispatcher.status()`) |
 | `equipment` | elk equipment-event (`kind`, `equipment_id`, `sim_time`, `job_id`, `reason`, `new_state`) |
-| `job` | elke nieuwe afgeronde job (`job_id`, `equipment_id`, `sim_time`) |
+| `job` | elke nieuw toegewezen job, na elke tick en na `POST /workorders` (`job_id`, `equipment_id`, `sim_time` = moment van toewijzing, `assigned_at`) |
 | `link` | bij verlies en herstel van de gatewayverbinding (`connected`, `sim_time`) |
 
 Per client geldt een wachtrij van 1000 berichten; bij vol worden berichten gedropt.
 
 Simulatiebesturing (`PrefillYard`, `Start`, `Stop`) blijft bij de runner, via OPC UA op de gateway; de service heeft er geen endpoints voor.
 
-Verbindingsverlies: de service houdt zijn Dispatcher en orders vast, verbindt elke 2 s opnieuw met de gateway, stuurt `link`-berichten bij verlies en herstel, en antwoordt 503 (`/health`, `POST /workorders`) zolang hij niet verbonden is.
+Verbindingsverlies: de service houdt zijn Dispatcher en orders vast, verbindt elke 2 s opnieuw met de gateway, stuurt `link`-berichten bij verlies en herstel, en antwoordt 503 (`/health`, `POST /workorders`) zolang hij niet verbonden is. Events van de gateway tijdens de onderbreking gaan verloren. Bij herstel vergelijkt de service de laatst bekende toestand per apparaat met de nieuwe snapshot en levert elk verschil als `STATE_CHANGED` met `reason: "LINK_RESTORED"` (ook op `WS /events`), zodat bijvoorbeeld een apparaat dat tijdens de onderbreking van FAULT naar IDLE ging weer ingezet wordt. Beperking: een `JOB_COMPLETED`/`JOB_FAILED` uit de onderbreking is niet te reconstrueren; de service logt dan alleen een WARNING met de apparaten waarvan `current_job_id` veranderde (een AGV-job ruimt de Dispatcher-watchdog na `watchdog_s` op; andere jobs blijven open tot B2d, dat deze reconciliatie regelt).
 
 ## Verder
 

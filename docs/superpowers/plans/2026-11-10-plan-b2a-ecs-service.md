@@ -14,7 +14,7 @@
 
 - `terminal_ecs` (dispatcher/orders/workorders) blijft byte-identiek: hash-fixture `tests/fixtures/ecs_sources.sha256`.
 - Pakketregels (architectuurtest): kpi→model+ecs; tos_stub→model+ecs; ecs_service→model+ecs+opcua+kpi+tos_stub; runner→alles; overige ongewijzigd.
-- Nieuwe dependencies alleen: `fastapi`, `uvicorn[standard]`, `httpx`.
+- Nieuwe dependencies alleen: `fastapi`, `uvicorn[standard]`, `httpx`; plus `pyyaml` en `anyio` expliciet in `terminal_ecs_service`, en `httpx2` in de dev-groep (Starlette `TestClient`).
 - `SAMPLE_INTERVAL_S = 60` s sim-tijd per tick; `DRAIN_POLL_S = 0.005` s wandklok; `CONNECT_RETRY_S = 2.0`; runner health-timeout 30 s; WS-wachtrij per client 1000, drop-warning max. 1 per client per minuut.
 - Alle endpoints `async def`; dispatcher/KPI alleen op de loop-thread; geen locks.
 - API-vormen exact zoals spec §3; WS-berichten exact zoals spec §5 (`type` ∈ status/equipment/job/link).

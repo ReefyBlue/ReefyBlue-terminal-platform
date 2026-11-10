@@ -36,7 +36,7 @@ FastAPI, Pydantic-schema's in `terminal_ecs_service.schemas`. Alle tijden in sim
 | `GET /status` | `Dispatcher.status()` + `sim_time`, `connected`, `uptime_s`, `tick_count` |
 | `GET /kpis` | `KpiCollector.snapshot(elapsed)`: zelfde sleutels als `finish` (incl. `sim_elapsed_s`), niet-destructief |
 | `GET /equipment` | `[{"equipment_id","kind","vendor","state","position":{"x","y"},"current_job_id","energy_kwh","extra"}]` |
-| `GET /health` | 200 `{"connected": true, "sim_time": t}` of 503 `{"connected": false, "sim_time": null}` |
+| `GET /health` | 200 `{"connected": true, "sim_time": t}`; 503 `{"connected": false, "sim_time": null}`, of 503 `{"connected": true, "sim_time": t, "error": "sim_time_reversed"}` na een sim-herstart (§7) |
 | `WS /events` | JSON-berichten, §5 |
 
 Validatie: `type` moet `DISCHARGE` of `LOAD` zijn, `yard_slot` moet parsen als slot-locatie (`parse_location`), anders 422 vóór de Dispatcher. Elke geaccepteerde order registreert zijn `yard_slot` in de ECS-eigen allocator (`occupy`), zodat herslotten bij ASC-storing geen slot kiest dat de TOS al heeft uitgegeven.
@@ -69,10 +69,10 @@ Geen replay. Per client een wachtrij van 1000 berichten; vol → bericht gedropt
 |---|---|---|
 | `terminal_kpi` (nieuw, `packages/kpi`) | model, ecs | `kpi.py` verplaatst uit runner; `snapshot(duration_s) -> dict[str, float]` (zelfde sleutels als `finish`; `finish` roept `snapshot` aan en blijft bestaan) |
 | `terminal_tos_stub` | model, ecs | `allocator.occupy(slot)` (idempotent; `KeyError` bij onbekend blok); nieuw `client.py` (`EcsClient(base_url)`: `post_workorders`, `status`, `kpis`, `equipment`, `wait_healthy(timeout_s)` — httpx) en `submit.py` (CLI) |
-| `terminal_ecs_service` (nieuw, `packages/ecs_service`) | model, ecs, opcua, kpi, tos_stub | `core.py` (`EcsCore`, `ReconnectingPort`), `app.py` (`create_app(core) -> FastAPI`), `schemas.py`, `events.py` (WS-broadcaster), `serve.py` (CLI) |
+| `terminal_ecs_service` (nieuw, `packages/ecs_service`) | model, ecs, opcua, kpi, tos_stub | `core.py` (`EcsCore`), `port.py` (`ReconnectingPort`), `app.py` (`create_app(core) -> FastAPI`), `schemas.py`, `events.py` (WS-broadcaster), `serve.py` (CLI) |
 | `terminal_runner` | alles | `run_once_http`; importeert `KpiCollector` uit `terminal_kpi` |
 
-Nieuwe dependencies: `fastapi`, `uvicorn[standard]`, `httpx`, `websockets` (test-client). Architectuurtest (`tests/test_architecture.py`) krijgt de twee nieuwe pakketten met bovenstaande regels. ECS-hash-fixture ongewijzigd.
+Nieuwe dependencies: `fastapi`, `uvicorn[standard]`, `httpx`, `websockets` (test-client); `terminal_ecs_service` vermeldt daarnaast `pyyaml` (layout laden) en `anyio` (WS-taakgroep) expliciet; dev-groep: `httpx2` (vereist door de Starlette `TestClient`). Architectuurtest (`tests/test_architecture.py`) krijgt de twee nieuwe pakketten met bovenstaande regels. ECS-hash-fixture ongewijzigd.
 
 ## 7. Foutafhandeling
 
@@ -80,7 +80,9 @@ Nieuwe dependencies: `fastapi`, `uvicorn[standard]`, `httpx`, `websockets` (test
 |---|---|
 | Order ongeldig | 422 met alle fouten van de batch; niets aangenomen. De service valideert de hele batch zelf vóór `submit` (type, slot-syntaxis, bekende STS, dubbele container t.o.v. eerdere batches en binnen de batch), zodat `Dispatcher.submit` in de praktijk niet meer faalt; gooit `submit` toch een `WorkOrderError`, dan 500 met de fout en een logregel (orders vóór de fout in die batch zijn dan wel aangenomen) |
 | Gateway onbereikbaar bij start | service start, health 503, blijft verbinden |
-| Verbinding valt weg tijdens run | `link`-bericht, health 503, herverbinden; ECS-staat blijft |
+| Verbinding valt weg tijdens run | `link`-bericht, health 503, herverbinden; ECS-staat blijft. Events uit de onderbreking zijn weg: bij herstel levert `ReconnectingPort.bind` per apparaat waarvan de toestand afwijkt van de laatst bekende een `STATE_CHANGED` met `reason="LINK_RESTORED"` (na het verversen van de cache), zodat de Dispatcher bv. een FAULT→IDLE-apparaat weer vrijgeeft. Verloren `JOB_COMPLETED`/`JOB_FAILED` zijn zonder ECS-wijziging niet te reconstrueren: alleen een WARNING met de apparaten waarvan `current_job_id` veranderde; reconciliatie volgt in B2d |
+| Sim herstart onder een draaiende ECS (sim-tijd gaat terug) | ERROR-log, `time_reversed`, `/health` 503 `{"connected": true, "sim_time": t, "error": "sim_time_reversed"}`; de lus draait door. Eén ECS-proces per sim-run tot B2c herstartgedrag vastlegt |
+| Runner: ECS niet vers (`done + open + failed > 0` in `/status` na health) | exit 1 "ECS service is not fresh (…): restart it per run" |
 | WS-client traag | berichten gedropt voor die client (zie §5) |
 | `GET /kpis` vóór eerste tick | geldige tussenstand met nullen, `sim_elapsed_s = 0` |
 | Runner: health niet binnen 30 s 200 | exit 1 met melding |
