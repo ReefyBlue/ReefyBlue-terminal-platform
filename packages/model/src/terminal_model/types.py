@@ -16,6 +16,7 @@ class State(StrEnum):
     BUSY = "BUSY"
     FAULT = "FAULT"
     MAINTENANCE = "MAINTENANCE"
+    OFFLINE = "OFFLINE"
 
 
 class JobType(StrEnum):
