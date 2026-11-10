@@ -7,7 +7,11 @@ Per order the state machine is (``job`` = ``current_job_id``; ``None`` means
     AT_STS(None) --DISCHARGE-1--> DISCHARGING(job) --done/sts_to_agv--> TO_YARD(None)
     TO_YARD(None) --TRANSPORT-2--> TO_YARD(job) --done/agv_to_tp--> STACKING(None)
     STACKING(None) --STACK_IN-n--> STACKING(job) --done--> DONE
-    STACKING(job) --SLOT_OCCUPIED--> STACKING(None) with a new slot, or FAILED (YARD_FULL)
+    STACKING(job) --SLOT_OCCUPIED--> STACKING(None) with a new valid slot, or FAILED (YARD_FULL)
+    any stage --on_transfer raises--> FAILED (TRANSFER_ERROR)
+
+DISCHARGE follows the per-STS submit FIFO: only the earliest not-yet-discharged
+order may be discharged; later AGVs that arrive first wait in the lane.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ class Stage(StrEnum):
 
 
 _LOOKAHEAD_STAGES = (Stage.AGV_EN_ROUTE, Stage.AT_STS)
+_PRE_DISCHARGE = (Stage.AWAIT_AGV, Stage.AGV_EN_ROUTE, Stage.AT_STS)
 
 
 @dataclass
@@ -169,16 +174,17 @@ class Dispatcher:
         return sorted(recs, key=lambda r: r.seq)
 
     def _tick_once(self) -> None:
-        # 1. Discharge: one AT_STS order per idle STS, earliest arrival first.
+        # 1. Discharge in per-STS FIFO order: only the head may go, once its AGV is in the lane.
         for sts in self._sts:
-            at_sts = [r for r in self._waiting(Stage.AT_STS) if r.order.sts_id == sts]
-            if at_sts and self._is_idle(sts):
-                rec = at_sts[0]
-                job = Job(rec.next_job_id(JobType.DISCHARGE), JobType.DISCHARGE, rec.cid, "VESSEL", sts)
-                self._issue(sts, rec, job, Stage.DISCHARGING)
+            head = self._fifo_head(sts)
+            if head and head.stage is Stage.AT_STS and head.current_job_id is None and self._is_idle(sts):
+                job = Job(head.next_job_id(JobType.DISCHARGE), JobType.DISCHARGE, head.cid, "VESSEL", sts)
+                self._issue(sts, head, job, Stage.DISCHARGING)
         # 2. Loaded AGVs to the transfer point of the target block.
         for rec in self._waiting(Stage.TO_YARD):
-            assert rec.agv_id is not None
+            if rec.agv_id is None:
+                log.error("order %s is TO_YARD without an AGV; skipping", rec.cid)
+                continue
             job = Job(rec.next_job_id(JobType.TRANSPORT), JobType.TRANSPORT, rec.cid, rec.order.sts_id, rec.tp)
             self._issue(rec.agv_id, rec, job, Stage.TO_YARD)
         # 3. Stack-in, FIFO per ASC by arrival at the TP.
@@ -189,11 +195,18 @@ class Dispatcher:
                 busy_asc.add(asc)
                 continue
             job = Job(rec.next_job_id(JobType.STACK_IN), JobType.STACK_IN, rec.cid, rec.tp, rec.yard_slot)
-            if not self._issue(asc, rec, job, Stage.STACKING):
-                busy_asc.add(asc)
+            self._issue(asc, rec, job, Stage.STACKING)
+            busy_asc.add(asc)  # at most one STACK_IN per ASC per pass
         # 4. Send empty AGVs to STSes, bounded by the lookahead.
         for sts in self._sts:
             self._dispatch_agvs(sts)
+
+    def _fifo_head(self, sts: str) -> _OrderRecord | None:
+        """Earliest (submit order) DISCHARGE order for ``sts`` that has not started discharging."""
+        for r in self._open.values():
+            if r.order.sts_id == sts and r.order.type is JobType.DISCHARGE and r.stage in _PRE_DISCHARGE:
+                return r
+        return None
 
     def _dispatch_agvs(self, sts: str) -> None:
         mine = [r for r in self._open.values() if r.order.sts_id == sts]
@@ -265,13 +278,13 @@ class Dispatcher:
             case Stage.AGV_EN_ROUTE:
                 self._enter(rec, Stage.AT_STS)
             case Stage.DISCHARGING:
-                self._transfer("sts_to_agv", ev.equipment_id, rec.cid)
                 self._enter(rec, Stage.TO_YARD)
+                self._transfer(rec, "sts_to_agv", ev.equipment_id)
             case Stage.TO_YARD:
-                assert rec.agv_id is not None
-                self._transfer("agv_to_tp", rec.agv_id, rec.cid)
+                agv = rec.agv_id or ev.equipment_id
                 rec.agv_id = None  # AGV is free once the box is on the TP
                 self._enter(rec, Stage.STACKING)
+                self._transfer(rec, "agv_to_tp", agv)
             case Stage.STACKING:
                 self._enter(rec, Stage.DONE)
                 del self._open[rec.cid]
@@ -286,17 +299,36 @@ class Dispatcher:
         self._finish_job(ev)
         old = rec.yard_slot
         new = self.slot_provider.next_slot(rec.block, exclude=old)
-        if new is None:
+        if new is None or not self._valid_slot(new, rec.block):
+            if new is not None:
+                log.error("slot provider returned invalid slot %r for %s in block %s", new, rec.cid, rec.block)
             log.error("yard full for %s in block %s", rec.cid, rec.block)
-            rec.fail_reason = "YARD_FULL"
-            self._enter(rec, Stage.FAILED)
-            del self._open[rec.cid]
-            self._failed += 1
+            self._fail_order(rec, "YARD_FULL")
             return
         log.info("replan %s: slot %s occupied -> %s", rec.cid, old, new)
         rec.yard_slot = new
         self._replans += 1
 
-    def _transfer(self, kind: str, eid: str, cid: str) -> None:
-        if self.on_transfer is not None:
-            self.on_transfer(kind, eid, cid)
+    @staticmethod
+    def _valid_slot(slot: str, block: str) -> bool:
+        try:
+            loc = parse_location(slot)
+        except ValueError:
+            return False
+        return isinstance(loc, SlotLoc) and loc.block == block
+
+    def _fail_order(self, rec: _OrderRecord, reason: str) -> None:
+        rec.fail_reason = reason
+        rec.agv_id = None
+        self._enter(rec, Stage.FAILED)
+        self._open.pop(rec.cid, None)
+        self._failed += 1
+
+    def _transfer(self, rec: _OrderRecord, kind: str, eid: str) -> None:
+        if self.on_transfer is None:
+            return
+        try:
+            self.on_transfer(kind, eid, rec.cid)
+        except Exception:
+            log.exception("on_transfer(%s, %s, %s) raised; failing order", kind, eid, rec.cid)
+            self._fail_order(rec, "TRANSFER_ERROR")
