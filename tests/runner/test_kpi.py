@@ -5,7 +5,7 @@ from pathlib import Path
 from fake_port import FakeSlots, make_port
 from terminal_ecs.dispatcher import Dispatcher
 from terminal_model.types import Job, JobType, Position, State
-from terminal_sim.kpi import KpiCollector
+from terminal_runner.kpi import KpiCollector
 
 
 def setup(faults=None):

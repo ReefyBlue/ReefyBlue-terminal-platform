@@ -1,6 +1,6 @@
 """Scenario runner: World (sim) + Dispatcher (ecs) + TOS stub + KPI collector, in-process.
 
-    python -m terminal_sim.run scenarios/baseline.yaml --replications 10 --out out/
+    python -m terminal_runner.run scenarios/baseline.yaml --replications 10 --out out/
 """
 
 from __future__ import annotations
@@ -16,16 +16,16 @@ from pathlib import Path
 
 from terminal_ecs.dispatcher import Dispatcher
 from terminal_model.logging import configure_json_logging
-from terminal_tos_stub.allocator import SimpleSlotAllocator
-from terminal_tos_stub.generator import generate_workorders, prefill
-
 from terminal_sim.equipment.agv import AGV
-from terminal_sim.kpi import SAMPLE_INTERVAL_S, KpiCollector
 from terminal_sim.layout import Layout, load_layout
 from terminal_sim.scenario import Scenario, load_scenario
 from terminal_sim.world import World
+from terminal_tos_stub.allocator import SimpleSlotAllocator
+from terminal_tos_stub.generator import generate_workorders, prefill
 
-log = logging.getLogger("terminal_sim.run")
+from terminal_runner.kpi import SAMPLE_INTERVAL_S, KpiCollector
+
+log = logging.getLogger("terminal_runner.run")
 
 
 def _transfer_hook(world: World):
@@ -135,7 +135,7 @@ def run_replications(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="terminal_sim.run", description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(prog="terminal_runner.run", description=__doc__.splitlines()[0])
     parser.add_argument("scenario", type=Path)
     parser.add_argument("--replications", type=int, default=1)
     parser.add_argument("--out", type=Path, default=Path("out"))

@@ -6,8 +6,8 @@ import logging
 from pathlib import Path
 
 import pytest
+from terminal_runner.run import main, run_once
 from terminal_sim.layout import load_layout
-from terminal_sim.run import main, run_once
 from terminal_sim.scenario import load_scenario
 
 LAYOUT = Path(__file__).resolve().parents[2] / "terminal.yaml"
@@ -66,7 +66,7 @@ def test_cli_writes_csv_and_summary(small_yaml: Path, tmp_path: Path, capsys, re
     assert main([str(small_yaml), "--replications", "2", "--out", str(out), "--layout", str(LAYOUT)]) == 0
     captured = capsys.readouterr()
     assert captured.out.strip() == str(out / "small-summary.json")
-    runs = [json.loads(line) for line in captured.err.splitlines() if '"terminal_sim.run"' in line]
+    runs = [json.loads(line) for line in captured.err.splitlines() if '"terminal_runner.run"' in line]
     assert [(r["run_id"], r["seed"], r["timed_out"]) for r in runs] == [(0, 7, 0.0), (1, 8, 0.0)]
     with (out / "small.csv").open() as fh:
         rows = list(csv.reader(fh))

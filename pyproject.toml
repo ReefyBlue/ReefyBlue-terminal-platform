@@ -11,6 +11,7 @@ dev = [
     "terminal-sim",
     "terminal-ecs",
     "terminal-tos-stub",
+    "terminal-runner",
 ]
 
 [tool.uv.sources]
@@ -18,6 +19,7 @@ terminal-model = { workspace = true }
 terminal-sim = { workspace = true }
 terminal-ecs = { workspace = true }
 terminal-tos-stub = { workspace = true }
+terminal-runner = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -29,4 +31,5 @@ pythonpath = [
     "packages/sim/src",
     "packages/ecs/src",
     "packages/tos_stub/src",
+    "packages/runner/src",
 ]

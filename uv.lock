@@ -7,6 +7,7 @@ members = [
     "terminal-ecs",
     "terminal-model",
     "terminal-platform",
+    "terminal-runner",
     "terminal-sim",
     "terminal-tos-stub",
 ]
@@ -153,6 +154,7 @@ dev = [
     { name = "pytest" },
     { name = "terminal-ecs" },
     { name = "terminal-model" },
+    { name = "terminal-runner" },
     { name = "terminal-sim" },
     { name = "terminal-tos-stub" },
 ]
@@ -162,6 +164,26 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest" },
+    { name = "terminal-ecs", editable = "packages/ecs" },
+    { name = "terminal-model", editable = "packages/model" },
+    { name = "terminal-runner", editable = "packages/runner" },
+    { name = "terminal-sim", editable = "packages/sim" },
+    { name = "terminal-tos-stub", editable = "packages/tos_stub" },
+]
+
+[[package]]
+name = "terminal-runner"
+version = "0.1.0"
+source = { editable = "packages/runner" }
+dependencies = [
+    { name = "terminal-ecs" },
+    { name = "terminal-model" },
+    { name = "terminal-sim" },
+    { name = "terminal-tos-stub" },
+]
+
+[package.metadata]
+requires-dist = [
     { name = "terminal-ecs", editable = "packages/ecs" },
     { name = "terminal-model", editable = "packages/model" },
     { name = "terminal-sim", editable = "packages/sim" },
