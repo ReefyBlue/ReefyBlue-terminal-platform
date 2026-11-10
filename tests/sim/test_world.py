@@ -92,12 +92,18 @@ def test_idle_agv_parks_off_the_tp(world):
     assert not world.staging_cells & world.handover_cells
     agv = world.equipment["AGV-01"]
     agv.load("C1")
-    assert world.port.assign_job("AGV-01", _transport("TP/A/WS"))
+    assert world.port.assign_job("AGV-01", _transport("STS-01"))
     world.run(100)
-    assert agv.cell == (2, 5) and agv.state == State.IDLE  # waits: box still on board
-    assert world.transfer_agv_to_tp("AGV-01") == "C1"
-    world.run(300)
+    assert agv.cell in world.layout.sts[0].lane_cells and agv.state == State.IDLE  # waits: box on board
+    assert agv.unload() == "C1"  # taken by the crane
+    world.run(200)
     assert agv.state == State.IDLE and agv.cell in world.staging_cells
+    # At a TP the sim hands the box over on arrival; the empty AGV then parks.
+    assert world.port.assign_job("AGV-02", Job("J2", JobType.TRANSPORT, "C2", "STS-02", "TP/A/WS"))
+    world.equipment["AGV-02"].load("C2")
+    world.run(500)
+    assert world.handover.tp_box["A"] == ["C2"]
+    assert world.equipment["AGV-02"].cell in world.staging_cells
     assert world.grid.owner_of((2, 5)) is None
 
 

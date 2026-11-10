@@ -44,6 +44,7 @@ class AGV(Equipment):
         resolve_cell: Callable[[str], Cell],
         handover_cells: frozenset[Cell] = frozenset(),
         staging_cells: frozenset[Cell] = frozenset(),
+        on_arrival: Callable[[AGV], None] = lambda a: None,
     ) -> None:
         super().__init__(
             equipment_id=equipment_id,
@@ -59,6 +60,8 @@ class AGV(Equipment):
         self.resolve_cell = resolve_cell
         self.handover_cells = handover_cells  # STS lane / TP cells, cleared when idle
         self.staging_cells = staging_cells  # where an idle AGV parks
+        # Called on arrival at the goal of a TRANSPORT, before JOB_COMPLETED (box handover).
+        self.on_arrival = on_arrival
         self.cell: Cell = start_cell
         self.position = grid.center(start_cell)
         self.battery_pct = 100.0  # clamped at 0; no charging in Plan A
@@ -184,6 +187,7 @@ class AGV(Equipment):
                 return
             i += 1
         self.route = []
+        self.on_arrival(self)
         self.complete_job()
 
     def _step(self, nxt: Cell):

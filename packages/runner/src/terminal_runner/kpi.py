@@ -6,8 +6,9 @@ locations and assignment times:
 - ``agv_wait_sts_s_mean``: AGV arrival in an STS lane (TRANSPORT to ``STS-..``
   completed) until that order's crane job (DISCHARGE/LOAD) completed.
 - ``agv_wait_tp_s_mean``: LOAD orders, AGV arrival at the TP (empty TRANSPORT to
-  ``TP/..`` completed) until the box is on the AGV (``tp_to_agv`` transfer, reported
-  via ``observe_transfer``).
+  ``TP/..`` completed) until the assignment of that AGV's next TRANSPORT (the leg to
+  the STS, per ``job_log``). The sim hands the box over on arrival, so this is the
+  time the loaded AGV waits on the TP for the ECS.
 - ``agv_travel_s_mean``: TRANSPORT duration, assignment until JOB_COMPLETED.
 """
 
@@ -53,10 +54,8 @@ class KpiCollector:
         self._busy_obs: dict[Kind, int] = defaultdict(int)
         self._total_obs: dict[Kind, int] = defaultdict(int)
         self._sts_arrival: dict[str, float] = {}  # container -> AGV arrived in the STS lane
-        self._tp_arrival: dict[str, float] = {}  # container -> AGV arrived at the TP (LOAD)
-        self._tp_pickup: dict[str, float] = {}  # container -> box put on the AGV at the TP
+        self._tp_arrival: dict[str, float] = {}  # job id of an empty leg to a TP -> arrival
         self._wait_sts: list[float] = []
-        self._wait_tp: list[float] = []
         self._travel: list[float] = []
         port.subscribe(self._on_event)
 
@@ -79,20 +78,22 @@ class KpiCollector:
         if job.to_loc.startswith("STS-"):
             self._sts_arrival[job.container_id] = ev.sim_time
         elif job.to_loc.startswith("TP/") and job.from_loc.startswith("AGV-"):  # empty leg of a LOAD
-            self._tp_arrival[job.container_id] = ev.sim_time
-            self._pair_tp(job.container_id)
+            self._tp_arrival[ev.job_id] = ev.sim_time
 
-    def observe_transfer(self, kind: str, equipment_id: str, container_id: str) -> None:
-        """Box hand-over reported by the dispatcher (chain it into ``on_transfer``)."""
-        if kind == "tp_to_agv":
-            self._tp_pickup[container_id] = self.port.now()
-            self._pair_tp(container_id)
-
-    def _pair_tp(self, cid: str) -> None:
-        # The dispatcher reports tp_to_agv while handling the arrival, i.e. possibly
-        # before this collector sees that JOB_COMPLETED: pair them in either order.
-        if cid in self._tp_arrival and cid in self._tp_pickup:
-            self._wait_tp.append(max(0.0, self._tp_pickup.pop(cid) - self._tp_arrival.pop(cid)))
+    def _tp_wait(self) -> list[float]:
+        """Pair each TP arrival of a LOAD leg with the next TRANSPORT assigned to that
+        AGV (``job_log`` is in assignment order); unpaired arrivals are left out."""
+        waits: list[float] = []
+        arrived: dict[str, float] = {}  # AGV -> arrival at the TP, awaiting its next leg
+        for job_id, logged in self.dispatcher.job_log.items():
+            if logged.job.type is not JobType.TRANSPORT:
+                continue
+            agv = logged.equipment_id
+            if (t := arrived.pop(agv, None)) is not None:
+                waits.append(max(0.0, logged.assigned_at - t))
+            if (t := self._tp_arrival.get(job_id)) is not None:
+                arrived[agv] = t
+        return waits
 
     def sample(self) -> None:
         committed = self.dispatcher.committed_agvs()
@@ -120,7 +121,7 @@ class KpiCollector:
         kpis["moves_per_hour_total"] = sum(per_sts.values())
         kpis.update(per_sts)
         kpis["agv_wait_sts_s_mean"] = _mean(self._wait_sts)
-        kpis["agv_wait_tp_s_mean"] = _mean(self._wait_tp)
+        kpis["agv_wait_tp_s_mean"] = _mean(self._tp_wait())
         kpis["agv_travel_s_mean"] = _mean(self._travel)
         for kind in (Kind.STS, Kind.AGV, Kind.ASC):
             kpis[f"utilisation_{kind.value}"] = self._utilisation(kind)

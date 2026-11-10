@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fake_port import FakeSlots, make_port
 from terminal_ecs.dispatcher import Dispatcher
+from terminal_ecs.orders import LoggedJob
 from terminal_ecs.workorders import WorkOrder
 from terminal_model.types import Job, JobType, State
 from terminal_runner.kpi import KpiCollector
@@ -78,12 +79,12 @@ def test_agv_kpis_from_discharge_events():
 
 def test_agv_kpis_from_load_events():
     port, disp, kpi = setup()
-    disp.on_transfer = kpi.observe_transfer
+    assert disp.on_transfer is None  # no hooks: the TP wait comes from the job log
     disp.submit([_load()])
     port.advance(10)
     port.complete("ASC-A")  # box at the TP at t=10: AGV-01 sent
     port.advance(30)
-    port.complete("AGV-01")  # at the TP at t=40, box taken at once (tp_to_agv)
+    port.complete("AGV-01")  # at the TP at t=40; leg to the STS assigned at once
     port.advance(50)
     port.complete("AGV-01")  # in the lane at t=90
     port.advance(20)
@@ -93,15 +94,44 @@ def test_agv_kpis_from_load_events():
     assert (k["agv_wait_tp_s_mean"], k["agv_wait_sts_s_mean"], k["agv_travel_s_mean"]) == (0.0, 20.0, 40.0)
 
 
-def test_agv_wait_at_tp_until_pickup():
-    port, disp, kpi = setup()
-    disp.submit([_load()])
-    port.complete("ASC-A")
+class _LogOnly:
+    """Dispatcher stand-in: only the job log (assignment times are set by the test)."""
+
+    def __init__(self):
+        self.job_log: dict[str, LoggedJob] = {}
+
+    def assign(self, port, eid: str, job: Job) -> None:
+        self.job_log[job.job_id] = LoggedJob(job, eid, port.now())
+        assert port.assign_job(eid, job)
+
+
+def test_agv_wait_at_tp_until_next_transport_assigned():
+    port = make_port()
+    disp = _LogOnly()
+    kpi = KpiCollector(port, disp)
+    disp.assign(port, "AGV-01", Job("L1-TRANSPORT-1", JobType.TRANSPORT, "L1", "AGV-01", "TP/A/WS"))
     port.advance(30)
     port.complete("AGV-01")  # at the TP at t=30
-    port.advance(15)
-    kpi.observe_transfer("tp_to_agv", "AGV-01", "L1")  # box on the AGV 15 s later
-    assert kpi.finish(45.0)["agv_wait_tp_s_mean"] == 15.0
+    port.advance(5)
+    disp.assign(port, "AGV-02", Job("X-TRANSPORT-1", JobType.TRANSPORT, "X", "AGV-02", "TP/B/WS"))  # other AGV
+    port.advance(10)
+    disp.assign(port, "AGV-01", Job("L1-TRANSPORT-2", JobType.TRANSPORT, "L1", "TP/A/WS", "STS-01"))  # t=45
+    port.advance(50)
+    port.complete("AGV-01")
+    assert kpi._tp_wait() == [15.0]
+
+
+def test_agv_wait_at_tp_ignores_discharge_legs_and_unpaired_arrivals():
+    port = make_port()
+    disp = _LogOnly()
+    kpi = KpiCollector(port, disp)
+    disp.assign(port, "AGV-01", Job("D1-TRANSPORT-1", JobType.TRANSPORT, "D1", "STS-01", "TP/A/WS"))
+    port.advance(30)
+    port.complete("AGV-01")  # loaded leg of a DISCHARGE: not a TP wait
+    disp.assign(port, "AGV-01", Job("L1-TRANSPORT-1", JobType.TRANSPORT, "L1", "AGV-01", "TP/A/WS"))
+    port.advance(30)
+    port.complete("AGV-01")  # at the TP, but no next transport yet
+    assert kpi._tp_wait() == []
 
 
 def test_agv_utilisation_counts_committed_idle_agvs():

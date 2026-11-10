@@ -19,7 +19,6 @@ from terminal_ecs.workorders import WorkOrder
 from terminal_model.locations import parse_location
 from terminal_model.logging import configure_json_logging
 from terminal_model.types import JobType
-from terminal_sim.equipment.agv import AGV
 from terminal_sim.layout import Layout, load_layout
 from terminal_sim.scenario import Scenario, load_scenario
 from terminal_sim.world import World
@@ -56,33 +55,6 @@ def prefill(yard: Yard, orders: list[WorkOrder]) -> None:
             yard.occupy(parse_location(order.yard_slot), order.container_id)
 
 
-def _transfer_hook(world: World):
-    def agv(agv_id: str) -> AGV:
-        eq = world.equipment[agv_id]
-        if not isinstance(eq, AGV):
-            raise TypeError(f"{agv_id} is not an AGV")
-        return eq
-
-    def on_transfer(kind: str, eid: str, cid: str) -> None:
-        if kind == "sts_to_agv":
-            if world.transfer_sts_to_agv(eid, cid) is None:
-                raise RuntimeError(f"no AGV in lane of {eid} for {cid}")
-        elif kind == "agv_to_tp":
-            got = world.transfer_agv_to_tp(eid)
-            if got != cid:
-                raise RuntimeError(f"{eid} unloaded {got} at TP, expected {cid}")
-        elif kind == "tp_to_agv":
-            world.transfer_tp_to_agv(eid, cid)
-        elif kind == "agv_to_sts":
-            got = agv(eid).unload()
-            if got != cid:
-                raise RuntimeError(f"{eid} unloaded {got} at STS, expected {cid}")
-        else:
-            raise ValueError(f"unknown transfer kind {kind!r}")
-
-    return on_transfer
-
-
 def run_once(scenario: Scenario, layout: Layout, seed: int) -> dict[str, float]:
     """One run, stepped per KPI sample interval until all orders are DONE/FAILED or
     ``duration_s`` (hard cap). Rates are per simulated hour actually run."""
@@ -91,14 +63,8 @@ def run_once(scenario: Scenario, layout: Layout, seed: int) -> dict[str, float]:
     allocator = make_allocator(layout)
     orders = make_workorders(scenario, layout, allocator, random.Random(seed))
     dispatcher = Dispatcher(world.port, allocator)
+    # No on_transfer hook: the sim moves boxes itself (World.handover).
     kpi = KpiCollector(world.port, dispatcher, faults_total=world.faults_total)
-    move_box = _transfer_hook(world)
-
-    def on_transfer(kind: str, eid: str, cid: str) -> None:
-        move_box(kind, eid, cid)
-        kpi.observe_transfer(kind, eid, cid)
-
-    dispatcher.on_transfer = on_transfer
 
     prefill(world.yard, orders)
     dispatcher.submit(orders)
