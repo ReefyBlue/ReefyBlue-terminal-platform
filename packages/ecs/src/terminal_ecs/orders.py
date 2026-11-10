@@ -45,6 +45,8 @@ PRE_CRANE = frozenset(
 )
 # Stages that wait for an AGV to be sent (discharge: to the STS; load: to the TP).
 NEEDS_AGV = frozenset({Stage.AWAIT_AGV, Stage.AT_TP})
+# A FIFO-head LOAD in these stages will need an AGV; non-head orders keep one free for it.
+HEAD_NEEDS_AGV_LATER = frozenset({Stage.AWAIT_ASC, Stage.UNSTACKING, Stage.AT_TP})
 # The TP of a block holds one box: no new STACK_OUT while one of these exists for the block.
 TP_BUSY = frozenset({Stage.UNSTACKING, Stage.AT_TP, Stage.AGV_TO_TP})
 PENDING = frozenset({Stage.AWAIT_AGV, Stage.AWAIT_ASC})

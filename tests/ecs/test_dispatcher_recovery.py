@@ -3,7 +3,7 @@ from __future__ import annotations
 from fake_port import FakePort, FakeSlots, make_port
 from terminal_ecs.dispatcher import Dispatcher
 from terminal_ecs.workorders import WorkOrder
-from terminal_model.types import JobType, Position, State
+from terminal_model.types import Job, JobType, Position, State
 
 
 def discharge(cid: str, slot: str = "A/1/1/1", sts: str = "STS-01") -> WorkOrder:
@@ -124,10 +124,12 @@ def test_box_on_agv_stays_bound():
 
     port.fail("AGV-01", "BLOCKED")
     assert d.status()["replans"] == 1
+    assert d.status()["bound"] == 1  # box on an excluded AGV
     assert jobs_of(port, "AGV-02") == []  # never moved to another AGV
     assert jobs_of(port, "AGV-01") == ["C1-TRANSPORT-1", "C1-TRANSPORT-2"]  # excluded until IDLE
 
     port.set_state("AGV-01", State.IDLE)
+    assert d.status()["bound"] == 0
     eid, job = port.calls[-1]
     assert (eid, job.job_id, job.to_loc) == ("AGV-01", "C1-TRANSPORT-3", "TP/A/WS")
     port.complete("AGV-01")
@@ -225,3 +227,38 @@ def test_rolled_back_order_keeps_its_position():
     port.fail("ASC-A", "FAULT")  # C1 back to AWAIT_ASC, next to the waiting C2
     port.set_state("ASC-A", State.IDLE)
     assert jobs_of(port, "ASC-A") == ["C1-STACK_OUT-1", "C1-STACK_OUT-2"]
+
+
+def test_head_load_is_not_starved_of_agvs():
+    # Reviewer repro: two AGVs, head LOAD still unstacking; later discharges must leave one AGV free.
+    port = make_port(n_agv=2)
+    d = Dispatcher(port, FakeSlots())
+    d.submit([load("C1", slot="A/5/1/1"), discharge("C2", slot="A/1/1/1"), discharge("C3", slot="A/1/1/2")])
+    transports = [(e, j.job_id) for e, j in port.calls if j.type is JobType.TRANSPORT]
+    assert transports == [("AGV-01", "C2-TRANSPORT-1")]  # AGV-02 kept in reserve for C1
+    port.complete("ASC-A")  # C1 at the TP
+    port.complete("AGV-01")  # C2 parks in the lane behind C1
+    assert (port.calls[-1][0], port.calls[-1][1].job_id) == ("AGV-02", "C1-TRANSPORT-1")
+
+    for _ in range(40):  # drive to completion: complete whatever is running
+        busy = sorted({e for e, j in port.calls if j.job_id in d.jobs})
+        if not busy:
+            break
+        port.complete(busy[0])
+    assert d.completed[0] == "C1"
+    assert sorted(d.completed) == ["C1", "C2", "C3"]
+    assert d.status()["active_jobs"] == 0
+
+
+def test_crane_does_not_serve_faulted_lane_agv():
+    port = make_port()
+    port.assign_job("STS-01", Job("X", JobType.DISCHARGE, "X", "VESSEL", "STS-01"))  # crane busy
+    port.calls.clear()
+    d = Dispatcher(port, FakeSlots())
+    d.submit([discharge("C1")])
+    port.complete("AGV-01")  # C1 AT_STS, waits for the crane
+    port.set_state("AGV-01", State.FAULT)  # lane AGV faults (no running job)
+    port.complete("STS-01")  # crane free
+    assert jobs_of(port, "STS-01") == []
+    port.set_state("AGV-01", State.IDLE)
+    assert jobs_of(port, "STS-01") == ["C1-DISCHARGE-1"]

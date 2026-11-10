@@ -36,6 +36,7 @@ from terminal_model.port import EquipmentEvent, EquipmentPort, EventKind
 from terminal_model.types import Job, JobType, Kind, Position, State
 
 from terminal_ecs.orders import (
+    HEAD_NEEDS_AGV_LATER,
     LANE_STAGES,
     NEEDS_AGV,
     PENDING,
@@ -131,6 +132,13 @@ class Dispatcher:
             "done": len(self.completed),
             "failed": self._failed,
             "replans": self._replans,
+            # orders stuck with their box on an excluded/quarantined AGV
+            "bound": sum(
+                r.stage in (Stage.TO_YARD, Stage.TO_STS)
+                and r.current_job_id is None
+                and r.agv_id in self._excluded | self._quarantined
+                for r in self._open.values()
+            ),
             "equipment": {eid: self.port.snapshot(eid).state for eid in sorted(self.port.equipment_ids())},
         }
 
@@ -166,7 +174,13 @@ class Dispatcher:
         # 1. Crane: each idle STS serves only its FIFO head (DISCHARGE or LOAD).
         for sts in self._sts:
             head = self._fifo_head(sts)
-            if head and head.current_job_id is None and head.stage in _CRANE_JOB and self._available(sts):
+            if (
+                head
+                and head.current_job_id is None
+                and head.stage in _CRANE_JOB
+                and head.agv_id not in self._excluded | self._quarantined
+                and self._available(sts)
+            ):
                 jtype, stage = _CRANE_JOB[head.stage]
                 if jtype is JobType.DISCHARGE:
                     job = Job(head.next_job_id(jtype), jtype, head.cid, "VESSEL", sts)
@@ -223,8 +237,14 @@ class Dispatcher:
         for rec in mine:  # submit order
             if rec.stage not in NEEDS_AGV or rec.current_job_id is not None:
                 continue
-            if in_lane >= self.lookahead_per_sts and rec is not head:
-                return
+            if rec is not head:
+                if in_lane >= self.lookahead_per_sts:
+                    return
+                # A head LOAD will need an AGV later: keep one free for it, or the
+                # non-head AGVs park behind it in the lane and it starves.
+                head_waits = head is not None and head.agv_id is None and head.stage in HEAD_NEEDS_AGV_LATER
+                if head_waits and len(self._free_agvs()) < 2:
+                    return
             if not self._send_agv(rec):
                 return  # no AGV available
             in_lane += 1
@@ -234,13 +254,8 @@ class Dispatcher:
             dest, target, stage = rec.order.sts_id, rec.order.sts_id, Stage.AGV_EN_ROUTE
         else:  # AT_TP; the TP has no position of its own, its ASC stands at the block
             dest, target, stage = rec.tp, self._asc_by_block[rec.block], Stage.AGV_TO_TP
-        reserved = {r.agv_id for r in self._open.values() if r.agv_id is not None}
         target_pos = self.port.snapshot(target).position
-        candidates = []
-        for agv in self._agvs:
-            if agv in reserved or not self._available(agv):
-                continue
-            candidates.append((self.port.snapshot(agv).position.distance_to(target_pos), agv))
+        candidates = [(self.port.snapshot(agv).position.distance_to(target_pos), agv) for agv in self._free_agvs()]
         for _, agv in sorted(candidates):
             job = Job(rec.next_job_id(JobType.TRANSPORT), JobType.TRANSPORT, rec.cid, agv, dest)
             rec.agv_id = agv
@@ -248,6 +263,10 @@ class Dispatcher:
                 return True
             rec.agv_id = None
         return False
+
+    def _free_agvs(self) -> list[str]:
+        reserved = {r.agv_id for r in self._open.values() if r.agv_id is not None}
+        return [agv for agv in self._agvs if agv not in reserved and self._available(agv)]
 
     def _issue(self, eid: str, rec: OrderRecord, job: Job, stage: Stage) -> bool:
         # Book-keep before assign_job: the port may emit events synchronously.
