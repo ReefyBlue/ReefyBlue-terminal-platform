@@ -90,7 +90,7 @@ Nieuwe dependencies: `fastapi`, `uvicorn[standard]`, `httpx`, `websockets` (test
 
 - `tests/kpi`: bestaande KPI-tests verhuizen; `snapshot` verandert de collector niet (twee aanroepen gelijk; `finish` daarna gelijk aan `snapshot`).
 - `tests/ecs_service` met de bestaande `fake_port`-fixture: lus doet tick/sample op 60 s-grenzen en drain tussendoor; `ReconnectingPort` wisselt na `ConnectionError` naar een nieuwe port en abonnees ontvangen weer events; WS-broadcaster dropt bij volle wachtrij; API via `httpx.AsyncClient(transport=ASGITransport(app))`: alle endpoints, 422-paden (type, slot, dubbele container, onbekende STS), 503 zonder verbinding, WS-handshake levert eerst `status`.
-- Equivalentie: `run_once_http` tegen een `EcsCore` op een `SimEquipmentPort` (World in-process, app in dezelfde testprocess via ASGITransport; de test beweegt de World per 60 s en roept `core.step()` aan, prefill via `World.yard`) levert exact de KPI's van `run_once` voor baseline seed 1 (fixture `tests/e2e/fixtures/plan_a_baseline_seed1.json`). Dit pint vast dat de service-lus de runner-lus nabootst.
+- Equivalentie: een `EcsCore` op `World.port` (in-process, geen OPC UA) met `create_app` achter een `TestClient`; de test POST de baseline-orders (seed 1), beweegt de World per 60 s en roept `core.step()` aan tot `open == 0`, en vergelijkt `GET /kpis` met `tests/e2e/fixtures/plan_a_baseline_seed1.json`. Dit pint vast dat de service-lus de runner-lus nabootst. `run_once_http` zelf wordt getest tegen een gescripte ECS (`httpx.MockTransport`) en in de e2e-test.
 - `e2e_opcua`: sim + gateway + ecs-service (subprocess) + runner `--port http`, 20 containers, 1 STS, 2 AGV, voltooit; `GET /status` toont `open == 0`.
 - Architectuurtest groen met de nieuwe regels; ECS-hash groen.
 
