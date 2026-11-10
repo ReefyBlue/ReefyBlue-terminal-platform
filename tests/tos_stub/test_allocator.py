@@ -72,3 +72,16 @@ def test_unknown_block_raises(layout):
 def test_plain_block_dimensions():
     alloc = SimpleSlotAllocator({"X": (1, 1, 2), "Y": (1, 1, 1)})
     assert [alloc.next_slot("X") for _ in range(4)] == ["X/1/1/1", "X/1/1/2", "Y/1/1/1", None]
+
+
+def test_occupy_marks_slot_used():
+    a = SimpleSlotAllocator({"A": (2, 1, 1)})
+    a.occupy("A/1/1/1")
+    a.occupy("A/1/1/1")
+    assert a.next_slot("A") == "A/2/1/1"
+
+
+def test_occupy_unknown_block_raises():
+    a = SimpleSlotAllocator({"A": (2, 1, 1)})
+    with pytest.raises(KeyError):
+        a.occupy("Z/1/1/1")

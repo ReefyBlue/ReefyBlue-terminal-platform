@@ -42,3 +42,7 @@ class SimpleSlotAllocator:
 
     def release(self, slot: str) -> None:
         self._issued[slot.split("/", 1)[0]].discard(slot)
+
+    def occupy(self, slot: str) -> None:
+        """Mark ``slot`` as used (idempotent). Raises KeyError for an unknown block."""
+        self._issued[slot.split("/", 1)[0]].add(slot)
