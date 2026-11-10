@@ -137,3 +137,27 @@ def test_unreachable_goal_fails():
     assert len(failed) == 1 and failed[0].reason == "NO_ROUTE"
     assert a.state == State.IDLE
     assert rig.owned_by("AGV-01") == [(1, 0)]
+
+
+def test_plans_around_parked_agv():
+    rig = Rig()
+    rig.agv(2, (1, 2))
+    a = rig.agv(1, (0, 2))
+    assert a.assign_job(transport("TP/A/WS"))
+    rig.env.run(till=100)
+    assert a.cell == (2, 5)
+    assert len(of_kind(rig, EventKind.JOB_COMPLETED)) == 1
+
+
+def test_replans_when_blocked_mid_route():
+    rig = Rig(locs={"X": (8, 2)})
+    a = rig.agv(1, (0, 2))
+    assert a.assign_job(transport("X"))
+    rig.env.run(till=5)
+    assert a.cell == (1, 2)
+    rig.agv(2, (4, 2))  # parks ahead on the planned route
+    rig.env.run(till=25)
+    assert a.cell == (3, 2) and a.state == State.BUSY  # still waiting, < 30 s
+    rig.env.run(till=200)
+    assert a.cell == (8, 2)
+    assert len(of_kind(rig, EventKind.JOB_COMPLETED)) == 1

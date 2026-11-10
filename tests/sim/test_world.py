@@ -1,4 +1,3 @@
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,16 +16,6 @@ def world():
     )
 
 
-@pytest.fixture
-def solo_world():
-    # AGV-01 starts boxed in by AGV-02 on the one-way row 2 with the full fleet,
-    # so route tests use a single-AGV scenario.
-    return World(
-        load_layout(Path("terminal.yaml")),
-        replace(load_scenario(Path("scenarios/baseline.yaml")), n_agv=1),
-    )
-
-
 def _transport(to_loc):
     return Job("J1", JobType.TRANSPORT, "C1", "STS-01", to_loc)
 
@@ -39,8 +28,7 @@ def test_world_builds_from_baseline(world):
     assert port.now() == 0
 
 
-def test_port_assign_and_event_roundtrip(solo_world):
-    world = solo_world
+def test_port_assign_and_event_roundtrip(world):
     events = []
     world.port.subscribe(events.append)
     assert world.port.assign_job("AGV-01", _transport("TP/A/WS"))
@@ -72,8 +60,7 @@ def test_resolve_cell(world):
         world.resolve_cell("NOWHERE")
 
 
-def test_transfer_sts_to_agv_and_agv_to_tp(solo_world):
-    world = solo_world
+def test_transfer_sts_to_agv_and_agv_to_tp(world):
     assert world.transfer_sts_to_agv("STS-01", "C1") is None  # no AGV at the lane yet
     world.port.assign_job("AGV-01", _transport("STS-01"))
     world.run(300)

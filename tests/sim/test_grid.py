@@ -72,3 +72,21 @@ def test_out_of_grid_raises():
             g.shortest_path(bad, (0, 0))
         with pytest.raises(ValueError):
             g.shortest_path((0, 0), bad)
+
+
+def test_shortest_path_respects_avoid():
+    g = make()
+    assert g.shortest_path((0, 2), (3, 2)) == [(0, 2), (1, 2), (2, 2), (3, 2)]
+    path = g.shortest_path((0, 2), (3, 2), avoid={(1, 2)})
+    assert path and (1, 2) not in path and path[0] == (0, 2) and path[-1] == (3, 2)
+    # start and goal are always allowed
+    assert g.shortest_path((0, 2), (1, 2), avoid={(0, 2), (1, 2)}) == [(0, 2), (1, 2)]
+
+
+def test_reserved_by_others_excludes_own_cells():
+    g = make()
+    g.try_reserve((1, 1), "AGV-01")
+    g.try_reserve((2, 2), "AGV-02")
+    g.try_reserve((3, 3), "AGV-02")
+    assert g.reserved_by_others("AGV-01") == {(2, 2), (3, 3)}
+    assert g.reserved_by_others("AGV-03") == {(1, 1), (2, 2), (3, 3)}

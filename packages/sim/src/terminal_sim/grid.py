@@ -32,7 +32,9 @@ class Grid:
         candidates = [(x + 1 if y % 2 == 0 else x - 1, y), (x, y - 1), (x, y + 1)]
         return [n for n in candidates if 0 <= n[0] < self.cols and 0 <= n[1] < self.rows]
 
-    def shortest_path(self, start: Cell, goal: Cell) -> list[Cell]:
+    def shortest_path(
+        self, start: Cell, goal: Cell, *, avoid: frozenset[Cell] | set[Cell] = frozenset()
+    ) -> list[Cell]:
         self._check(start)
         self._check(goal)
         if start == goal:
@@ -43,7 +45,7 @@ class Grid:
         while queue:
             cur = queue.popleft()
             for n in self.neighbors(cur):
-                if n in seen:
+                if n in seen or (n in avoid and n != goal):
                     continue
                 seen.add(n)
                 prev[n] = cur
@@ -68,6 +70,9 @@ class Grid:
         self._check(c)
         if self._owners.get(c) == owner:
             del self._owners[c]
+
+    def reserved_by_others(self, owner: str) -> set[Cell]:
+        return {c for c, o in self._owners.items() if o != owner}
 
     def owner_of(self, c: Cell) -> str | None:
         return self._owners.get(c)

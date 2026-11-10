@@ -15,6 +15,7 @@ SPEED_LOADED_MPS = 4.0
 BATTERY_PCT_PER_M = 0.02
 ENERGY_KWH_PER_KM = 1.2
 RESERVE_RETRY_S = 1.0
+REPLAN_AFTER_S = 30.0
 
 
 class AGV(Equipment):
@@ -83,18 +84,35 @@ class AGV(Equipment):
         self._release_pending()
         self.route = []
 
+    def _plan(self, goal: Cell) -> list[Cell]:
+        route = self.grid.shortest_path(
+            self.cell, goal, avoid=self.grid.reserved_by_others(self.equipment_id)
+        )
+        return route or self.grid.shortest_path(self.cell, goal)
+
     def process(self):
         job = self.current_job
         assert job is not None
         goal = self.resolve_cell(job.to_loc)
-        route = self.grid.shortest_path(self.cell, goal)
+        route = self._plan(goal)
         if not route:
             self.fail_job("NO_ROUTE")
             return
         self.route = route
-        for nxt in route[1:]:
+        i = 1
+        while i < len(route):
+            nxt = route[i]
+            waited = 0.0
             while not self.grid.try_reserve(nxt, self.equipment_id):
+                if waited >= REPLAN_AFTER_S and nxt != goal:
+                    waited = 0.0
+                    new = self._plan(goal)
+                    if len(new) > 1:
+                        route, i, nxt = new, 1, new[1]
+                        self.route = route
+                        continue
                 yield self.hold(RESERVE_RETRY_S)
+                waited += RESERVE_RETRY_S
             self._pending = nxt
             yield self.hold(self.grid.cell_m / self.speed_mps)
             prev = self.cell
@@ -106,6 +124,7 @@ class AGV(Equipment):
             self.energy_kwh += ENERGY_KWH_PER_KM * self.grid.cell_m / 1000
             if self.current_job is None:  # failed/cancelled meanwhile
                 return
+            i += 1
         self.route = []
         self.complete_job()
 
