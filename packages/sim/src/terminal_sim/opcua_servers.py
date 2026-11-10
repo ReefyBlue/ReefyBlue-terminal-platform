@@ -116,11 +116,25 @@ class ControlServer:
         except (ValueError, KeyError, TypeError) as e:
             log.warning("PrefillYard rejected: %s", e)
             return False
+        yard = self.world.yard
+        placed: list[SlotLoc] = []
         try:
+            slots: set[SlotLoc] = set()
+            cids: set[str] = set()
+            for loc, cid in parsed:  # validate the whole batch before touching the yard
+                if not yard.is_free(loc) or loc in slots:
+                    raise ValueError("SLOT_OCCUPIED")
+                if yard.locate(cid) is not None or cid in cids:
+                    raise ValueError("CONTAINER_PLACED")
+                slots.add(loc)
+                cids.add(cid)
             for loc, cid in parsed:
-                self.world.yard.occupy(loc, cid)
-        except ValueError as e:
-            log.warning("PrefillYard rejected: %s", e)
+                yard.occupy(loc, cid)
+                placed.append(loc)
+        except (ValueError, KeyError) as e:
+            for loc in placed:
+                yard.release(loc)
+            log.warning("PrefillYard rejected: %r", e)
             return False
         return True
 

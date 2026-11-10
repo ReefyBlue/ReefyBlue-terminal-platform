@@ -21,7 +21,7 @@ n_agv: 2
 n_containers: 4
 share_40ft: 0.5
 discharge_share: 1.0
-speed_factor: 200
+speed_factor: 100
 duration_s: 1000
 """
 
@@ -62,8 +62,8 @@ async def test_sim_time_advances_with_pacing(tmp_path):
             t0 = await (await obj.get_child(f"{idx}:SimTime")).read_value()
             await asyncio.sleep(0.5)
             t1 = await (await obj.get_child(f"{idx}:SimTime")).read_value()
-            assert 60 <= t1 - t0 <= 140
-            assert await (await obj.get_child(f"{idx}:SpeedFactor")).read_value() == 200.0
+            assert 25 <= t1 - t0 <= 75
+            assert await (await obj.get_child(f"{idx}:SpeedFactor")).read_value() == 100.0
         finally:
             await c.disconnect()
     finally:
@@ -91,6 +91,40 @@ async def test_prefill_yard_occupies(tmp_path):
     finally:
         for s in [*svc.servers.values(), svc.control]:
             await s.stop()
+
+
+async def test_prefill_yard_is_atomic(tmp_path):
+    port = _free_base_port()
+    svc = SimService(load_scenario(_scenario(tmp_path)), load_layout(ROOT / "terminal.yaml"),
+                     base_port=port, host="127.0.0.1")
+    for s in [*svc.servers.values(), svc.control]:
+        await s.start()
+    try:
+        c, idx, obj = await _control(port)
+        try:
+            dup_slot = '[{"slot":"A/1/1/1","container_id":"D1"},{"slot":"A/1/1/1","container_id":"D2"}]'
+            assert await obj.call_method(f"{idx}:PrefillYard", dup_slot) is False
+            dup_cid = '[{"slot":"A/1/1/1","container_id":"D1"},{"slot":"A/1/1/2","container_id":"D1"}]'
+            assert await obj.call_method(f"{idx}:PrefillYard", dup_cid) is False
+            bad_block = '[{"slot":"A/1/1/1","container_id":"D1"},{"slot":"Z/1/1/1","container_id":"D2"}]'
+            assert await obj.call_method(f"{idx}:PrefillYard", bad_block) is False
+            out_of_range = '[{"slot":"A/1/1/1","container_id":"D1"},{"slot":"A/999/1/1","container_id":"D2"}]'
+            assert await obj.call_method(f"{idx}:PrefillYard", out_of_range) is False
+            for cid in ("D1", "D2"):
+                assert svc.world.yard.locate(cid) is None
+        finally:
+            await c.disconnect()
+    finally:
+        for s in [*svc.servers.values(), svc.control]:
+            await s.stop()
+
+
+def test_too_many_equipment_raises(tmp_path, monkeypatch):
+    from terminal_sim import serve
+    monkeypatch.setattr(serve, "MAX_EQUIPMENT", 2)
+    import pytest
+    with pytest.raises(ValueError):
+        SimService(load_scenario(_scenario(tmp_path)), load_layout(ROOT / "terminal.yaml"))
 
 
 def test_sigterm_exits_cleanly(tmp_path):

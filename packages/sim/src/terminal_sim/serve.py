@@ -31,7 +31,10 @@ class SimService:
     ) -> None:
         self.scenario = scenario
         self.world = World(layout, scenario)
-        assert len(self.world.equipment) <= MAX_EQUIPMENT
+        if len(self.world.equipment) > MAX_EQUIPMENT:
+            raise ValueError(
+                f"{len(self.world.equipment)} equipment exceeds the {MAX_EQUIPMENT} port slots"
+            )
         self.servers: dict[str, EquipmentServer] = {
             eid: EquipmentServer(eq, port=base_port + i, host=host)
             for i, (eid, eq) in enumerate(self.world.equipment.items())
