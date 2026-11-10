@@ -27,6 +27,7 @@ class STS(Equipment):
         env: salabim.Environment,
         lane_cells: tuple[Cell, Cell],
         grid: Grid,
+        on_discharge_done: Callable[[STS], bool] = lambda s: True,
     ) -> None:
         super().__init__(
             equipment_id=equipment_id,
@@ -38,6 +39,9 @@ class STS(Equipment):
         )
         self.lane_cells = lane_cells
         self.grid = grid
+        # Called when a DISCHARGE cycle ends, before JOB_COMPLETED: puts the box on the
+        # AGV sent for it; False (no such AGV in the lane) fails the job instead.
+        self.on_discharge_done = on_discharge_done
 
     def accepts(self, job: Job) -> bool:
         return job.type in (JobType.DISCHARGE, JobType.LOAD)
@@ -55,6 +59,9 @@ class STS(Equipment):
         if self.current_job is None:  # failed/cancelled meanwhile
             return
         self.energy_kwh += ENERGY_PER_MOVE_KWH
+        if self.current_job.type is JobType.DISCHARGE and not self.on_discharge_done(self):
+            self.fail_job("NO_AGV_IN_LANE")
+            return
         self.complete_job()
 
     def extra(self) -> dict:

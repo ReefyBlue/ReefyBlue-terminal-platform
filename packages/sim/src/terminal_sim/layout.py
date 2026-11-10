@@ -37,6 +37,8 @@ class Layout:
     sts: list[StsSpec]
     blocks: list[BlockSpec]
     agv_start_cells: list[Cell]
+    opcua_base_port: int = 48400
+    opcua_host: str = "localhost"
 
 
 def _cell(v) -> Cell:
@@ -65,6 +67,7 @@ def load_layout(path: Path) -> Layout:
         )
         for b in raw["blocks"]
     ]
+    opcua = raw.get("opcua") or {}
     return Layout(
         quay_length_m=float(raw["quay"]["length_m"]),
         grid_cell_m=float(raw["grid"]["cell_m"]),
@@ -73,4 +76,6 @@ def load_layout(path: Path) -> Layout:
         sts=sts,
         blocks=blocks,
         agv_start_cells=[_cell(c) for c in raw["agv_start_cells"]],
+        opcua_base_port=int(opcua.get("base_port", 48400)),
+        opcua_host=str(opcua.get("host", "localhost")),
     )

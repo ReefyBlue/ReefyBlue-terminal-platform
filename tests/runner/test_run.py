@@ -10,15 +10,14 @@ import pytest
 from terminal_ecs.workorders import WorkOrder
 from terminal_model.locations import parse_location
 from terminal_model.types import JobType
-from terminal_runner.run import _transfer_hook, main, prefill, run_once
+from terminal_runner.run import main, prefill, run_once
 from terminal_sim.layout import load_layout
 from terminal_sim.scenario import load_scenario
-from terminal_sim.world import World
 from terminal_sim.yard import Yard
 
 LAYOUT = Path(__file__).resolve().parents[2] / "terminal.yaml"
 
-# Half discharge, half load: exercises all four on_transfer hooks.
+# Half discharge, half load: exercises all four sim-side box handovers.
 SMALL = """\
 name: small
 seed: 7
@@ -99,10 +98,22 @@ def test_cli_rejects_zero_replications(small_yaml: Path, tmp_path: Path, capsys)
     assert "--replications" in capsys.readouterr().err
 
 
-def test_hook_rejects_a_non_agv_with_type_error(small_yaml: Path):
-    world = World(load_layout(LAYOUT), load_scenario(small_yaml))
-    with pytest.raises(TypeError, match="STS-01 is not an AGV"):
-        _transfer_hook(world)("tp_to_agv", "STS-01", "C0001")
+def test_run_sets_no_transfer_hook(small_yaml: Path, monkeypatch):
+    # The sim hands boxes over itself; the ECS must not be given a hook.
+    import terminal_runner.run as run_mod
+
+    seen = []
+    real = run_mod.Dispatcher
+
+    def spy(*args, **kwargs):
+        d = real(*args, **kwargs)
+        seen.append(d)
+        return d
+
+    monkeypatch.setattr(run_mod, "Dispatcher", spy)
+    scenario = replace(load_scenario(small_yaml), duration_s=60.0)
+    run_once(scenario, load_layout(LAYOUT), seed=scenario.seed)
+    assert len(seen) == 1 and seen[0].on_transfer is None
 
 
 MIXED = """\

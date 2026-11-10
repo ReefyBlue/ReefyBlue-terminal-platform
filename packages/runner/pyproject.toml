@@ -6,13 +6,14 @@ build-backend = "hatchling.build"
 name = "terminal-runner"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["terminal-model", "terminal-sim", "terminal-ecs", "terminal-tos-stub"]
+dependencies = ["terminal-model", "terminal-sim", "terminal-ecs", "terminal-tos-stub", "terminal-opcua"]
 
 [tool.uv.sources]
 terminal-model = { workspace = true }
 terminal-sim = { workspace = true }
 terminal-ecs = { workspace = true }
 terminal-tos-stub = { workspace = true }
+terminal-opcua = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terminal_runner"]

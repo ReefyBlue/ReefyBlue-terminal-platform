@@ -67,7 +67,8 @@ class ASC(Equipment):
         self.gantry_bay = 1.0
         # Waterside TP holds a box: from STACK_IN assignment (the AGV has put it down)
         # until that STACK_IN completes, and from STACK_OUT completion until the box is
-        # taken by an AGV (``World.transfer_tp_to_agv``).
+        # taken by an AGV. In a World, ``Handover`` keeps this in step with the boxes
+        # it records on the TP (True while any box is there).
         self.tp_ws_occupied = False
         self.tp_ls_occupied = False
 

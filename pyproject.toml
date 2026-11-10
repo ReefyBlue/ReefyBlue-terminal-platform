@@ -12,6 +12,9 @@ dev = [
     "terminal-ecs",
     "terminal-tos-stub",
     "terminal-runner",
+    "terminal-opcua",
+    "terminal-gateway",
+    "pytest-asyncio>=1.4.1.post1",
 ]
 
 [tool.uv.sources]
@@ -20,17 +23,27 @@ terminal-sim = { workspace = true }
 terminal-ecs = { workspace = true }
 terminal-tos-stub = { workspace = true }
 terminal-runner = { workspace = true }
+terminal-opcua = { workspace = true }
+terminal-gateway = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["e2e: full 200-container scenario runs (a few seconds each)"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "e2e: full 200-container scenario runs (a few seconds each)",
+    "e2e_opcua: sim + gateway subprocesses + runner over OPC UA (minutes; run with -m e2e_opcua)",
+]
+addopts = "-m 'not e2e_opcua'"
 pythonpath = [
     "packages/model/src",
     "packages/sim/src",
     "packages/ecs/src",
     "packages/tos_stub/src",
     "packages/runner/src",
+    "packages/opcua/src",
+    "packages/gateway/src",
 ]
