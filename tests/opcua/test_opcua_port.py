@@ -244,8 +244,9 @@ async def test_unknown_event_type_ignored(rig, caplog):
     caplog.set_level(logging.WARNING, logger="terminal_opcua.port")
     rig.port._on_event(SimpleNamespace(EventType=ua.NodeId(ua.ObjectIds.SystemEventType)))
     assert rig.port.drain_events() == 0
-    assert any(r.levelno == logging.WARNING and r.name == "terminal_opcua.port"
-               for r in caplog.records)
+    assert [r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and r.name == "terminal_opcua.port"] == [
+        f"undecodable event skipped: unknown event type: {ua.NodeId(ua.ObjectIds.SystemEventType)}"]
 
 
 async def test_connect_failure_raises_connection_error():

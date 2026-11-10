@@ -99,7 +99,7 @@ Volgorde: sim, gateway, runner (de gateway herstelt vanzelf als hij vóór de si
 
 ### Equipment-events (OPC UA Events, Plan B3)
 
-Equipment-events (`STATE_CHANGED`, `JOB_COMPLETED`, `JOB_FAILED`) zijn echte OPC UA Events met eigen EventTypes (namespace `urn:terminal:model`); ze vervangen de JSON-variabelen `LastEvent`/`EventSeq` uit B1. De sim-servers zenden ze uit op het equipment-object, de gateway stuurt ze door met een eigen `Seq`, en `OpcUaEquipmentPort` abonneert zich erop.
+Equipment-events (`STATE_CHANGED`, `JOB_COMPLETED`, `JOB_FAILED`) zijn echte OPC UA Events met eigen EventTypes (namespace `urn:terminal:model`); ze vervangen de JSON-variabelen `LastEvent`/`EventSeq` uit B1. De sim-servers zenden ze uit op het `Server`-object met het equipment-object als `SourceNode` (asyncua levert events alleen aan abonnees van het uitzendende node en volgt `HasNotifier` niet), dus abonneer je, ook in UaExpert, op het `Server`-object. De gateway stuurt ze door met een eigen `Seq`, en `OpcUaEquipmentPort` abonneert zich erop.
 
 | Type | Supertype | Eigen velden |
 |---|---|---|
