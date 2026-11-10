@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "terminal-ecs-service"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "terminal-model",
+    "terminal-ecs",
+    "terminal-opcua",
+    "terminal-kpi",
+    "terminal-tos-stub",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
+
+[tool.uv.sources]
+terminal-model = { workspace = true }
+terminal-ecs = { workspace = true }
+terminal-opcua = { workspace = true }
+terminal-kpi = { workspace = true }
+terminal-tos-stub = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/terminal_ecs_service"]

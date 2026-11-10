@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGES = ["model", "sim", "ecs", "tos_stub", "runner", "gateway", "opcua", "kpi"]
+PACKAGES = ["model", "sim", "ecs", "tos_stub", "runner", "gateway", "opcua", "kpi", "ecs_service"]
 ECS_HASH_FIXTURE = ROOT / "tests" / "fixtures" / "ecs_sources.sha256"
 
 # Workspace packages each package may import (besides itself); runner may import all.
@@ -23,6 +23,7 @@ ALLOWED = {
     "gateway": {"terminal_model", "terminal_opcua"},
     "tos_stub": {"terminal_model", "terminal_ecs"},
     "kpi": {"terminal_model", "terminal_ecs"},
+    "ecs_service": {"terminal_model", "terminal_ecs", "terminal_opcua", "terminal_kpi", "terminal_tos_stub"},
 }
 _TERMINAL = re.compile(r"^\s*(?:from|import)\s+(terminal_\w+)", re.MULTILINE)
 
