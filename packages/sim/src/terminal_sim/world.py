@@ -11,6 +11,7 @@ from terminal_sim.equipment.agv import AGV
 from terminal_sim.equipment.asc import ASC
 from terminal_sim.equipment.base import Equipment
 from terminal_sim.equipment.sts import STS
+from terminal_sim.faults import FaultInjector
 from terminal_sim.grid import Cell, Grid
 from terminal_sim.layout import Layout
 from terminal_sim.scenario import Scenario
@@ -100,6 +101,17 @@ class World:
                 block=block,
                 yard=self.yard,
             )
+
+        self.fault_injectors: list[FaultInjector] = []
+        for eq in self.equipment.values():
+            params = scenario.faults.get(eq.kind)
+            if params is not None and params.mtbf_s > 0:
+                self.fault_injectors.append(
+                    FaultInjector(target=eq, params=params, rng=self.rng, env=self.env)
+                )
+
+    def faults_total(self) -> int:
+        return sum(i.count for i in self.fault_injectors)
 
     def run(self, until: float) -> None:
         self.env.run(till=until)
