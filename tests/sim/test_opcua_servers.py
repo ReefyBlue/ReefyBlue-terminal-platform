@@ -5,7 +5,6 @@ import socket
 import pytest
 import salabim
 from asyncua import Client
-
 from event_sink import EventSink
 from terminal_model.port import EquipmentEvent, EventKind
 from terminal_model.types import Job, JobType, Kind, Position
