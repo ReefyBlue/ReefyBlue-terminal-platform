@@ -333,3 +333,29 @@ def test_boxed_in_agv_clears_through_an_agv_waiting_for_its_cell():
     assert b.cell == (4, 0)
     assert a.cell in STAGING and a.state == State.IDLE
     assert rig.owned_by("AGV-01") == [a.cell] and rig.owned_by("AGV-02") == [(4, 0)]
+
+
+def test_fault_during_auto_clear_releases_the_cell_reserved_ahead():
+    # A short fault (here: shorter than one step) hits an AGV while it clears a TP.
+    # The clearing move must stop; the cell reserved ahead must be released.
+    rig, a = parking_rig()
+    a.load("C1")
+    assert a.assign_job(transport("TP/A/WS"))
+    arrived = run_until_completed(rig)
+    a.unload()
+    t = arrived + AUTO_CLEAR_AFTER_S
+    while a._pending is None:  # clearing, mid-step with the next cell reserved
+        t += 0.1
+        rig.env.run(till=t)
+        assert t < arrived + 60
+    assert a.state == State.BUSY and a.current_job is None
+    a.set_state(State.FAULT)
+    assert a.route == [] and a._pending is None
+    assert rig.owned_by("AGV-01") == [a.cell]
+    rig.env.run(till=t + 0.5)
+    a.set_state(State.IDLE)  # repaired: clearing starts over from the current cell
+    assert rig.owned_by("AGV-01") == [a.cell]
+    rig.env.run(till=t + 200)
+    assert a.state == State.IDLE and a.cell in STAGING
+    assert rig.owned_by("AGV-01") == [a.cell]
+    assert rig.grid.waiting_for("AGV-01") is None

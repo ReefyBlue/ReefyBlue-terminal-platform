@@ -101,7 +101,15 @@ class AGV(Equipment):
             self._pending = None
 
     def set_state(self, s: State) -> None:
+        clearing = self.state is State.BUSY and self.current_job is None  # auto-clear move
         super().set_state(s)
+        if s is State.FAULT and clearing:
+            # Stop the clearing move where it is: drop the cell reserved ahead, so the
+            # AGV holds exactly its own cell; it clears again once the fault is over.
+            if self.env.current_component() is not self:
+                self.cancel()
+            self._release_pending()
+            self.route = []
         self._wake_for_clear()
 
     def cancel_job(self) -> bool:
@@ -253,7 +261,7 @@ class AGV(Equipment):
                 waited += RESERVE_RETRY_S
             self.grid.set_waiting(self.equipment_id, None)
             yield from self._step(nxt)
-            if self.state is not State.BUSY:  # FAULT during the move: stop here
+            if self.state is not State.BUSY:  # defensive: FAULT set from inside this process
                 self.route = []
                 return
             i += 1
