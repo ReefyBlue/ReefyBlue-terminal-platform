@@ -193,7 +193,7 @@ class Dispatcher:
                 if rec.agv_id is None:
                     log.error("order %s is %s without an AGV; skipping", rec.cid, stage)
                     continue
-                if rec.agv_id in self._excluded:
+                if not self._available(rec.agv_id):  # e.g. still BUSY finishing the last leg
                     continue
                 locs = {"sts": rec.order.sts_id, "tp": rec.tp}
                 job = Job(rec.next_job_id(JobType.TRANSPORT), JobType.TRANSPORT, rec.cid, locs[src], locs[dst])

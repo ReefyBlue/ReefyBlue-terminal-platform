@@ -3,7 +3,8 @@ from __future__ import annotations
 from fake_port import FakeSlots, make_port
 from terminal_ecs.dispatcher import Dispatcher
 from terminal_ecs.workorders import WorkOrder
-from terminal_model.types import Job, JobType
+from terminal_model.port import EquipmentEvent, EventKind
+from terminal_model.types import Job, JobType, State
 
 
 def load(cid: str, slot: str = "A/3/1/1", sts: str = "STS-01") -> WorkOrder:
@@ -126,3 +127,20 @@ def test_fifo_head_bypasses_full_lane():
     port.complete("AGV-01")  # C2 waits in the lane behind head C1
     port.complete("ASC-A")  # C1 at the TP
     assert port.calls[-1][1].job_id == "C1-TRANSPORT-1"
+
+
+def test_loaded_agv_gets_next_leg_once_idle_without_rejections(caplog):
+    # The simulator emits JOB_COMPLETED while the AGV is still BUSY and only then
+    # STATE_CHANGED -> IDLE. The next leg must wait for IDLE instead of being
+    # offered (and rejected) while the AGV is busy.
+    port = make_port()
+    d = Dispatcher(port, FakeSlots())
+    d.submit([load("C9", slot="A/3/1/1")])
+    port.complete("ASC-A")
+    job = port._job["AGV-01"]
+    port._job["AGV-01"] = None  # completed, but still BUSY
+    caplog.set_level("WARNING", logger="terminal_ecs")
+    port._emit(EquipmentEvent(EventKind.JOB_COMPLETED, "AGV-01", port.now(), job_id=job.job_id))
+    assert [r.getMessage() for r in caplog.records] == []
+    port.set_state("AGV-01", State.IDLE)
+    assert last(port) == ("AGV-01", "C9-TRANSPORT-2", JobType.TRANSPORT, "TP/A/WS", "STS-01")
