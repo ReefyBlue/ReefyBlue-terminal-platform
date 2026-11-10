@@ -38,7 +38,8 @@ from terminal_opcua.nodeset import EQUIPMENT_VARS, NAMESPACE_URI
 
 log = logging.getLogger(__name__)
 
-CALL_TIMEOUT_S = 2.0       # reads and method calls
+CALL_TIMEOUT_S = 3.0       # reads and method calls; above the gateway's 2 s forward timeout,
+                           # so the gateway's answer (False) wins over a local timeout
 SETUP_TIMEOUT_S = 10.0     # browse + subscribe after the session is open
 CLOSE_TIMEOUT_S = 2.0
 SUBSCRIPTION_PERIOD_MS = 20
@@ -190,9 +191,9 @@ class OpcUaEquipmentPort:
 
     def close(self) -> None:
         """Disconnect and stop the loop thread; safe to call more than once."""
-        self._events = queue.SimpleQueue()  # undelivered events belong to this session
         loop, thread = self._loop, self._thread
         if loop is None:
+            self._events = queue.SimpleQueue()  # undelivered events belong to this session
             return
         self._connected = False
         if loop.is_running():
@@ -206,6 +207,8 @@ class OpcUaEquipmentPort:
             thread.join(timeout=CLOSE_TIMEOUT_S)
         if not loop.is_running():
             loop.close()
+        # after the loop thread stopped, so no late notification lands in the new queue
+        self._events = queue.SimpleQueue()  # undelivered events belong to this session
         self._loop = self._thread = None
         self._client = self._subscription = self._clock = None
         self._equipment, self._by_node, self._clock_methods = {}, {}, {}

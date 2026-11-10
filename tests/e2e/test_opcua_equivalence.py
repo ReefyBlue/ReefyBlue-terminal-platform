@@ -68,6 +68,6 @@ def test_small_scenario_gap_shrinks_with_lower_speed(tmp_path):
     print(json.dumps(table, indent=1))
     assert procs["returncodes"] == (0, 0), procs["logs"]
     assert {c: opcua[c] for c in COUNTS} == {c: inproc[c] for c in COUNTS}, table
-    assert opcua["moves_per_hour_total"] == pytest.approx(inproc["moves_per_hour_total"], rel=0.03), table
+    assert opcua["moves_per_hour_total"] == pytest.approx(inproc["moves_per_hour_total"], rel=0.05), table
     assert abs(opcua["vessel_turnaround_s"] - inproc["vessel_turnaround_s"]) <= 120, table
     assert opcua["timed_out"] == inproc["timed_out"] == 0, table

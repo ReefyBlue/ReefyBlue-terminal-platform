@@ -13,6 +13,8 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from asyncua import Client
+from terminal_model.types import State
+from terminal_sim.layout import load_layout
 
 ROOT = Path(__file__).resolve().parents[2]
 READY_TIMEOUT_S = 60.0
@@ -63,7 +65,7 @@ async def _gateway_ready(endpoint: str, n_equipment: int) -> bool:
                     states.append(await child.read_value())
                 elif name not in ("Clock",) and (await child.read_node_class()).name == "Object":
                     stack.append(child)
-        return len(states) == n_equipment and all(s != "Fault" for s in states)
+        return len(states) == n_equipment and all(s != State.FAULT.value for s in states)
     except Exception:
         return False
     finally:
@@ -105,7 +107,7 @@ def sim_and_gateway(scenario: Path, *, n_sts: int, n_agv: int, log_dir: Path) ->
     info = {"endpoint": endpoint, "returncodes": None, "logs": (sim_log.name, gw_log.name)}
     try:
         deadline = time.monotonic() + READY_TIMEOUT_S
-        n_equipment = n_sts + n_agv + 4
+        n_equipment = n_sts + n_agv + len(load_layout(ROOT / "terminal.yaml").blocks)  # 1 ASC/block
         while not asyncio.run(_gateway_ready(endpoint, n_equipment)):
             if sim.poll() is not None or gw.poll() is not None:
                 raise RuntimeError(f"process died during startup; see {info['logs']}")
