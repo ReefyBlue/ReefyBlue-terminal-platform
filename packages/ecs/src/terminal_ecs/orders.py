@@ -93,8 +93,8 @@ class OrderRecord:
     fail_reason: str | None = None
     agv_at: str | None = None  # where a bound AGV stands when not at its STS (re-slotted at a TP)
     watchdog_cancels: int = 0  # reset when one of the order's jobs completes
-    stuck: bool = False  # watchdog gave up re-cancelling, or the replan streak cap was hit
-    replan_streak: int = 0  # JOB_FAILED/FAULT replans in a row; reset when a job completes
+    stuck: bool = False  # watchdog gave up re-cancelling (see Dispatcher._watchdog)
+    replan_streak: int = 0  # JOB_FAILED/FAULT replans in a row (cap -> REPLAN_STREAK); reset on completion
     job_counts: dict[JobType, int] = field(default_factory=dict)
 
     @property

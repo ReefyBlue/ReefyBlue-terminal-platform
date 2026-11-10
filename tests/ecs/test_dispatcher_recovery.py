@@ -300,22 +300,59 @@ def test_watchdog_gives_up_after_max_cancels_and_marks_order_stuck(caplog):
     assert d.status()["stuck"] == 0
 
 
-def test_replan_streak_parks_order_as_stuck(caplog):
+def test_replan_streak_fails_order(caplog):
     port = make_port()
     d = make_dispatcher(port, FakeSlots())
-    d.submit([WorkOrder(container_id="C1", type=JobType.DISCHARGE, sts_id="STS-01", yard_slot="A/1/1/1")])
+    d.submit([discharge("C1")])
     port.complete("AGV-01")  # AGV in the lane: the crane gets the discharge
     for n in range(1, 6):
-        assert [j.job_id for e, j in port.calls if e == "STS-01"][-1] == f"C1-DISCHARGE-{n}"
+        assert jobs_of(port, "STS-01")[-1] == f"C1-DISCHARGE-{n}"
         port.fail("STS-01", "NO_AGV_IN_LANE")  # fails at once, every time
         port.set_state("STS-01", State.IDLE)  # re-admitted after the replan
-    sts_jobs = [j.job_id for e, j in port.calls if e == "STS-01"]
-    assert len(sts_jobs) == 5  # no 6th assign
+    assert len(jobs_of(port, "STS-01")) == 5  # no 6th assign
     d.tick()
-    assert len([j for e, j in port.calls if e == "STS-01"]) == 5
+    assert len(jobs_of(port, "STS-01")) == 5
     s = d.status()
-    assert (s["stuck"], s["open"], s["failed"]) == (1, 1, 0)
-    assert "replan streak: C1 failed 5 times in a row on STS-01 (NO_AGV_IN_LANE); parked as stuck" in caplog.text
+    assert (s["failed"], s["open"], s["stuck"]) == (1, 0, 0)
+    assert "replan streak: C1 failed 5 times in a row on STS-01 (NO_AGV_IN_LANE); order failed" in caplog.text
+    d.submit([discharge("C2", slot="A/1/1/2")])  # the AGV of C1 is free again
+    assert jobs_of(port, "AGV-01")[-1] == "C2-TRANSPORT-1"
+
+
+def test_replan_streak_in_stacking_frees_the_tp():
+    port = make_port()
+    d = make_dispatcher(port, FakeSlots())
+    d.submit([discharge("C1")])
+    port.complete("AGV-01")  # to the STS
+    port.complete("STS-01")  # box on AGV-01: TO_YARD
+    port.complete("AGV-01")  # box on the TP: STACKING, the ASC gets STACK_IN
+    assert d._tp_occupied == {"A": "C1"}
+    for _ in range(5):
+        port.fail("ASC-A", "JAMMED")
+        port.set_state("ASC-A", State.IDLE)
+    assert len(jobs_of(port, "ASC-A")) == 5
+    assert d._tp_occupied == {}
+    assert (d.status()["failed"], d.status()["open"]) == (1, 0)
+
+
+def test_watchdog_stuck_order_is_reissued_after_its_job_fails():
+    from terminal_ecs.dispatcher import WATCHDOG_MAX_CANCELS
+
+    port = make_port()
+    d = make_dispatcher(port, FakeSlots(), watchdog_s=600.0)
+    port.set_state("AGV-02", State.FAULT)  # only AGV-01 is usable
+    d.submit([discharge("C1")])
+    for _ in range(WATCHDOG_MAX_CANCELS + 1):
+        port.advance(601)
+        d.tick()
+        port.set_state("AGV-01", State.IDLE)
+    assert d.status()["stuck"] == 1
+    last = jobs_of(port, "AGV-01")[-1]
+    port.fail("AGV-01", "BLOCKED")  # the stuck order's running job fails after all
+    port.set_state("AGV-01", State.IDLE)
+    jobs = jobs_of(port, "AGV-01")
+    assert jobs[-1] != last and jobs[-1].startswith("C1-TRANSPORT-")  # re-issued as before B2d
+    assert (d.status()["failed"], d.status()["open"]) == (0, 1)
 
 
 def test_replan_streak_resets_on_completion():

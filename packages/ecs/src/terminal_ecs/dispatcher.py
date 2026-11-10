@@ -51,9 +51,12 @@ still needs an AGV they also leave one AGV free.
 The watchdog cancels an AGV job that makes no progress for ``watchdog_s``; after
 ``WATCHDOG_MAX_CANCELS`` cancels of the same order it logs an ERROR, marks the order
 ``stuck`` (``status()["stuck"]``) and leaves it alone (the order is not failed).
-An order whose jobs fail (JOB_FAILED or FAULT replan) ``WATCHDOG_MAX_CANCELS`` times in
-a row without a completion in between is parked as ``stuck`` too: it is not re-issued
-(no endless loop of immediately failing jobs) and stays open.
+Repeated failures: JOB_FAILED- and FAULT-driven replans count in the order's
+``replan_streak``; a JOB_COMPLETED of one of its jobs resets it, watchdog cancels and an
+operator ``resolve_job(.., "failed")`` neither count nor reset. At
+``WATCHDOG_MAX_CANCELS`` in a row the order fails with reason ``REPLAN_STREAK`` (ERROR
+log, ``status()["failed"]``; its TP and AGV are freed) instead of being re-issued in an
+endless loop of immediately failing jobs.
 """
 
 from __future__ import annotations
@@ -380,20 +383,14 @@ class Dispatcher:
             return True
         return False
 
-    @staticmethod
-    def _parked(rec: OrderRecord) -> bool:
-        """Stuck without a running job (replan streak cap): never re-issued."""
-        return rec.stuck and rec.current_job_id is None
-
     def _waiting(self, stage: Stage) -> list[OrderRecord]:
-        recs = [r for r in self._open.values()
-                if r.stage is stage and r.current_job_id is None and not self._parked(r)]
+        recs = [r for r in self._open.values() if r.stage is stage and r.current_job_id is None]
         return sorted(recs, key=lambda r: r.seq)
 
     def _fifo_head(self, sts: str) -> OrderRecord | None:
         """Earliest (submit order) order for ``sts`` that the crane has not handled yet."""
         for r in self._open.values():
-            if r.order.sts_id == sts and r.stage in PRE_CRANE and not self._parked(r):
+            if r.order.sts_id == sts and r.stage in PRE_CRANE:
                 return r
         return None
 
@@ -406,7 +403,7 @@ class Dispatcher:
         # crane serves only the head, so a lane full of non-head AGVs would deadlock.
         head_outside = head is not None and head.stage not in IN_LANE
         for rec in mine:  # submit order
-            if rec.stage not in NEEDS_AGV or rec.current_job_id is not None or self._parked(rec):
+            if rec.stage not in NEEDS_AGV or rec.current_job_id is not None:
                 continue
             if rec is not head:
                 if in_lane >= self.lookahead_per_sts:
@@ -654,7 +651,7 @@ class Dispatcher:
         """Roll the order back to its last stable stage; it keeps its TOS position.
 
         ``streak``: a JOB_FAILED/FAULT-driven replan. ``WATCHDOG_MAX_CANCELS`` of them in
-        a row (no completion between) park the order as ``stuck``: it is not re-issued."""
+        a row (no completion between) fail the order (``REPLAN_STREAK``)."""
         self._detach(rec)
         self._excluded.add(eid)
         self._replans += 1
@@ -666,10 +663,10 @@ class Dispatcher:
         log.warning("replan %s: %s failed on %s (%s) -> %s", rec.cid, old, eid, reason, rec.stage)
         if streak:
             rec.replan_streak += 1
-            if rec.replan_streak >= WATCHDOG_MAX_CANCELS and not rec.stuck:
-                rec.stuck = True
-                log.error("replan streak: %s failed %d times in a row on %s (%s); parked as stuck",
+            if rec.replan_streak >= WATCHDOG_MAX_CANCELS:
+                log.error("replan streak: %s failed %d times in a row on %s (%s); order failed",
                           rec.cid, rec.replan_streak, eid, reason)
+                self._fail_order(rec, "REPLAN_STREAK")
 
     def _reslot(self, rec: OrderRecord) -> None:
         old = rec.yard_slot

@@ -17,9 +17,11 @@ ends the sim, so every device goes OFFLINE then.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 import pytest
@@ -90,6 +92,14 @@ def _run_with_blip(scenario, *, ecs_url: str, gateway: str,
     return result["k"], max_offline, recovered
 
 
+def _assert_resolved_completed(ecs_log: str) -> None:
+    """The cut hits a running job (seed 7, cut at 10 s): the auto-release path that counts
+    its unknown outcome as completed (B2d spec §5.1) must have run, and nothing failed."""
+    text = Path(ecs_log).read_text()
+    assert re.search(r"resolve \S+ on \S+: completed", text), "no unknown outcome resolved as completed"
+    assert not re.search(r"resolve \S+ on \S+: failed", text)
+
+
 def _assert_completed(k: dict) -> None:
     msg = f"KPIs: {k}"
     assert k["containers_done"] == 20, msg
@@ -113,6 +123,7 @@ def test_sim_gateway_blip_on_sts_run_completes(tmp_path):
     assert procs["returncodes"] == (0, 0), procs["logs"]
     assert ecs["returncode"] == 0, ecs["log"]
     _assert_completed(k)
+    _assert_resolved_completed(ecs["log"])
     assert max_offline > 0, "gateway never reported STS-01 OFFLINE while its link was cut"
     assert recovered is not None, f"offline not back to 0 within {RECOVER_S} s of the restore"
     assert time.monotonic() - t0 < 120
@@ -137,6 +148,7 @@ def test_ecs_gateway_blip_run_completes(tmp_path):
     assert procs["returncodes"] == (0, 0), procs["logs"]
     assert ecs["returncode"] == 0, ecs["log"]
     _assert_completed(k)
+    _assert_resolved_completed(ecs["log"])
     assert max_offline > 0, "ECS service never reported its devices OFFLINE while its link was cut"
     assert recovered is not None, f"offline not back to 0 within {RECOVER_S} s of the restore"
     assert time.monotonic() - t0 < 120
