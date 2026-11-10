@@ -24,7 +24,7 @@ from terminal_ecs.dispatcher import Dispatcher
 from terminal_ecs.workorders import WorkOrder
 from terminal_model.locations import parse_location
 from terminal_model.logging import configure_json_logging
-from terminal_model.types import JobType, State
+from terminal_model.types import JobType, Kind, State
 from terminal_opcua.port import OpcUaEquipmentPort
 from terminal_sim.layout import Layout, load_layout
 from terminal_sim.scenario import Scenario, load_scenario
@@ -137,6 +137,24 @@ def _wait_ready(port: OpcUaEquipmentPort) -> None:
         _sleep(0.2)
 
 
+def _check_fleet(port: OpcUaEquipmentPort, scenario: Scenario, layout: Layout) -> None:
+    """Exit 1 unless the gateway serves the scenario's fleet: the gateway derives its
+    upstream port table from ``--n-sts/--n-agv``, so a mismatch silently shifts ports."""
+    got = {kind: 0 for kind in Kind}
+    for eid in port.equipment_ids():
+        got[port.snapshot(eid).kind] += 1
+    want = {Kind.STS: scenario.n_sts, Kind.AGV: scenario.n_agv, Kind.ASC: len(layout.blocks)}
+    if all(got[k] == n for k, n in want.items()):
+        return
+    have = ", ".join(f"{k.value} {got[k]}" for k in want)
+    need = ", ".join(f"{k.value} {n}" for k, n in want.items())
+    msg = (f"gateway fleet ({have}) does not match the scenario ({need}): start the gateway "
+           f"with --n-sts {scenario.n_sts} --n-agv {scenario.n_agv}")
+    log.error(msg)
+    print(f"error: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
 def _advance(port: OpcUaEquipmentPort, t: float, timeout_s: float) -> None:
     """Block until sim time ``t``, delivering events to the ECS every ``DRAIN_POLL_S`` so it
     reacts as it does in-process (it dispatches from its event callback)."""
@@ -172,6 +190,7 @@ def run_once_opcua(scenario: Scenario, layout: Layout, seed: int, *, gateway: st
     stopped = False
     try:
         _wait_ready(port)
+        _check_fleet(port, scenario, layout)
         slots = [(o.yard_slot, o.container_id) for o in orders if o.type is JobType.LOAD]
         if slots and not port.prefill_yard(slots):
             raise RuntimeError(

@@ -152,3 +152,20 @@ def test_stop_errors_on_failed_run_are_swallowed(monkeypatch, caplog):
         run.run_once_opcua(scenario, layout, 1, gateway="opc.tcp://fake")
     assert fake.calls == ["close"]
     assert any("Stop on opc.tcp://fake failed" in r.getMessage() for r in caplog.records)
+
+
+def test_fleet_mismatch_exits_1(monkeypatch, capsys):
+    scenario = load_scenario(ROOT / "scenarios/baseline.yaml")  # 2 STS, 6 AGV
+    fake, layout = _fake(monkeypatch, scenario, n_agv=3)  # gateway started with --n-agv 3
+    with pytest.raises(SystemExit) as exc:
+        run.run_once_opcua(scenario, layout, 1, gateway="opc.tcp://fake")
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "--n-sts 2 --n-agv 6" in err and "AGV 3" in err
+    assert "start" not in fake.calls and fake.calls[-2:] == ["stop", "close"]
+
+
+def test_matching_fleet_passes_check(monkeypatch):
+    scenario = load_scenario(ROOT / "scenarios/baseline.yaml")
+    fake, layout = _fake(monkeypatch, scenario)
+    run._check_fleet(fake, scenario, layout)  # no SystemExit
