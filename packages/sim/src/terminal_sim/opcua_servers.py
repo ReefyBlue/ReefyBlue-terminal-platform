@@ -12,9 +12,9 @@ from terminal_model.locations import SlotLoc, parse_location
 from terminal_model.port import EquipmentEvent
 from terminal_model.types import Kind
 from terminal_opcua.codec import job_from_json
+from terminal_opcua.events import EventEmitter
 from terminal_opcua.nodeset import (
     EquipmentHandlers,
-    EventEmitter,
     block_folder,
     create_control_object,
     create_equipment_object,
@@ -71,7 +71,8 @@ class EquipmentServer:
             reset=self.equipment.reset,
         )
         self._obj = await create_equipment_object(server, idx, types, parent, snap, handlers)
-        self._emitter = EventEmitter(self._obj)
+        self._emitter = await EventEmitter.create(
+            server, types.events, self._obj, self.equipment.equipment_id)
         await server.start()
         self._server = server
 

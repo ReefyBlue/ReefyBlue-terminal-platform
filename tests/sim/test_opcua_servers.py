@@ -6,9 +6,10 @@ import pytest
 import salabim
 from asyncua import Client
 
-from terminal_model.port import EventKind
+from event_sink import EventSink
+from terminal_model.port import EquipmentEvent, EventKind
 from terminal_model.types import Job, JobType, Kind, Position
-from terminal_opcua.codec import event_from_json, job_to_json
+from terminal_opcua.codec import job_to_json
 from terminal_sim.equipment.sts import STS
 from terminal_sim.grid import Grid
 from terminal_sim.opcua_servers import EquipmentServer
@@ -64,64 +65,49 @@ async def _val(r, name):
 
 
 async def test_assign_via_opcua_runs_job(rig):
+    sink = EventSink()
+    await sink.attach(rig.client)
     ok = await rig.obj.call_method(f"{rig.idx}:AssignJob", job_to_json(_job()))
     assert ok is True
     rig.grid.try_reserve((4, 0), "AGV-01")
     rig.env.run(300)
     await rig.server.sync()
-    assert await _val(rig, "EventSeq") >= 2
+    assert await sink.wait_for(1, 5.0)
+    assert any(
+        e.kind == EventKind.JOB_COMPLETED and e.job_id == "J1" for e in sink.events())
     assert await _val(rig, "State") == "IDLE"
     assert await _val(rig, "EnergyKwh") == 5.0
+    await sink.detach()
 
 
 async def test_two_events_one_step_both_delivered(rig):
+    sink = EventSink()
+    await sink.attach(rig.client)
     assert rig.sts.assign_job(_job())
     await rig.server.sync()
-    base = await _val(rig, "EventSeq")
-
-    changes = []
-
-    class H:
-        def datachange_notification(self, node, val, data):
-            changes.append(val)
-
-    seq_node = await rig.obj.get_child(f"{rig.idx}:EventSeq")
-    sub = await rig.client.create_subscription(10, H())
-    await sub.subscribe_data_change(seq_node)
     await asyncio.sleep(0.1)
-    changes.clear()
+    sink.received.clear()
 
     rig.sts.cancel_job()   # JOB_FAILED
     rig.sts.reset()        # STATE_CHANGED
     await rig.server.sync()
-    await asyncio.sleep(0.3)
-    assert await _val(rig, "EventSeq") == base + 2
-    assert changes == [base + 1, base + 2]
-    ev = event_from_json(await _val(rig, "LastEvent"))
-    assert ev.kind == EventKind.STATE_CHANGED
-    await sub.delete()
+    assert await sink.wait_for(2, 5.0)
+    assert [e.kind for e in sink.events()] == [EventKind.JOB_FAILED, EventKind.STATE_CHANGED]
+    seqs = [seq for seq, _ in sink.received]
+    assert seqs[1] == seqs[0] + 1
+    await sink.detach()
 
 
-async def test_events_delivered_in_order_via_last_event(rig):
-    assert rig.sts.assign_job(_job())
+async def test_events_delivered_in_order(rig):
+    sink = EventSink()
+    await sink.attach(rig.client)
+    for jid in ("J1", "J2", "J3"):
+        rig.server.on_emit(EquipmentEvent(
+            EventKind.JOB_COMPLETED, "STS-01", 1.0, job_id=jid))
     await rig.server.sync()
-    lastevents = []
-
-    class H:
-        def datachange_notification(self, node, val, data):
-            lastevents.append(event_from_json(val).kind)
-
-    node = await rig.obj.get_child(f"{rig.idx}:LastEvent")
-    sub = await rig.client.create_subscription(10, H())
-    await sub.subscribe_data_change(node)
-    await asyncio.sleep(0.1)
-    lastevents.clear()
-    rig.sts.cancel_job()
-    rig.sts.reset()
-    await rig.server.sync()
-    await asyncio.sleep(0.3)
-    assert lastevents == [EventKind.JOB_FAILED, EventKind.STATE_CHANGED]
-    await sub.delete()
+    assert await sink.wait_for(3, 5.0)
+    assert [e.job_id for e in sink.events()] == ["J1", "J2", "J3"]
+    await sink.detach()
 
 
 async def test_invalid_json_returns_false(rig):

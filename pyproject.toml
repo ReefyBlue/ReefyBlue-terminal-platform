@@ -46,4 +46,6 @@ pythonpath = [
     "packages/runner/src",
     "packages/opcua/src",
     "packages/gateway/src",
+    "tests/opcua",
+    "tests/gateway",
 ]
