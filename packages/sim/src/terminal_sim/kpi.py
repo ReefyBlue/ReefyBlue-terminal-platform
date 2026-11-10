@@ -103,7 +103,8 @@ class KpiCollector:
         kpis["containers_failed"] = float(status["failed"])
         return kpis
 
-    def to_csv_row(self, path: Path, run_id: int, kpis: dict) -> None:
+    @staticmethod
+    def to_csv_row(path: Path, run_id: int, kpis: dict) -> None:
         path = Path(path)
         write_header = not path.exists() or path.stat().st_size == 0
         with path.open("a", newline="") as fh:
