@@ -1,6 +1,6 @@
 # Terminal Platform — fase 1 kern
 
-Fase 1 van het terminalplatform voor een volautomatische containerterminal: een discrete-event simulator (salabim) van een fictieve terminal, de ECS-dispatchlogica erachter via de `EquipmentPort`, een TOS-stub en een scenario-runner die KPI's oplevert. Alles draait in-process; de OPC UA-laag volgt in Plan B.
+Fase 1 van het terminalplatform voor een volautomatische containerterminal: een discrete-event simulator (salabim) van een fictieve terminal, de ECS-dispatchlogica erachter via de `EquipmentPort`, een TOS-stub en een scenario-runner die KPI's oplevert. De runner draait in-process of, sinds Plan B1, via OPC UA tegen een apart sim-proces achter een gateway (zie [OPC UA-modus](#opc-ua-modus-plan-b1)).
 
 ## Installeren
 
@@ -19,8 +19,10 @@ uv run python -m terminal_runner.run scenarios/baseline.yaml --replications 10 -
 | `--replications N` | aantal replicaties, seed = `scenario.seed + i` | 1 |
 | `--out DIR` | uitvoermap voor `<name>.csv` (één rij per run) en `<name>-summary.json` (gemiddelde, p5, p95 per KPI) | `out` |
 | `--layout FILE` | terminallayout | `terminal.yaml` |
+| `--port inprocess\|opcua` | sim in-process (`World`) of via OPC UA (gateway) | `inprocess` |
+| `--gateway URL` | gateway-endpoint bij `--port opcua` | `opc.tcp://localhost:4840` |
 
-Tests: `uv run pytest -q` (inclusief de e2e-runs met 200 containers, marker `e2e`; uitsluiten met `-m "not e2e"`).
+Tests: `uv run pytest -q` (inclusief de e2e-runs met 200 containers, marker `e2e`; uitsluiten met `-m "not e2e"`). De OPC UA-e2e-tests (marker `e2e_opcua`) staan standaard uit, zie [OPC UA-modus](#opc-ua-modus-plan-b1).
 
 ## Scenario-yaml (`scenarios/*.yaml`)
 
@@ -33,7 +35,7 @@ Tests: `uv run pytest -q` (inclusief de e2e-runs met 200 containers, marker `e2e
 | `n_containers` | aantal containers (werkorders) |
 | `share_40ft` | aandeel 40ft-containers (0..1); niet gebruikt in Plan A (voorbereid) |
 | `discharge_share` | aandeel lossen (1.0 = alleen lossen, 0 = alleen laden) |
-| `speed_factor` | niet gebruikt in Plan A: wandkloktempo voor Plan B (de runner draait zo snel mogelijk in sim-tijd) |
+| `speed_factor` | alleen in OPC UA-modus: sim-seconden per wandklokseconde van `terminal_sim.serve` (in-process draait de runner zo snel mogelijk in sim-tijd) |
 | `duration_s` | harde bovengrens op de gesimuleerde tijd (s) |
 | `faults` | optioneel; per `sts`/`agv`/`asc`: `mtbf_s`, `mttr_s` (mtbf 0 = geen storingen) |
 
@@ -49,7 +51,7 @@ Tests: `uv run pytest -q` (inclusief de e2e-runs met 200 containers, marker `e2e
 | `utilisation_STS` / `_ASC` | aandeel samples waarin het apparaattype BUSY was |
 | `utilisation_AGV` | aandeel samples (AGV × sample) waarin een AGV BUSY was **of** door de dispatcher aan een order gekoppeld (bijv. wachtend in de lane) |
 | `vessel_turnaround_s` | tijd van de eerste tot de laatste voltooide STS-move (DISCHARGE/LOAD) (s) |
-| `faults` | aantal opgetreden storingen |
+| `faults` | aantal opgetreden storingen (in-process: teller van de sim; OPC UA: aantal `STATE_CHANGED → Fault`-events, zie OPC UA-modus) |
 | `replans` | aantal herplanningen door de dispatcher |
 | `energy_kwh_per_move` | energieverbruik per STS-move (kWh) |
 | `containers_done` | aantal afgeronde containers |
@@ -68,8 +70,29 @@ Workspace-packages in `packages/`:
 - `tos_stub` (`terminal_tos_stub`): slottoewijzing en werkordergenerator; krijgt kale argumenten (blokmaten, STS-id's), geen sim-objecten.
 - `runner` (`terminal_runner`): koppelt sim, ecs en tos_stub (vertaalt Layout/Scenario naar de tos_stub-argumenten, vult de stack voor LOAD-orders); KPI-collector en CLI.
 
-Importregel (bewaakt door `tests/test_architecture.py`): `model` importeert geen ander `terminal_*`-package; `sim` importeert nooit `ecs`, `tos_stub` of `runner`; `ecs` importeert alleen `model`; `tos_stub` importeert alleen `model` en `ecs`. Alleen `runner` kent alle packages.
+- `opcua` (`terminal_opcua`): OPC UA-namespace, JSON-codecs en `OpcUaEquipmentPort` (Plan B1).
+- `gateway` (`terminal_gateway`): aggregatie-gateway voor alle equipment-servers (Plan B1).
+
+Importregel (bewaakt door `tests/test_architecture.py`): `model` importeert geen ander `terminal_*`-package; `opcua` alleen `model` (plus `asyncua`); `sim` en `gateway` alleen `model` en `opcua`; `ecs` importeert alleen `model`; `tos_stub` importeert alleen `model` en `ecs`. Alleen `runner` kent alle packages.
+
+## OPC UA-modus (Plan B1)
+
+Drie processen, elk met een eigen CLI (`--host` is overal het bindadres, default `0.0.0.0`):
+
+| Proces | CLI | Poorten |
+|---|---|---|
+| sim | `uv run python -m terminal_sim.serve scenarios/baseline.yaml [--layout terminal.yaml] [--base-port 48400] [--host 0.0.0.0]` | equipment-servers op `base-port + i` (max. 12, `opc.tcp://host:poort/terminal/<id>`), klokserver op `base-port + 12` (`/terminal/control`) |
+| gateway | `uv run python -m terminal_gateway.serve [--config terminal.yaml] [--port 4840] [--host 0.0.0.0] [--upstream-host H] [--base-port P] [--n-sts 2] [--n-agv 6]` | `4840`; `--upstream-host`/`--base-port` default uit `opcua.host`/`opcua.base_port` in `terminal.yaml`; `--n-sts`/`--n-agv` moeten bij het scenario van de sim passen |
+| runner | `uv run python -m terminal_runner.run scenarios/baseline.yaml --port opcua [--gateway opc.tcp://localhost:4840] [--out out/]` | client |
+
+Volgorde: sim, gateway, runner (de gateway herstelt vanzelf als hij vóór de sim start; de runner probeert 10× met 2 s ertussen en stopt anders met exitcode 1 en het endpoint in de melding). Sim en runner moeten **hetzelfde scenariobestand** gebruiken: de sim gebruikt de seed voor de apparaattijden, de runner voor de werkorders. `--replications` > 1 wordt in opcua-modus geweigerd (elke replicatie vraagt een vers sim-proces). Na afloop stuurt de runner `Stop` naar de klokserver en eindigt de sim netjes; de gateway stop je met SIGTERM/Ctrl-C.
+
+- **`speed_factor`**: de sim loopt op wandklok, `speed_factor` sim-seconden per wandklokseconde (stap `SIM_TICK_S` = 1 s sim). De baseline (≈ 11 800 s sim) duurt bij 100 zo'n 2 minuten. De runner start op de sim-tijd die hij na het verbinden ziet; alle KPI-tijden en -rates zijn relatief daaraan. `PrefillYard` (LOAD-containers in de stack) accepteert de sim alleen op sim-tijd 0, dus scenario's met LOAD-orders werken in B1 alleen als de runner verbindt voordat de sim-klok loopt (in praktijk: niet); de meegeleverde scenario's zijn alleen-lossen.
+- **KPI `faults`**: de storingsteller van de sim is via OPC UA niet beschikbaar. In opcua-modus telt de runner daarom de `STATE_CHANGED → Fault`-events; daaronder vallen ook de Faults die de gateway synthetiseert als een equipment-server wegvalt.
+- **Tests**: `uv run pytest -m e2e_opcua` start sim en gateway als subprocessen op vrije poorten en draait twee tests: 20 containers / 1 STS / 2 AGV's (≈ 45 s) en de baseline via OPC UA vergeleken met in-process (≈ 3,5 min). Ze staan standaard uit (`addopts = "-m 'not e2e_opcua'"` in `pyproject.toml`) omdat de suite al ≈ 3 minuten duurt.
+
+**Architectuur.** `terminal_sim.serve` draait de salabim-wereld en publiceert elk apparaat als eigen OPC UA-server, plus een klokserver met `SimTime`, `SpeedFactor`, `Stop` en `PrefillYard`. `terminal_gateway` spiegelt al die servers onder één namespace (`Terminal/Quay|Fleet|Yard|Clock`), stuurt methodes door en meldt een weggevallen server als `Fault`. De runner praat alleen met de gateway via `OpcUaEquipmentPort`, dat het `EquipmentPort`-protocol implementeert; events worden in de runner-thread afgeleverd (`drain_events`, elke 5 ms wandklok). De ECS (`terminal_ecs`) is daarvoor niet gewijzigd: `test_ecs_unchanged_since_plan_a` vergelijkt een sha256 over de ECS-bronnen met de waarde van `master` in `tests/fixtures/ecs_sources.sha256`.
 
 ## Verder
 
-Ontwerp: `docs/superpowers/specs/2026-11-10-terminal-platform-fase1-design.md`. Plan B (OPC UA-laag, gateway, viewer, Docker) volgt.
+Ontwerp: `docs/superpowers/specs/2026-11-10-terminal-platform-fase1-design.md` en `docs/superpowers/specs/2026-11-10-plan-b1-opcua-design.md`. Plan B2 (ECS-service, viewer, Docker) en B3 (eigen DataTypes, beveiliging, vendor-adapters) volgen.
