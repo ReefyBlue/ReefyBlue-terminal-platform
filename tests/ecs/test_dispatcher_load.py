@@ -155,3 +155,24 @@ def test_routine_assignments_and_completions_log_at_debug_only(caplog):
         port.complete(eid)
     assert d.completed == ["C9"]
     assert [r.getMessage() for r in caplog.records] == []
+
+
+def test_non_head_load_with_agv_to_tp_counts_against_lookahead():
+    # An AGV sent to the TP for a LOAD is already committed to that crane.
+    port = make_port(n_agv=6)
+    d = Dispatcher(port, FakeSlots(), lookahead_per_sts=2)
+    d.submit([discharge("C1"), discharge("C2", slot="A/2/1/1"), load("C3"), discharge("C4", slot="A/4/1/1")])
+
+    def sent() -> dict[str, str]:
+        return {j.container_id: eid for eid, j in port.calls if j.type is JobType.TRANSPORT}
+
+    assert set(sent()) == {"C1", "C2"}  # lookahead full
+    port.complete("ASC-A")  # C3 at the TP, still blocked by the lookahead
+    assert "C3" not in sent()
+    port.complete(sent()["C1"])  # C1 under the crane
+    port.complete("STS-01")  # C1 discharged -> TO_YARD frees a lookahead place
+    assert "C3" in sent()  # non-head C3 (head is C2) gets an AGV: AGV_TO_TP
+    d.tick()
+    assert "C4" not in sent()  # C2 (en route) + C3 (AGV_TO_TP) fill the lookahead
+    port.complete(sent()["C3"])  # C3 picked up -> TO_STS, still counted
+    assert "C4" not in sent()

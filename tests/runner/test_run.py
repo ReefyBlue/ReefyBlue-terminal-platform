@@ -99,3 +99,28 @@ def test_hook_rejects_a_non_agv_with_type_error(small_yaml: Path):
     world = World(load_layout(LAYOUT), load_scenario(small_yaml))
     with pytest.raises(TypeError, match="STS-01 is not an AGV"):
         _transfer_hook(world)("tp_to_agv", "STS-01", "C0001")
+
+
+MIXED = """\
+name: mixed
+seed: 7  # stalled at 23/40 before AGV_TO_TP counted
+n_sts: 2
+n_agv: 6
+n_containers: 40
+share_40ft: 0.5
+discharge_share: 0.5
+speed_factor: 1
+duration_s: 14400
+"""
+
+
+def test_mixed_load_discharge_with_many_agvs_completes(tmp_path: Path):
+    # Regression: non-head LOAD AGVs fetching boxes from several TPs at once used to
+    # fill both lane cells and lock the FIFO-head LOAD out (AGV_TO_TP not counted).
+    path = tmp_path / "mixed.yaml"
+    path.write_text(MIXED)
+    scenario = load_scenario(path)
+    k = run_once(scenario, load_layout(LAYOUT), seed=scenario.seed)
+    assert k["containers_done"] == 40.0
+    assert k["containers_failed"] == 0.0
+    assert k["timed_out"] == 0.0

@@ -32,12 +32,13 @@ class Stage(StrEnum):
     FAILED = "FAILED"
 
 
-# Orders whose AGV is bound to the crane area (heading for, waiting in or working in
-# the STS lane); counted against ``lookahead_per_sts``.
+# Orders whose AGV is committed to the crane (heading for, waiting in or working in
+# the STS lane; for a LOAD already from the moment it is sent to the TP); counted
+# against ``lookahead_per_sts``.
 LOOKAHEAD_STAGES = frozenset(
     {
         Stage.AGV_EN_ROUTE, Stage.AT_STS, Stage.DISCHARGING,  # discharge
-        Stage.TO_STS, Stage.AT_STS_LOAD, Stage.LOADING,  # load
+        Stage.AGV_TO_TP, Stage.TO_STS, Stage.AT_STS_LOAD, Stage.LOADING,  # load
     }
 )
 # Orders that have not been served by their STS yet; the per-STS FIFO runs over these.
