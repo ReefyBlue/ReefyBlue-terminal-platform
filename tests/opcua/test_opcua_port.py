@@ -61,8 +61,7 @@ class Rig:
         await asyncio.gather(*(s.sync() for s in self.servers.values()), self.control.sync())
 
 
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def rig():
+async def _start_rig() -> Rig:
     r = Rig()
     layout = load_layout(ROOT / "terminal.yaml")
     scenario = replace(load_scenario(ROOT / "scenarios/baseline.yaml"), n_sts=1, n_agv=2)
@@ -94,10 +93,20 @@ async def rig():
     r.events = []
     r.port.subscribe(r.events.append)
     await asyncio.to_thread(r.port.connect)
-    yield r
+    return r
+
+
+async def _stop_rig(r: Rig) -> None:
     await asyncio.to_thread(r.port.close)
     await r.gateway.stop()
     await asyncio.gather(*(s.stop() for s in [*r.servers.values(), r.control]))
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def rig():
+    r = await _start_rig()
+    yield r
+    await _stop_rig(r)
 
 
 async def _drain_until(r, pred, timeout: float) -> bool:
@@ -207,3 +216,62 @@ async def test_connect_failure_raises_connection_error():
     assert time.monotonic() - t0 < 5.0
     port.close()  # idempotent after a failed connect
     port.close()
+
+
+async def test_connection_lost_fails_fast():
+    r = await _start_rig()
+    try:
+        await r.gateway.stop()
+        lost = await _until(lambda: r.port._lost, 10.0, step=0.05)
+        assert lost, "connection loss not detected"
+        t0 = time.monotonic()
+        with pytest.raises(ConnectionError):
+            await asyncio.to_thread(r.port.snapshot, "STS-01")
+        with pytest.raises(ConnectionError):
+            await asyncio.to_thread(r.port.wait_for_sim_time, r.port.now() + 1000, 30.0)
+        assert time.monotonic() - t0 < 0.5
+    finally:
+        await asyncio.to_thread(r.port.close)
+        await asyncio.gather(*(s.stop() for s in [*r.servers.values(), r.control]))
+
+
+async def test_close_discards_buffered_events():
+    port = OpcUaEquipmentPort("opc.tcp://127.0.0.1:1/none")
+    got = []
+    port.subscribe(got.append)
+    port._events.put(EquipmentEvent(EventKind.STATE_CHANGED, "STS-01", 0.0, new_state=State.IDLE))
+    port.close()
+    assert port.drain_events() == 0 and got == []
+
+
+async def test_event_seq_handled_in_creation_order_with_direct_read(rig, monkeypatch):
+    """A direct-read fallback that awaits must not let a later EventSeq overtake it."""
+    rig.port.drain_events()
+    rig.events.clear()
+    eq = rig.port._equipment["ASC-C"]
+    first = EquipmentEvent(EventKind.STATE_CHANGED, "ASC-C", 1.0, new_state=State.BUSY)
+    second = EquipmentEvent(EventKind.STATE_CHANGED, "ASC-C", 2.0, new_state=State.IDLE)
+    node = eq.variables["LastEvent"]
+
+    async def slow_read(self=node):
+        await asyncio.sleep(0.1)
+        return event_to_json(first)
+
+    monkeypatch.setattr(node, "read_value", slow_read)
+    loop = rig.port._loop
+    base = eq.last_seq
+    a = asyncio.run_coroutine_threadsafe(rig.port._on_event_seq(eq, base + 1), loop)
+    await asyncio.sleep(0.02)  # first handler is now awaiting the direct read
+    eq_fifo_put = asyncio.run_coroutine_threadsafe(
+        _append(eq, event_to_json(second)), loop)
+    await asyncio.wrap_future(eq_fifo_put)
+    b = asyncio.run_coroutine_threadsafe(rig.port._on_event_seq(eq, base + 2), loop)
+    await asyncio.wrap_future(a)
+    await asyncio.wrap_future(b)
+    rig.port.drain_events()
+    assert [e for e in rig.events if e.equipment_id == "ASC-C"] == [first, second]
+    assert eq.last_seq == base + 2
+
+
+async def _append(eq, payload):
+    eq.fifo.append(payload)

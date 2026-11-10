@@ -8,6 +8,12 @@ in a queue and delivered to subscribers on the caller's thread by ``drain_events
 Event pairing: the gateway writes ``LastEvent`` then bumps ``EventSeq``. Both are
 monitored with a server-side queue (no coalescing); ``LastEvent`` values are kept
 in a FIFO per equipment and each ``EventSeq`` notification pops the next one.
+``EventSeq`` notifications are handled one at a time (``asyncio.Lock``) so events
+keep their creation order even when the direct-read fallback awaits.
+
+Connection loss (detected by asyncua's watchdog) sets ``_lost``; from then on
+``snapshot``, ``wait_for_sim_time`` and every server call raise ``ConnectionError``
+at once instead of waiting out a call timeout. The port does not reconnect.
 """
 
 from __future__ import annotations
@@ -99,6 +105,8 @@ class OpcUaEquipmentPort:
         self._callbacks: list[Callable[[EquipmentEvent], None]] = []
         self._now = 0.0
         self._connected = False
+        self._lost = False
+        self._seq_lock: asyncio.Lock | None = None
 
     # -- lifecycle -------------------------------------------------------------------
     def connect(self) -> None:
@@ -109,6 +117,7 @@ class OpcUaEquipmentPort:
         thread = threading.Thread(target=loop.run_forever, name="opcua-port", daemon=True)
         thread.start()
         self._loop, self._thread = loop, thread
+        self._lost = False
         fut = asyncio.run_coroutine_threadsafe(self._connect(), loop)
         try:
             fut.result(timeout=self.connect_timeout_s + SETUP_TIMEOUT_S)
@@ -120,6 +129,7 @@ class OpcUaEquipmentPort:
         log.info("connected to %s (%d equipment)", self.endpoint, len(self._equipment))
 
     async def _connect(self) -> None:
+        self._seq_lock = asyncio.Lock()
         client = Client(self.endpoint, timeout=self.connect_timeout_s)
         client.connection_lost_callback = self._on_connection_lost
         await asyncio.wait_for(client.connect(), self.connect_timeout_s)
@@ -171,10 +181,16 @@ class OpcUaEquipmentPort:
         await sub.subscribe_data_change(sim_time, sampling_interval=0.0)
 
     async def _on_connection_lost(self, exc: Exception) -> None:
+        self._lost = True
         log.warning("connection to %s lost: %r", self.endpoint, exc)
+
+    def _check_lost(self) -> None:
+        if self._lost:
+            raise ConnectionError(f"connection to {self.endpoint} lost")
 
     def close(self) -> None:
         """Disconnect and stop the loop thread; safe to call more than once."""
+        self._events = queue.SimpleQueue()  # undelivered events belong to this session
         loop, thread = self._loop, self._thread
         if loop is None:
             return
@@ -220,6 +236,9 @@ class OpcUaEquipmentPort:
         if self._loop is None or not self._connected:
             coro.close()
             raise RuntimeError("port not connected")
+        if self._lost:
+            coro.close()
+            self._check_lost()
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
             return fut.result(timeout=timeout)
@@ -316,9 +335,11 @@ class OpcUaEquipmentPort:
         return True
 
     def wait_for_sim_time(self, t: float, timeout_s: float) -> bool:
-        """Block until ``now() >= t``; False after ``timeout_s``."""
+        """Block until ``now() >= t``; False after ``timeout_s``.
+        ``ConnectionError`` as soon as the connection is (or has been) lost."""
         deadline = time.monotonic() + timeout_s
         while self._now < t:
+            self._check_lost()
             if time.monotonic() >= deadline:
                 return False
             time.sleep(POLL_S)
@@ -337,6 +358,12 @@ class OpcUaEquipmentPort:
             await self._on_event_seq(eq, int(val))
 
     async def _on_event_seq(self, eq: _Equipment, seq: int) -> None:
+        if self._seq_lock is None:  # only before _connect ran (tests)
+            self._seq_lock = asyncio.Lock()
+        async with self._seq_lock:
+            await self._handle_event_seq(eq, seq)
+
+    async def _handle_event_seq(self, eq: _Equipment, seq: int) -> None:
         if eq.fifo:
             payload = eq.fifo.popleft()
         elif seq <= eq.initial_seq:
@@ -352,7 +379,7 @@ class OpcUaEquipmentPort:
                         eq.equipment_id, eq.last_seq, seq, seq - eq.last_seq - 1)
         elif seq <= eq.last_seq:
             log.warning("%s: EventSeq %d not ahead of %d", eq.equipment_id, seq, eq.last_seq)
-        eq.last_seq = seq
+        eq.last_seq = max(eq.last_seq, seq)
         try:
             ev = event_from_json(payload)
         except (ValueError, TypeError) as e:
