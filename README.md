@@ -164,7 +164,57 @@ Per client geldt een wachtrij van 1000 berichten; bij vol worden berichten gedro
 
 Simulatiebesturing (`PrefillYard`, `Start`, `Stop`) blijft bij de runner, via OPC UA op de gateway; de service heeft er geen endpoints voor.
 
-Verbindingsverlies: de service houdt zijn Dispatcher en orders vast, verbindt elke 2 s opnieuw met de gateway, stuurt `link`-berichten bij verlies en herstel, en antwoordt 503 (`/health`, `POST /workorders`) zolang hij niet verbonden is. Events van de gateway tijdens de onderbreking gaan verloren. Bij herstel vergelijkt de service de laatst bekende toestand per apparaat met de nieuwe snapshot en levert elk verschil als `STATE_CHANGED` met `reason: "LINK_RESTORED"` (ook op `WS /events`), zodat bijvoorbeeld een apparaat dat tijdens de onderbreking van FAULT naar IDLE ging weer ingezet wordt. Beperking: een `JOB_COMPLETED`/`JOB_FAILED` uit de onderbreking is niet te reconstrueren; de service logt dan alleen een WARNING met de apparaten waarvan `current_job_id` veranderde (een AGV-job ruimt de Dispatcher-watchdog na `watchdog_s` op; andere jobs blijven open tot B2d, dat deze reconciliatie regelt).
+Verbindingsverlies: de service houdt zijn Dispatcher en orders vast, verbindt elke 2 s opnieuw met de gateway, stuurt `link`-berichten bij verlies en herstel, en antwoordt 503 (`/health`, `POST /workorders`) zolang hij niet verbonden is. Events van de gateway tijdens de onderbreking gaan verloren; hoe de ECS daarna reconcilieert staat in de volgende sectie (Plan B2d).
+
+## Storingen, verbindingsverlies en vrijgave (Plan B2d)
+
+Ontwerp: `docs/superpowers/specs/2026-11-10-plan-b2d-link-loss-design.md`.
+
+**Toestanden** van een apparaat (`State` in OPC UA, `state` in `GET /equipment`):
+
+| Toestand | Betekenis | Dispatcher |
+|---|---|---|
+| `IDLE` | beschikbaar | krijgt jobs (tenzij het nog vrijgegeven moet worden) |
+| `BUSY` | voert een job uit | — |
+| `FAULT` | storing gemeld door het apparaat | lopende job wordt herpland; apparaat uitgesloten en `needs_release` |
+| `OFFLINE` | verbinding weg (gateway↔apparaat: reden `UPSTREAM_DISCONNECTED`; ECS↔gateway: `LINK_LOST`) | **geen** herplanning, order blijft in zijn stage, geen nieuwe jobs, watchdog bevroren |
+
+Komt een apparaat terug (`UPSTREAM_RECONNECTED` / `LINK_RESTORED`) als `BUSY`, dan loopt de job gewoon door. Komt het terug als `IDLE` terwijl er een job liep waarvan geen `JOB_COMPLETED`/`JOB_FAILED` binnenkwam, dan is de uitkomst **onbekend**. Terug als `FAULT`: zoals hierboven.
+
+**Alarmen** (`GET /alarms`, gesorteerd op `since_sim_time`; WS-bericht `{"type":"alarm","action":"raised"|"cleared",…}`):
+
+| `kind` | Wanneer | Opgeheven door |
+|---|---|---|
+| `LINK_LOST` | per apparaat dat OFFLINE is | herstel van de verbinding |
+| `NEEDS_RELEASE` | na een FAULT of een onbekende uitkomst | `POST /equipment/{id}/release` |
+| `UNKNOWN_OUTCOME` | job liep tijdens OFFLINE, apparaat kwam IDLE terug | `POST /jobs/{job_id}/resolve` |
+
+`GET /status` telt mee: `offline`, `needs_release`, `unknown_outcomes`.
+
+**Endpoints voor de operator:**
+
+```bash
+curl -s http://localhost:8000/alarms
+# [{"kind":"UNKNOWN_OUTCOME","equipment_id":"STS-01","job_id":"C0008-DISCHARGE-1","since_sim_time":1003.0,"detail":"…"}, …]
+
+curl -s -X POST http://localhost:8000/jobs/C0008-DISCHARGE-1/resolve \
+     -H 'content-type: application/json' -d '{"outcome":"completed"}'
+# 200 {"job_id":"C0008-DISCHARGE-1","outcome":"completed"}; 404 geen onbekende uitkomst; 422 ongeldige outcome; 503 niet verbonden
+
+curl -s -X POST http://localhost:8000/equipment/STS-01/release
+# 200 {"released":"STS-01"}; 404 onbekend; 409 {"code":"RELEASE_REFUSED","message":…}; 503 niet verbonden
+```
+
+Een order waarvan de jobs 5 keer achter elkaar mislukken (JOB_FAILED of FAULT, zonder voltooide job ertussen) wordt geparkeerd als `stuck` (`GET /status`, KPI `containers_stuck`, ERROR in de log): de ECS geeft hem niet opnieuw uit, zodat een direct falende job niet eindeloos herhaald wordt.
+
+`release` wordt geweigerd (409) zolang het apparaat `FAULT` of `OFFLINE` meldt of er voor dat apparaat nog een onbekende uitkomst openstaat (`"resolve job <id> first"`).
+
+**Wat doet de operator?**
+
+- *Na een FAULT:* de job is al herpland. Controleer het apparaat ter plaatse; zodra het weer `IDLE` meldt: `POST /equipment/{id}/release`. Zonder vrijgave krijgt het geen jobs meer.
+- *Na een onbekende uitkomst:* kijk wat er werkelijk gebeurd is (staat de container op de AGV / in de stack / nog onder de kraan?). Gebeurd → `resolve` met `"completed"` (de order gaat door alsof `JOB_COMPLETED` binnenkwam); niet gebeurd → `"failed"` (de order wordt herpland). Daarna `release` van het apparaat.
+
+**Onbemande runs:** `terminal_ecs_service.serve --auto-release` (standaard uit) geeft een apparaat na FAULT → IDLE direct weer vrij en telt een onbekende uitkomst direct als `completed` (geen alarm): bij OFFLINE werkt het apparaat door, dus een job die al liep kan alleen voltooien of in een FAULT eindigen (en dan meldt het apparaat zich FAULT, niet IDLE). Zonder `--auto-release` beslist de operator via `resolve`. De runner draait in-process standaard met auto-release; `terminal_runner.run --no-auto-release` schakelt het uit (dan blijven FAULT-apparaten uitgesloten en onbekende uitkomsten open). Met `--port http` heeft die vlag geen effect: daar beslist de service (`--auto-release`).
 
 ## Verder
 
