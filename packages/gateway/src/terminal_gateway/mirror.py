@@ -32,6 +32,7 @@ CONNECT_TIMEOUT_S = 2.0
 WATCHDOG_S = 1.0
 EVENT_QUEUE = 100  # server-side FIFO per monitored item: no coalescing between publishes
 FAULT_REASON = "UPSTREAM_DISCONNECTED"
+RECOVERY_REASON = "UPSTREAM_RECONNECTED"
 
 
 def _is_event(payload: object) -> bool:
@@ -144,6 +145,11 @@ class EquipmentMirror(_UpstreamLink):
     ``upstream seq + offset``; the offset is 0 until a Fault event (upstream lost)
     has been synthesized with ``last + 1``, and is re-derived on every resync so the
     next upstream event maps strictly above everything delivered so far.
+
+    A lost link is reported as STATE_CHANGED -> FAULT (``UPSTREAM_DISCONNECTED``); on
+    reconnect, after any delivery of the upstream's latest event, a STATE_CHANGED to
+    the upstream's current state (``UPSTREAM_RECONNECTED``) follows, so the ECS stops
+    excluding the device.
     """
 
     def __init__(
@@ -263,6 +269,8 @@ class EquipmentMirror(_UpstreamLink):
             else:
                 # nothing new: write no event, but map the next upstream seq above ours
                 self._offset = self._seq - up_seq
+            if self._fault_announced:
+                await self._announce_recovery(current["State"], up_seq)
             if self._offset:
                 log.warning("%s: upstream EventSeq %d mapped with offset %d after resync",
                             self.equipment_id, up_seq, self._offset)
@@ -273,6 +281,25 @@ class EquipmentMirror(_UpstreamLink):
         sub = await client.create_subscription(SUBSCRIPTION_PERIOD_MS, self)
         await sub.subscribe_data_change(
             nodes, queuesize=EVENT_QUEUE, sampling_interval=0.0)
+
+    async def _announce_recovery(self, upstream_state: object, up_seq: int) -> None:
+        """After a synthesized Fault: report the upstream's actual state (caller holds the
+        write lock). The ECS excludes a device until STATE_CHANGED -> IDLE, which the
+        upstream never sends when only the link was down. Skipped when the upstream is
+        itself FAULT: the device stays excluded and no second Fault is counted."""
+        try:
+            state = State(upstream_state)
+        except ValueError:
+            log.warning("%s: upstream State %r unknown; no recovery event",
+                        self.equipment_id, upstream_state)
+            return
+        if state is State.FAULT:
+            return
+        ev = EquipmentEvent(
+            EventKind.STATE_CHANGED, self.equipment_id, self._sim_time,
+            reason=RECOVERY_REASON, new_state=state)
+        await self._write_event(event_to_json(ev), self._seq + 1)
+        self._offset = self._seq - up_seq  # next upstream event maps above the recovery
 
     async def datachange_notification(self, node: Node, val, data) -> None:
         name = self._names.get(node.nodeid)
