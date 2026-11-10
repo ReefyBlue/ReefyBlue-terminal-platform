@@ -100,6 +100,14 @@ class Gateway:
         folders = await ensure_folders(server, idx, server.nodes.objects)
         await server.start()
         self._server = server
+        try:
+            await self._create_mirrors(server, idx, types, folders)
+        except BaseException:
+            await self.stop()
+            raise
+        log.info("gateway serving %s (%d equipment)", self.endpoint, len(self.table))
+
+    async def _create_mirrors(self, server: Server, idx: int, types, folders) -> None:
         for u in self.table:
             if u.kind == Kind.STS:
                 parent = folders["Quay"]
@@ -118,7 +126,6 @@ class Gateway:
             endpoint=self._url(self.base_port + CONTROL_PORT_OFFSET, "control"),
             on_sim_time=self._on_sim_time, reconnect_s=self.reconnect_s)
         await self.control.start()
-        log.info("gateway serving %s (%d equipment)", self.endpoint, len(self.table))
 
     async def stop(self) -> None:
         links = [*self.mirrors.values(), *([self.control] if self.control else [])]

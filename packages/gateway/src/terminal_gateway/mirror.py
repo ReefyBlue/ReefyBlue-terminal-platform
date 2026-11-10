@@ -128,9 +128,11 @@ class _UpstreamLink:
 class EquipmentMirror(_UpstreamLink):
     """Gateway-side copy of one equipment object, kept in sync with its upstream server.
 
-    EventSeq is mirrored verbatim, except that a synthesized Fault event (upstream lost)
-    takes ``last + 1``. After such an event the upstream counter is shifted by an
-    offset so the gateway sequence stays strictly increasing per event (see report).
+    Invariant: LastEvent is never written without bumping EventSeq, so a consumer
+    pairing LastEvent/EventSeq notifications FIFO never shifts. Gateway seq is
+    ``upstream seq + offset``; the offset is 0 until a Fault event (upstream lost)
+    has been synthesized with ``last + 1``, and is re-derived on every resync so the
+    next upstream event maps strictly above everything delivered so far.
     """
 
     def __init__(
@@ -157,7 +159,9 @@ class EquipmentMirror(_UpstreamLink):
         self._uidx = 0
         self._names: dict[ua.NodeId, str] = {}
         self._le_queue: collections.deque[str] = collections.deque()
-        self._last_upstream_le = ""
+        self._last_upstream_le = ""            # pairing fallback for EventSeq notifications
+        self._delivered_up_seq: int | None = None  # upstream seq of the last delivered event
+        self._delivered_le = ""                # upstream LastEvent JSON last delivered
 
     def set_sim_time(self, t: float) -> None:
         self._sim_time = float(t)
@@ -207,19 +211,22 @@ class EquipmentMirror(_UpstreamLink):
         await (await get_var(self.obj, name)).write_value(to_variant(name, value))
 
     async def _write_event(self, last_event: str, seq: int) -> None:
-        """LastEvent first, then EventSeq (clients read LastEvent on EventSeq change)."""
+        """LastEvent first, then EventSeq; ``seq`` must exceed the last written one."""
+        assert seq > self._seq, (seq, self._seq)
         await self._write("LastEvent", last_event)
-        if seq != self._seq:
-            self._seq = seq
-            await self._write("EventSeq", seq)
+        self._seq = seq
+        await self._write("EventSeq", seq)
 
-    def _map_seq(self, upstream: int) -> int:
-        mapped = int(upstream) + self._offset
-        if mapped < self._seq:
-            log.warning("%s: upstream EventSeq %d went backwards; holding %d",
-                        self.equipment_id, upstream, self._seq)
-            return self._seq
-        return mapped
+    async def _deliver_upstream(self, up_seq: int, last_event: str) -> None:
+        """Deliver one upstream event (caller holds the write lock)."""
+        mapped = up_seq + self._offset
+        if mapped <= self._seq:
+            mapped = self._seq + 1
+            log.warning("%s: upstream EventSeq %d not ahead of gateway %d; offset now %d",
+                        self.equipment_id, up_seq, self._seq, mapped - up_seq)
+        self._offset = mapped - up_seq
+        await self._write_event(last_event, mapped)
+        self._delivered_up_seq, self._delivered_le = up_seq, last_event
 
     async def _on_connected(self, client: Client) -> None:
         uidx = await client.get_namespace_index(NAMESPACE_URI)
@@ -231,15 +238,23 @@ class EquipmentMirror(_UpstreamLink):
             for name, value in current.items():
                 if name not in ("LastEvent", "EventSeq"):
                     await self._write(name, value)
-            upstream_seq = int(current["EventSeq"])
-            if upstream_seq + self._offset < self._seq:
-                self._offset = self._seq - upstream_seq
-                log.warning("%s: upstream EventSeq %d is behind the gateway's %d; "
-                            "offsetting upstream sequence by %d",
-                            self.equipment_id, upstream_seq, self._seq, self._offset)
-            self._last_upstream_le = current["LastEvent"]
+            up_seq, up_le = int(current["EventSeq"]), current["LastEvent"]
             self._le_queue.clear()
-            await self._write_event(current["LastEvent"], upstream_seq + self._offset)
+            self._last_upstream_le = up_le
+            if up_seq != self._delivered_up_seq and up_le != self._delivered_le:
+                # new events (or an upstream restart) while away: deliver the latest
+                # one above everything delivered; adopt the upstream seq verbatim
+                # when it is already ahead (first connect, no Fault in between)
+                new_seq = max(self._seq + 1, up_seq)
+                self._offset = new_seq - up_seq
+                await self._write_event(up_le, new_seq)
+            else:
+                # nothing new: write no event, but map the next upstream seq above ours
+                self._offset = self._seq - up_seq
+            if self._offset:
+                log.warning("%s: upstream EventSeq %d mapped with offset %d after resync",
+                            self.equipment_id, up_seq, self._offset)
+            self._delivered_up_seq, self._delivered_le = up_seq, up_le
             self._fault_announced = False
         self._names = {n.nodeid: name for n, name in zip(nodes, self.var_names, strict=True)}
         self._uobj, self._uidx = uobj, uidx
@@ -261,11 +276,18 @@ class EquipmentMirror(_UpstreamLink):
                 async with self._write_lock:
                     if self._le_queue:
                         self._last_upstream_le = self._le_queue.popleft()
-                    await self._write_event(self._last_upstream_le, self._map_seq(val))
+                    le, up_seq = self._last_upstream_le, int(val)
+                    if (le == self._delivered_le and self._delivered_up_seq is not None
+                            and up_seq <= self._delivered_up_seq):
+                        return  # already delivered (e.g. initial notification after resync)
+                    await self._deliver_upstream(up_seq, le)
                 return
             await self._write(name, val)
         except Exception:
             log.exception("%s: mirroring %s failed", self.equipment_id, name)
+
+    async def status_change_notification(self, status) -> None:
+        """Subscription status changes are handled by the connection-loss path."""
 
     async def _on_lost(self) -> None:
         self._uobj = None
@@ -341,6 +363,9 @@ class ControlMirror(_UpstreamLink):
             await self._write(name, val)
         except Exception:
             log.exception("control: mirroring %s failed", name)
+
+    async def status_change_notification(self, status) -> None:
+        """Subscription status changes are handled by the connection-loss path."""
 
     async def _on_lost(self) -> None:
         self._uobj = None
