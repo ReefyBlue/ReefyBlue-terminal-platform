@@ -104,13 +104,18 @@ class AGV(Equipment):
             nxt = route[i]
             waited = 0.0
             while not self.grid.try_reserve(nxt, self.equipment_id):
-                if waited >= REPLAN_AFTER_S and nxt != goal:
+                if waited >= REPLAN_AFTER_S:
                     waited = 0.0
-                    new = self._plan(goal)
-                    if len(new) > 1:
-                        route, i, nxt = new, 1, new[1]
-                        self.route = route
-                        continue
+                    # Re-resolve the goal: another AGV may hold the cell this one was
+                    # heading for (e.g. the other STS lane cell is still free).
+                    new_goal = self.resolve_cell(job.to_loc)
+                    if nxt != goal or new_goal != goal:
+                        goal = new_goal
+                        new = self._plan(goal)
+                        if len(new) > 1:
+                            route, i, nxt = new, 1, new[1]
+                            self.route = route
+                            continue
                 yield self.hold(RESERVE_RETRY_S)
                 waited += RESERVE_RETRY_S
             self._pending = nxt

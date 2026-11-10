@@ -161,3 +161,29 @@ def test_replans_when_blocked_mid_route():
     rig.env.run(till=200)
     assert a.cell == (8, 2)
     assert len(of_kind(rig, EventKind.JOB_COMPLETED)) == 1
+
+
+
+class _FreeLaneCell:
+    """resolve_cell for an STS: the first lane cell no AGV holds (like World)."""
+
+    def __init__(self, grid, lane):
+        self.grid, self.lane = grid, lane
+
+    def __getitem__(self, loc):
+        free = [c for c in self.lane if self.grid.owner_of(c) is None]
+        return free[0] if free else self.lane[0]
+
+
+def test_blocked_goal_is_re_resolved():
+    # Both AGVs resolve the STS to the same free lane cell; the one that loses
+    # the race must take the other lane cell instead of waiting forever.
+    rig = Rig()
+    lane = [(4, 0), (5, 0)]
+    rig.locs = _FreeLaneCell(rig.grid, lane)
+    a, b = rig.agv(1, (0, 2)), rig.agv(2, (1, 2))
+    assert a.assign_job(transport("STS-01", "J1"))
+    assert b.assign_job(transport("STS-01", "J2"))
+    rig.env.run(till=300)
+    assert len(of_kind(rig, EventKind.JOB_COMPLETED)) == 2
+    assert {a.cell, b.cell} == set(lane)
