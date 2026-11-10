@@ -4,7 +4,8 @@ from pathlib import Path
 
 from fake_port import FakeSlots, make_port
 from terminal_ecs.dispatcher import Dispatcher
-from terminal_model.types import Job, JobType, Position, State
+from terminal_ecs.workorders import WorkOrder
+from terminal_model.types import Job, JobType, State
 from terminal_runner.kpi import KpiCollector
 
 
@@ -50,28 +51,97 @@ def test_utilisation_without_samples_is_zero():
     assert kpi.finish(60.0)["utilisation_ASC"] == 0.0
 
 
-def test_agv_wait_and_travel_split():
+def _discharge(cid="C1", slot="A/1/1/1"):
+    return WorkOrder(container_id=cid, type=JobType.DISCHARGE, sts_id="STS-01", yard_slot=slot)
+
+
+def _load(cid="L1", slot="A/3/1/1"):
+    return WorkOrder(container_id=cid, type=JobType.LOAD, sts_id="STS-01", yard_slot=slot)
+
+
+def test_agv_kpis_from_discharge_events():
     port, disp, kpi = setup()
-    port.set_state("AGV-01", State.BUSY)
-    kpi.sample()  # first sample: no previous position -> nothing attributed
-    kpi.sample()  # same position -> wait
-    kpi.sample()  # wait
-    port.set_position("AGV-01", Position(50, 50))
-    kpi.sample()  # moved -> travel
-    port.advance(240)
-    # complete one TRANSPORT job
-    port.set_state("AGV-01", State.IDLE)
-    run_job(port, "AGV-01", JobType.TRANSPORT, n=2)
-    k = kpi.finish(240.0)
-    assert k["agv_wait_s_mean"] == 120.0
-    assert k["agv_travel_s_mean"] == 60.0
+    disp.submit([_discharge()])  # t=0: AGV-01 sent to the STS
+    port.advance(40)
+    port.complete("AGV-01")  # arrives in the lane at t=40 (travel 40)
+    port.advance(100)
+    port.complete("STS-01")  # box on the AGV at t=140 (lane wait 100); leg to the TP issued
+    port.advance(60)
+    port.complete("AGV-01")  # at the TP at t=200 (travel 60)
+    port.complete("ASC-A")
+    k = kpi.finish(200.0)
+    assert k["containers_done"] == 1.0
+    assert k["agv_wait_sts_s_mean"] == 100.0
+    assert k["agv_travel_s_mean"] == 50.0
+    assert k["agv_wait_tp_s_mean"] == 0.0  # no LOAD orders
+
+
+def test_agv_kpis_from_load_events():
+    port, disp, kpi = setup()
+    disp.on_transfer = kpi.observe_transfer
+    disp.submit([_load()])
+    port.advance(10)
+    port.complete("ASC-A")  # box at the TP at t=10: AGV-01 sent
+    port.advance(30)
+    port.complete("AGV-01")  # at the TP at t=40, box taken at once (tp_to_agv)
+    port.advance(50)
+    port.complete("AGV-01")  # in the lane at t=90
+    port.advance(20)
+    port.complete("STS-01")  # loaded at t=110
+    k = kpi.finish(110.0)
+    assert k["containers_done"] == 1.0
+    assert (k["agv_wait_tp_s_mean"], k["agv_wait_sts_s_mean"], k["agv_travel_s_mean"]) == (0.0, 20.0, 40.0)
+
+
+def test_agv_wait_at_tp_until_pickup():
+    port, disp, kpi = setup()
+    disp.submit([_load()])
+    port.complete("ASC-A")
+    port.advance(30)
+    port.complete("AGV-01")  # at the TP at t=30
+    port.advance(15)
+    kpi.observe_transfer("tp_to_agv", "AGV-01", "L1")  # box on the AGV 15 s later
+    assert kpi.finish(45.0)["agv_wait_tp_s_mean"] == 15.0
+
+
+def test_agv_utilisation_counts_committed_idle_agvs():
+    port, disp, kpi = setup()
+    disp.submit([_discharge()])
+    port.complete("AGV-01")  # AGV-01 idle in the lane, still committed to C1
+    port.set_state("STS-01", State.FAULT)  # crane down: AGV-01 waits
+    assert port.snapshot("AGV-01").state is State.IDLE
+    assert disp.committed_agvs() == frozenset({"AGV-01"})
+    kpi.sample()
+    assert kpi.finish(60.0)["utilisation_AGV"] == 0.5  # AGV-01 committed, AGV-02 free
 
 
 def test_agv_means_zero_without_transports():
     port, disp, kpi = setup()
     k = kpi.finish(60.0)
-    assert k["agv_wait_s_mean"] == 0.0
+    assert k["agv_wait_sts_s_mean"] == 0.0
+    assert k["agv_wait_tp_s_mean"] == 0.0
     assert k["agv_travel_s_mean"] == 0.0
+
+
+def test_kpi_key_order_is_stable():
+    port, disp, kpi = setup()
+    assert list(kpi.finish(60.0)) == [
+        "moves_per_hour_total",
+        "moves_per_hour_STS-01",
+        "agv_wait_sts_s_mean",
+        "agv_wait_tp_s_mean",
+        "agv_travel_s_mean",
+        "utilisation_STS",
+        "utilisation_AGV",
+        "utilisation_ASC",
+        "vessel_turnaround_s",
+        "faults",
+        "replans",
+        "energy_kwh_per_move",
+        "containers_done",
+        "containers_failed",
+        "containers_stuck",
+    ]
 
 
 def test_turnaround():

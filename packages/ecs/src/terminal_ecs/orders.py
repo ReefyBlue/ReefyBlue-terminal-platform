@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from terminal_model.locations import SlotLoc, parse_location
-from terminal_model.types import JobType
+from terminal_model.types import Job, JobType
 
 from terminal_ecs.workorders import WorkOrder
 
@@ -69,6 +69,15 @@ ROLLBACK = {
 }
 # Rollbacks where the AGV carries no box yet and is released.
 RELEASE_AGV = frozenset({Stage.AGV_EN_ROUTE, Stage.AGV_TO_TP})
+
+
+@dataclass(frozen=True)
+class LoggedJob:
+    """A job the dispatcher got accepted: by whom and when (kept after it ends)."""
+
+    job: Job
+    equipment_id: str
+    assigned_at: float
 
 
 @dataclass

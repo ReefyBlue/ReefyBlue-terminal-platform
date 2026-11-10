@@ -37,7 +37,8 @@ from __future__ import annotations
 
 import itertools
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from types import MappingProxyType
 
 from terminal_model.locations import SlotLoc, parse_location
 from terminal_model.port import EquipmentEvent, EquipmentPort, EventKind
@@ -53,6 +54,7 @@ from terminal_ecs.orders import (
     RELEASE_AGV,
     ROLLBACK,
     TP_BUSY,
+    LoggedJob,
     OrderRecord,
     Stage,
     valid_slot,
@@ -82,6 +84,7 @@ class Dispatcher:
         self.on_transfer: Callable[[str, str, str], None] | None = None
         self.jobs: dict[str, Job] = {}
         self.completed: list[str] = []
+        self._job_log: dict[str, LoggedJob] = {}
 
         self._sts: list[str] = []
         self._agvs: list[str] = []
@@ -154,6 +157,15 @@ class Dispatcher:
             ),
             "equipment": {eid: self.port.snapshot(eid).state for eid in sorted(self.port.equipment_ids())},
         }
+
+    @property
+    def job_log(self) -> Mapping[str, LoggedJob]:
+        """Read-only: every job id ever accepted by equipment -> who got it and when."""
+        return MappingProxyType(self._job_log)
+
+    def committed_agvs(self) -> frozenset[str]:
+        """AGVs reserved for an open order (also while idle, e.g. waiting in a lane)."""
+        return frozenset(r.agv_id for r in self._open.values() if r.agv_id is not None)
 
     def on_event(self, ev: EquipmentEvent) -> None:
         if ev.equipment_id in self._agvs:
@@ -285,7 +297,7 @@ class Dispatcher:
         return False
 
     def _free_agvs(self) -> list[str]:
-        reserved = {r.agv_id for r in self._open.values() if r.agv_id is not None}
+        reserved = self.committed_agvs()
         return [agv for agv in self._agvs if agv not in reserved and self._available(agv)]
 
     def _issue(self, eid: str, rec: OrderRecord, job: Job, stage: Stage) -> bool:
@@ -297,11 +309,13 @@ class Dispatcher:
         self._job_eq[job.job_id] = eid
         if eid in self._agvs:
             self._last_progress[eid] = self.port.now()
+        self._job_log[job.job_id] = LoggedJob(job, eid, self.port.now())
         if self.port.assign_job(eid, job):
             rec.job_counts[job.type] = rec.job_counts.get(job.type, 0) + 1
             log.debug("assign %s -> %s (%s -> %s)", job.job_id, eid, job.from_loc, job.to_loc)
             return True
         log.warning("rejected %s by %s", job.job_id, eid)
+        del self._job_log[job.job_id]
         rec.stage, rec.seq = prev
         self._detach(rec)
         return False

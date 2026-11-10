@@ -63,8 +63,14 @@ def run_once(scenario: Scenario, layout: Layout, seed: int) -> dict[str, float]:
     allocator = SimpleSlotAllocator(layout.blocks)
     orders = generate_workorders(scenario, layout, allocator, rng=random.Random(seed))
     dispatcher = Dispatcher(world.port, allocator)
-    dispatcher.on_transfer = _transfer_hook(world)
     kpi = KpiCollector(world.port, dispatcher, faults_total=world.faults_total)
+    move_box = _transfer_hook(world)
+
+    def on_transfer(kind: str, eid: str, cid: str) -> None:
+        move_box(kind, eid, cid)
+        kpi.observe_transfer(kind, eid, cid)
+
+    dispatcher.on_transfer = on_transfer
 
     prefill(world.yard, orders)
     dispatcher.submit(orders)

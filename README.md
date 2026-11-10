@@ -43,9 +43,11 @@ Tests: `uv run pytest -q` (inclusief de e2e-runs met 200 containers, marker `e2e
 |---|---|
 | `moves_per_hour_total` | moves per gesimuleerd uur over alle STS'en |
 | `moves_per_hour_<STS-id>` | idem per STS-kraan (bijv. `moves_per_hour_STS-01`) |
-| `agv_wait_s_mean` | gemiddelde stilstandtijd van een bezette AGV per transport (s) |
-| `agv_travel_s_mean` | gemiddelde rijtijd van een bezette AGV per transport (s) |
-| `utilisation_STS` / `_AGV` / `_ASC` | aandeel samples waarin het apparaattype bezig was |
+| `agv_wait_sts_s_mean` | gemiddelde wachttijd van een AGV in de STS-lane: van aankomst (TRANSPORT naar de STS voltooid) tot de kraanjob (DISCHARGE/LOAD) van die order voltooid is (s) |
+| `agv_wait_tp_s_mean` | alleen LOAD: gemiddelde wachttijd van een AGV aan het TP, van aankomst tot de box op de AGV staat (`tp_to_agv`) (s); in Plan A 0, want de AGV wordt pas gestuurd als de box op het TP staat |
+| `agv_travel_s_mean` | gemiddelde duur van een TRANSPORT-job, van toewijzing tot voltooiing (s) |
+| `utilisation_STS` / `_ASC` | aandeel samples waarin het apparaattype BUSY was |
+| `utilisation_AGV` | aandeel samples (AGV × sample) waarin een AGV BUSY was **of** door de dispatcher aan een order gekoppeld (bijv. wachtend in de lane) |
 | `vessel_turnaround_s` | tijd van de eerste tot de laatste voltooide STS-move (s) |
 | `faults` | aantal opgetreden storingen |
 | `replans` | aantal herplanningen door de dispatcher |
