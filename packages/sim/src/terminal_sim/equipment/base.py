@@ -13,7 +13,11 @@ class Equipment(salabim.Component):
     """Base for simulated equipment. Subclasses implement ``process`` as a
     Salabim generator that runs ``self.current_job``.
 
-    The component is created as data (no process); ``assign_job`` activates it.
+    The component is created as data (no process); ``assign_job`` activates the
+    ``_run`` driver, which runs ``process`` once per job. A job assigned from
+    inside the running process (a listener reacting synchronously to the
+    JOB_COMPLETED / IDLE events) is picked up by the driver loop instead of
+    re-activating the current component.
     Environments must be created with ``yieldless=False`` (generator processes).
     """
 
@@ -51,7 +55,8 @@ class Equipment(salabim.Component):
         job.status = JobStatus.RUNNING
         self.current_job = job
         self.set_state(State.BUSY)
-        self.activate(process="process")
+        if self.env.current_component() is not self:
+            self.activate(process="_run")
         return True
 
     def cancel_job(self) -> bool:
@@ -121,6 +126,13 @@ class Equipment(salabim.Component):
             energy_kwh=self.energy_kwh,
             extra=self.extra(),
         )
+
+    def _run(self):
+        while self.current_job is not None:
+            job = self.current_job
+            yield from self.process()
+            if self.current_job is job:  # process returned without finishing its job
+                return
 
     def process(self):  # pragma: no cover - abstract
         raise NotImplementedError

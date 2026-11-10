@@ -185,3 +185,22 @@ def test_snapshot(rig):
     assert s.extra["berth_side"] == "WS"
     assert s.extra["handover_lane_occupied"] is True
     assert "spreader_height_m" in s.extra and "trolley_position_m" in s.extra
+
+
+def test_job_assigned_from_completion_event_runs(rig):
+    """A dispatcher reacting synchronously to IDLE (inside the crane's own process)
+    must be able to hand it the next job without breaking the process."""
+    rig.grid.try_reserve((4, 0), "AGV-01")
+    queue = [job(job_id="J2"), job(job_id="J3")]
+
+    def emit(ev):
+        rig.events.append(ev)
+        if ev.kind == EventKind.STATE_CHANGED and ev.new_state == State.IDLE and queue:
+            assert rig.sts.assign_job(queue.pop(0))
+
+    rig.sts._emit = emit
+    assert rig.sts.assign_job(job(job_id="J1"))
+    rig.env.run(till=1000)
+    done = [e.job_id for e in of_kind(rig, EventKind.JOB_COMPLETED)]
+    assert done == ["J1", "J2", "J3"]
+    assert rig.sts.state == State.IDLE
