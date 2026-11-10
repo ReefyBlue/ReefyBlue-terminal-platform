@@ -22,6 +22,7 @@ from pathlib import Path
 
 from terminal_ecs.dispatcher import Dispatcher
 from terminal_ecs.workorders import WorkOrder
+from terminal_kpi.kpi import SAMPLE_INTERVAL_S, KpiCollector
 from terminal_model.locations import parse_location
 from terminal_model.logging import configure_json_logging
 from terminal_model.types import JobType, Kind, State
@@ -32,8 +33,6 @@ from terminal_sim.world import World
 from terminal_sim.yard import Yard
 from terminal_tos_stub.allocator import SimpleSlotAllocator
 from terminal_tos_stub.generator import generate_workorders
-
-from terminal_runner.kpi import SAMPLE_INTERVAL_S, KpiCollector
 
 log = logging.getLogger("terminal_runner.run")
 

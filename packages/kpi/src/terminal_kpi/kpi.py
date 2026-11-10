@@ -115,7 +115,8 @@ class KpiCollector:
         total = self._total_obs[kind]
         return self._busy_obs[kind] / total if total else 0.0
 
-    def finish(self, duration_s: float) -> dict[str, float]:
+    def snapshot(self, duration_s: float) -> dict[str, float]:
+        """Current KPIs over ``duration_s`` simulated seconds; does not mutate the collector."""
         hours = duration_s / 3600.0
         ids = self.port.equipment_ids()
         kpis: dict[str, float] = {}
@@ -147,7 +148,11 @@ class KpiCollector:
         kpis["containers_done"] = float(len(self.dispatcher.completed))
         kpis["containers_failed"] = float(status["failed"])
         kpis["containers_stuck"] = float(status["stuck"])
+        kpis["sim_elapsed_s"] = duration_s
         return kpis
+
+    def finish(self, duration_s: float) -> dict[str, float]:
+        return self.snapshot(duration_s)
 
     @staticmethod
     def to_csv_row(path: Path, run_id: int, kpis: dict) -> None:

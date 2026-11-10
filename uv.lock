@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 members = [
     "terminal-ecs",
     "terminal-gateway",
+    "terminal-kpi",
     "terminal-model",
     "terminal-opcua",
     "terminal-platform",
@@ -408,6 +409,21 @@ requires-dist = [
 ]
 
 [[package]]
+name = "terminal-kpi"
+version = "0.1.0"
+source = { editable = "packages/kpi" }
+dependencies = [
+    { name = "terminal-ecs" },
+    { name = "terminal-model" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "terminal-ecs", editable = "packages/ecs" },
+    { name = "terminal-model", editable = "packages/model" },
+]
+
+[[package]]
 name = "terminal-model"
 version = "0.1.0"
 source = { editable = "packages/model" }
@@ -438,6 +454,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "terminal-ecs" },
     { name = "terminal-gateway" },
+    { name = "terminal-kpi" },
     { name = "terminal-model" },
     { name = "terminal-opcua" },
     { name = "terminal-runner" },
@@ -453,6 +470,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.4.1.post1" },
     { name = "terminal-ecs", editable = "packages/ecs" },
     { name = "terminal-gateway", editable = "packages/gateway" },
+    { name = "terminal-kpi", editable = "packages/kpi" },
     { name = "terminal-model", editable = "packages/model" },
     { name = "terminal-opcua", editable = "packages/opcua" },
     { name = "terminal-runner", editable = "packages/runner" },
@@ -466,6 +484,7 @@ version = "0.1.0"
 source = { editable = "packages/runner" }
 dependencies = [
     { name = "terminal-ecs" },
+    { name = "terminal-kpi" },
     { name = "terminal-model" },
     { name = "terminal-opcua" },
     { name = "terminal-sim" },
@@ -475,6 +494,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "terminal-ecs", editable = "packages/ecs" },
+    { name = "terminal-kpi", editable = "packages/kpi" },
     { name = "terminal-model", editable = "packages/model" },
     { name = "terminal-opcua", editable = "packages/opcua" },
     { name = "terminal-sim", editable = "packages/sim" },
