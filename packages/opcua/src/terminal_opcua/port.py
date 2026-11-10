@@ -5,11 +5,10 @@ client. Every public method is synchronous and safe to call from any thread
 except the port's own loop thread. Events arrive on the loop thread, are buffered
 in a queue and delivered to subscribers on the caller's thread by ``drain_events``.
 
-Event pairing: the gateway writes ``LastEvent`` then bumps ``EventSeq``. Both are
-monitored with a server-side queue (no coalescing); ``LastEvent`` values are kept
-in a FIFO per equipment and each ``EventSeq`` notification pops the next one.
-``EventSeq`` notifications are handled one at a time (``asyncio.Lock``) so events
-keep their creation order even when the direct-read fallback awaits.
+Events: one OPC UA event subscription on the gateway's ``Server`` object (filter
+``TerminalEventType``, server-side queue, no coalescing). Each notification is
+decoded synchronously and queued, so delivery order is notification order. The
+``Seq`` field is per equipment; a jump of more than one is logged as a gap.
 
 Connection loss (detected by asyncua's watchdog) sets ``_lost``; from then on
 ``snapshot``, ``wait_for_sim_time`` and every server call raise ``ConnectionError``
@@ -26,14 +25,20 @@ import queue
 import threading
 import time
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Self, TypeVar
 
 from asyncua import Client, Node, ua
 from terminal_model.port import EquipmentEvent, EquipmentSnapshot
 from terminal_model.types import Job, Kind, Position, State
 
-from terminal_opcua.codec import event_from_json, extra_from_json, job_to_json
+from terminal_opcua.codec import extra_from_json, job_to_json
+from terminal_opcua.events import (
+    EventTypes,
+    event_from_ua,
+    resolve_event_types,
+    subscribe_terminal_events,
+)
 from terminal_opcua.nodeset import EQUIPMENT_VARS, NAMESPACE_URI
 
 log = logging.getLogger(__name__)
@@ -43,7 +48,6 @@ CALL_TIMEOUT_S = 3.0       # reads and method calls; above the gateway's 2 s for
 SETUP_TIMEOUT_S = 10.0     # browse + subscribe after the session is open
 CLOSE_TIMEOUT_S = 2.0
 SUBSCRIPTION_PERIOD_MS = 20
-EVENT_QUEUE = 100          # server-side queue per monitored item (as the gateway uses)
 POLL_S = 0.01
 
 T = TypeVar("T")
@@ -55,9 +59,7 @@ class _Equipment:
     obj: Node
     variables: dict[str, Node]
     methods: dict[str, ua.NodeId]
-    initial_seq: int = 0
-    last_seq: int = 0
-    fifo: collections.deque[str] = field(default_factory=collections.deque)
+    last_seq: int = 0  # last Seq received (0: none yet)
 
     @property
     def snapshot_nodes(self) -> list[Node]:
@@ -84,6 +86,12 @@ class _Handler:
         except Exception:
             log.exception("handling datachange for %s failed", node)
 
+    async def event_notification(self, event: Any) -> None:
+        try:
+            self.port._on_event(event)
+        except Exception:
+            log.exception("handling event %s failed", event)
+
     def status_change_notification(self, status: Any) -> None:
         log.warning("subscription status changed: %s", status)
 
@@ -99,7 +107,7 @@ class OpcUaEquipmentPort:
         self._client: Client | None = None
         self._subscription: Any = None
         self._equipment: dict[str, _Equipment] = {}
-        self._by_node: dict[ua.NodeId, tuple[_Equipment | None, str]] = {}
+        self._by_node: dict[ua.NodeId, str] = {}
         self._clock_methods: dict[str, ua.NodeId] = {}
         self._clock: Node | None = None
         self._events: queue.SimpleQueue[EquipmentEvent] = queue.SimpleQueue()
@@ -107,7 +115,7 @@ class OpcUaEquipmentPort:
         self._now = 0.0
         self._connected = False
         self._lost = False
-        self._seq_lock: asyncio.Lock | None = None
+        self._types: EventTypes | None = None
 
     # -- lifecycle -------------------------------------------------------------------
     def connect(self) -> None:
@@ -130,7 +138,6 @@ class OpcUaEquipmentPort:
         log.info("connected to %s (%d equipment)", self.endpoint, len(self._equipment))
 
     async def _connect(self) -> None:
-        self._seq_lock = asyncio.Lock()
         client = Client(self.endpoint, timeout=self.connect_timeout_s)
         client.connection_lost_callback = self._on_connection_lost
         await asyncio.wait_for(client.connect(), self.connect_timeout_s)
@@ -162,23 +169,13 @@ class OpcUaEquipmentPort:
         sim_time = clock_kids[ua.NodeClass.Variable]["SimTime"]
         self._clock_methods = {n: m.nodeid for n, m in clock_kids[ua.NodeClass.Method].items()}
 
-        eqs = list(self._equipment.values())
-        values = await client.read_values([*(e.variables["EventSeq"] for e in eqs), sim_time])
-        for eq, seq in zip(eqs, values, strict=False):
-            eq.initial_seq = eq.last_seq = int(seq)
-        self._now = float(values[-1])
+        self._now = float(await sim_time.read_value())
+        self._types = await resolve_event_types(client)
 
-        watched: list[Node] = []
-        for eq in eqs:
-            for name in ("LastEvent", "EventSeq"):
-                node = eq.variables[name]
-                self._by_node[node.nodeid] = (eq, name)
-                watched.append(node)
-        self._by_node[sim_time.nodeid] = (None, "SimTime")
+        self._by_node[sim_time.nodeid] = "SimTime"
         sub = await client.create_subscription(SUBSCRIPTION_PERIOD_MS, _Handler(self))
         self._subscription = sub
-        if watched:
-            await sub.subscribe_data_change(watched, queuesize=EVENT_QUEUE, sampling_interval=0.0)
+        await subscribe_terminal_events(client, sub, self._types)
         await sub.subscribe_data_change(sim_time, sampling_interval=0.0)
 
     async def _on_connection_lost(self, exc: Exception) -> None:
@@ -210,7 +207,7 @@ class OpcUaEquipmentPort:
         # after the loop thread stopped, so no late notification lands in the new queue
         self._events = queue.SimpleQueue()  # undelivered events belong to this session
         self._loop = self._thread = None
-        self._client = self._subscription = self._clock = None
+        self._client = self._subscription = self._clock = self._types = None
         self._equipment, self._by_node, self._clock_methods = {}, {}, {}
 
     async def _disconnect(self) -> None:
@@ -356,43 +353,23 @@ class OpcUaEquipmentPort:
 
     # -- notifications (loop thread) ---------------------------------------------------
     async def _on_datachange(self, node: Node, val: Any) -> None:
-        eq, name = self._by_node.get(node.nodeid, (None, ""))
-        if name == "SimTime":
+        if self._by_node.get(node.nodeid) == "SimTime":
             self._now = float(val)
-        elif eq is None:
-            return
-        elif name == "LastEvent":
-            eq.fifo.append(val)
-        elif name == "EventSeq":
-            await self._on_event_seq(eq, int(val))
 
-    async def _on_event_seq(self, eq: _Equipment, seq: int) -> None:
-        if self._seq_lock is None:  # only before _connect ran (tests)
-            self._seq_lock = asyncio.Lock()
-        async with self._seq_lock:
-            await self._handle_event_seq(eq, seq)
-
-    async def _handle_event_seq(self, eq: _Equipment, seq: int) -> None:
-        if eq.fifo:
-            payload = eq.fifo.popleft()
-        elif seq <= eq.initial_seq:
+    def _on_event(self, event: Any) -> None:
+        """Decode, gap-check and queue one event notification (synchronous: keeps order)."""
+        if self._types is None:
             return
-        else:
-            log.warning("%s: EventSeq %d without a queued LastEvent; reading it directly",
-                        eq.equipment_id, seq)
-            payload = await eq.variables["LastEvent"].read_value()
-        if seq <= eq.initial_seq:
-            return  # initial notification after subscribing: state, not an event
-        if seq > eq.last_seq + 1:
-            log.warning("%s: EventSeq gap %d -> %d (%d event(s) missed)",
-                        eq.equipment_id, eq.last_seq, seq, seq - eq.last_seq - 1)
-        elif seq <= eq.last_seq:
-            log.warning("%s: EventSeq %d not ahead of %d", eq.equipment_id, seq, eq.last_seq)
-        eq.last_seq = max(eq.last_seq, seq)
         try:
-            ev = event_from_json(payload)
-        except (ValueError, TypeError) as e:
-            log.warning("%s: EventSeq %d with undecodable LastEvent %r: %s",
-                        eq.equipment_id, seq, payload, e)
+            seq, ev = event_from_ua(event, self._types)
+        except ValueError as e:
+            log.warning("undecodable event skipped: %s", e)
             return
+        eq = self._equipment.get(ev.equipment_id)
+        if eq is None:
+            log.warning("event for unknown equipment %r skipped", ev.equipment_id)
+            return
+        if eq.last_seq and seq > eq.last_seq + 1:
+            log.warning("%s: Seq gap %d -> %d", eq.equipment_id, eq.last_seq, seq)
+        eq.last_seq = max(eq.last_seq, seq)
         self._events.put(ev)

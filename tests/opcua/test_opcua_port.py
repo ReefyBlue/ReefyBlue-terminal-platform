@@ -11,13 +11,14 @@ import socket
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+from asyncua import ua
 from terminal_gateway.gateway import Gateway
 from terminal_model.port import EquipmentEvent, EquipmentPort, EventKind
 from terminal_model.types import Job, JobType, State
-from terminal_opcua.codec import event_to_json
 from terminal_opcua.port import OpcUaEquipmentPort
 from terminal_sim.layout import load_layout
 from terminal_sim.opcua_servers import ControlServer, EquipmentServer
@@ -90,7 +91,7 @@ async def _start_rig() -> Rig:
     r.servers["STS-01"].on_emit(
         EquipmentEvent(EventKind.STATE_CHANGED, "STS-01", 0.0, new_state=State.IDLE))
     await r.step(0.0)
-    assert await _until(lambda: r.gateway.mirrors["STS-01"]._seq == 1, 2.0)
+    assert await _until(lambda: r.gateway.mirrors["STS-01"]._emitter.seq == 1, 2.0)
     r.port = OpcUaEquipmentPort(r.gateway.endpoint, connect_timeout_s=5.0)
     r.events = []
     r.port.subscribe(r.events.append)
@@ -205,15 +206,46 @@ async def test_unknown_id_keyerror(rig):
 async def test_events_seq_gap_logged(rig, caplog):
     rig.port.drain_events()
     rig.events.clear()
-    mirror = rig.gateway.mirrors["ASC-D"]
-    ev = EquipmentEvent(EventKind.STATE_CHANGED, "ASC-D", rig.world.now(), new_state=State.IDLE)
     caplog.set_level(logging.WARNING, logger="terminal_opcua.port")
-    async with mirror._write_lock:  # server-side write on the gateway: EventSeq jumps by 2
-        await mirror._write_event(event_to_json(ev), mirror._seq + 2)
+    mirror = rig.gateway.mirrors["ASC-D"]
+    first = EquipmentEvent(EventKind.STATE_CHANGED, "ASC-D", rig.world.now(), new_state=State.BUSY)
+    rig.servers["ASC-D"].on_emit(first)
+    await rig.servers["ASC-D"].sync()
     assert await _drain_until(rig, lambda evs: any(e.equipment_id == "ASC-D" for e in evs), 2.0)
-    assert [e for e in rig.events if e.equipment_id == "ASC-D"] == [ev]
-    assert any("gap" in r.getMessage() and "ASC-D" in r.getMessage()
+    mirror._emitter.seq += 1  # the gateway skips one Seq: the port sees a gap
+    ev = EquipmentEvent(EventKind.STATE_CHANGED, "ASC-D", rig.world.now(), new_state=State.IDLE)
+    rig.servers["ASC-D"].on_emit(ev)
+    await rig.servers["ASC-D"].sync()
+    assert await _drain_until(rig, lambda evs: ev in evs, 2.0)
+    assert [e for e in rig.events if e.equipment_id == "ASC-D"] == [first, ev]
+    assert any("Seq gap" in r.getMessage() and "ASC-D" in r.getMessage()
                for r in caplog.records if r.levelno == logging.WARNING)
+
+
+async def test_two_events_one_sync_in_order(rig):
+    rig.port.drain_events()
+    rig.events.clear()
+    t = rig.world.now()
+    done = EquipmentEvent(EventKind.JOB_COMPLETED, "ASC-C", t, job_id="J9")
+    idle = EquipmentEvent(EventKind.STATE_CHANGED, "ASC-C", t, new_state=State.IDLE)
+    server = rig.servers["ASC-C"]
+    server.on_emit(done)
+    server.on_emit(idle)
+    await server.sync()
+    mine = lambda evs: [e for e in evs if e.equipment_id == "ASC-C"]
+    assert await _drain_until(rig, lambda evs: len(mine(evs)) >= 2, 2.0)
+    await asyncio.sleep(0.1)
+    rig.port.drain_events()
+    assert mine(rig.events) == [done, idle]
+
+
+async def test_unknown_event_type_ignored(rig, caplog):
+    rig.port.drain_events()
+    caplog.set_level(logging.WARNING, logger="terminal_opcua.port")
+    rig.port._on_event(SimpleNamespace(EventType=ua.NodeId(ua.ObjectIds.SystemEventType)))
+    assert rig.port.drain_events() == 0
+    assert any(r.levelno == logging.WARNING and r.name == "terminal_opcua.port"
+               for r in caplog.records)
 
 
 async def test_connect_failure_raises_connection_error():
@@ -250,36 +282,3 @@ async def test_close_discards_buffered_events():
     port._events.put(EquipmentEvent(EventKind.STATE_CHANGED, "STS-01", 0.0, new_state=State.IDLE))
     port.close()
     assert port.drain_events() == 0 and got == []
-
-
-async def test_event_seq_handled_in_creation_order_with_direct_read(rig, monkeypatch):
-    """A direct-read fallback that awaits must not let a later EventSeq overtake it."""
-    rig.port.drain_events()
-    rig.events.clear()
-    eq = rig.port._equipment["ASC-C"]
-    first = EquipmentEvent(EventKind.STATE_CHANGED, "ASC-C", 1.0, new_state=State.BUSY)
-    second = EquipmentEvent(EventKind.STATE_CHANGED, "ASC-C", 2.0, new_state=State.IDLE)
-    node = eq.variables["LastEvent"]
-
-    async def slow_read(self=node):
-        await asyncio.sleep(0.1)
-        return event_to_json(first)
-
-    monkeypatch.setattr(node, "read_value", slow_read)
-    loop = rig.port._loop
-    base = eq.last_seq
-    a = asyncio.run_coroutine_threadsafe(rig.port._on_event_seq(eq, base + 1), loop)
-    await asyncio.sleep(0.02)  # first handler is now awaiting the direct read
-    eq_fifo_put = asyncio.run_coroutine_threadsafe(
-        _append(eq, event_to_json(second)), loop)
-    await asyncio.wrap_future(eq_fifo_put)
-    b = asyncio.run_coroutine_threadsafe(rig.port._on_event_seq(eq, base + 2), loop)
-    await asyncio.wrap_future(a)
-    await asyncio.wrap_future(b)
-    rig.port.drain_events()
-    assert [e for e in rig.events if e.equipment_id == "ASC-C"] == [first, second]
-    assert eq.last_seq == base + 2
-
-
-async def _append(eq, payload):
-    eq.fifo.append(payload)
