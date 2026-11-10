@@ -26,6 +26,7 @@ members = ["packages/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["e2e: full 200-container scenario runs (a few seconds each)"]
 pythonpath = [
     "packages/model/src",
     "packages/sim/src",
