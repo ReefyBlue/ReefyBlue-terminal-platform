@@ -129,6 +129,7 @@ class Dispatcher:
     def status(self) -> dict:
         return {
             "pending": sum(r.stage in PENDING for r in self._open.values()),
+            "open": len(self._open),  # every order not yet DONE or FAILED
             "active_jobs": len(self.jobs),
             "done": len(self.completed),
             "failed": self._failed,

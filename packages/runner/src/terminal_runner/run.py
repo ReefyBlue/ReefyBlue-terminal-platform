@@ -56,7 +56,7 @@ def _transfer_hook(world: World):
 
 
 def run_once(scenario: Scenario, layout: Layout, seed: int) -> dict[str, float]:
-    """One run, stepped per KPI sample interval until all orders are settled or
+    """One run, stepped per KPI sample interval until all orders are DONE/FAILED or
     ``duration_s`` (hard cap). Rates are per simulated hour actually run."""
     scenario = replace(scenario, seed=seed)
     world = World(layout, scenario)
@@ -76,8 +76,9 @@ def run_once(scenario: Scenario, layout: Layout, seed: int) -> dict[str, float]:
         world.run(until=t)
         dispatcher.tick()
         kpi.sample()
-        status = dispatcher.status()
-        if status["pending"] == 0 and status["active_jobs"] == 0:
+        # Stop only once every order is DONE or FAILED: orders parked behind faulted
+        # equipment have no running job and are not pending, but are still open.
+        if dispatcher.status()["open"] == 0:
             timed_out = False
             break
     elapsed = world.now()

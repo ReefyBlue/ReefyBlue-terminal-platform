@@ -262,3 +262,14 @@ def test_crane_does_not_serve_faulted_lane_agv():
     assert jobs_of(port, "STS-01") == []
     port.set_state("AGV-01", State.IDLE)
     assert jobs_of(port, "STS-01") == ["C1-DISCHARGE-1"]
+
+
+def test_open_counts_orders_parked_behind_a_faulted_crane():
+    """An order waiting for a faulted STS has no job and is not pending, but is open."""
+    port = make_port()
+    d = Dispatcher(port, FakeSlots())
+    d.submit([discharge("C1")])
+    port.complete("AGV-01")  # AGV in the lane -> DISCHARGE issued
+    port.set_state("STS-01", State.FAULT)  # crane job rolled back, STS excluded
+    st = d.status()
+    assert (st["pending"], st["active_jobs"], st["open"]) == (0, 0, 1)
