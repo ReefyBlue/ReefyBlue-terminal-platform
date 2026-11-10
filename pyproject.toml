@@ -12,6 +12,7 @@ dev = [
     "terminal-ecs",
     "terminal-tos-stub",
     "terminal-runner",
+    "terminal-opcua",
 ]
 
 [tool.uv.sources]
@@ -20,6 +21,7 @@ terminal-sim = { workspace = true }
 terminal-ecs = { workspace = true }
 terminal-tos-stub = { workspace = true }
 terminal-runner = { workspace = true }
+terminal-opcua = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -33,4 +35,5 @@ pythonpath = [
     "packages/ecs/src",
     "packages/tos_stub/src",
     "packages/runner/src",
+    "packages/opcua/src",
 ]
