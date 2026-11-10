@@ -85,7 +85,7 @@ def run_once(scenario: Scenario, layout: Layout, seed: int) -> dict[str, float]:
     world = World(layout, scenario)
     allocator = make_allocator(layout)
     orders = make_workorders(scenario, layout, allocator, random.Random(seed))
-    dispatcher = Dispatcher(world.port, allocator)
+    dispatcher = Dispatcher(world.port, allocator, auto_release=True)
     # No on_transfer hook: the sim moves boxes itself (World.handover).
     kpi = KpiCollector(world.port, dispatcher, faults_total=world.faults_total)
 
@@ -211,7 +211,7 @@ def run_once_opcua(scenario: Scenario, layout: Layout, seed: int, *, gateway: st
         if slots and not port.prefill_yard(slots):
             raise _prefill_rejected(len(slots))
         port.drain_events()  # events from before the run: no subscriber yet, dropped
-        dispatcher = Dispatcher(port, allocator)
+        dispatcher = Dispatcher(port, allocator, auto_release=True)
         kpi = KpiCollector(port, dispatcher, faults_total=None)
         t0 = port.now()
         dispatcher.submit(orders)

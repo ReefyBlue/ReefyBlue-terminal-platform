@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from fake_port import FakeSlots, make_port
-from terminal_ecs.dispatcher import Dispatcher
+from fake_port import FakeSlots, make_dispatcher, make_port
 from terminal_ecs.workorders import WorkOrder
 from terminal_model.port import EquipmentEvent, EventKind
 from terminal_model.types import Job, JobType, State
@@ -22,7 +21,7 @@ def last(port) -> tuple[str, str, JobType, str, str]:
 
 def test_load_happy_path():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     transfers: list[tuple[str, str, str]] = []
     d.on_transfer = lambda kind, eid, cid: transfers.append((kind, eid, cid))
     d.submit([load("C9", slot="A/3/1/1")])
@@ -52,7 +51,7 @@ def test_load_happy_path():
 
 def test_load_releases_agv_after_loading():
     port = make_port(n_agv=1)
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([load("C1", slot="A/1/1/1"), load("C2", slot="A/2/1/1")])
     for eid in ("ASC-A", "AGV-01", "AGV-01", "STS-01"):
         port.complete(eid)
@@ -66,7 +65,7 @@ def test_one_box_per_tp_at_a_time():
     for agv in ("AGV-01", "AGV-02"):  # no AGV available: C1 has to wait at the TP
         port.assign_job(agv, Job(f"X-{agv}", JobType.TRANSPORT, "X", agv, "STS-01"))
     port.calls.clear()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([load("C1", slot="A/1/1/1"), load("C2", slot="A/2/1/1")])
     assert [j.job_id for _, j in port.calls] == ["C1-STACK_OUT-1"]
 
@@ -83,7 +82,7 @@ def test_one_box_per_tp_at_a_time():
 
 def test_stack_out_slot_empty_fails_order():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([load("C1")])
     port.fail("ASC-A", "SLOT_EMPTY")
     st = d.status()
@@ -94,7 +93,7 @@ def test_stack_out_slot_empty_fails_order():
 
 def test_mixed_fifo_per_sts():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([discharge("C1"), load("C2", slot="A/5/1/1")])
     agv_of = {j.container_id: e for e, j in port.calls if j.type is JobType.TRANSPORT}
     assert agv_of == {"C1": "AGV-01"}
@@ -119,7 +118,7 @@ def test_lookahead_one_keeps_the_lane_for_the_head():
     # Lookahead 1: the single lane slot is kept for the head LOAD that is still being
     # unstacked; a later DISCHARGE filling it would leave the head no place (deadlock).
     port = make_port(n_agv=3)
-    d = Dispatcher(port, FakeSlots(), lookahead_per_sts=1)
+    d = make_dispatcher(port, FakeSlots(), lookahead_per_sts=1)
     d.submit([load("C1", slot="A/5/1/1"), discharge("C2")])
     assert [j.job_id for _, j in port.calls if j.type is JobType.TRANSPORT] == []
     port.complete("ASC-A")  # C1 at the TP: the head gets an AGV
@@ -132,7 +131,7 @@ def test_loaded_agv_gets_next_leg_once_idle_without_rejections(caplog):
     # STATE_CHANGED -> IDLE. The next leg must wait for IDLE instead of being
     # offered (and rejected) while the AGV is busy.
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([load("C9", slot="A/3/1/1")])
     port.complete("ASC-A")
     job = port._job["AGV-01"]
@@ -147,7 +146,7 @@ def test_loaded_agv_gets_next_leg_once_idle_without_rejections(caplog):
 def test_routine_assignments_and_completions_log_at_debug_only(caplog):
     caplog.set_level("INFO", logger="terminal_ecs")
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([load("C9", slot="A/3/1/1")])
     for eid in ("ASC-A", "AGV-01", "AGV-01", "STS-01"):
         port.complete(eid)
@@ -158,7 +157,7 @@ def test_routine_assignments_and_completions_log_at_debug_only(caplog):
 def test_non_head_load_with_agv_to_tp_counts_against_lookahead():
     # An AGV sent to the TP for a LOAD is already committed to that crane.
     port = make_port(n_agv=6)
-    d = Dispatcher(port, FakeSlots(), lookahead_per_sts=2)
+    d = make_dispatcher(port, FakeSlots(), lookahead_per_sts=2)
     d.submit([discharge("C1"), discharge("C2", slot="A/2/1/1"), load("C3"), discharge("C4", slot="A/4/1/1")])
 
     def sent() -> dict[str, str]:
@@ -180,7 +179,7 @@ def test_non_head_orders_keep_a_lane_slot_free_for_the_head():
     """Head LOAD waits for a faulted ASC: at most lookahead-1 non-head orders may be
     lane-bound, so the head's AGV still finds a free lane cell when it arrives."""
     port = make_port(n_agv=4)
-    d = Dispatcher(port, FakeSlots())  # lookahead_per_sts = 2
+    d = make_dispatcher(port, FakeSlots())  # lookahead_per_sts = 2
     port.set_state("ASC-A", State.FAULT)
     d.submit([load("L1", slot="A/3/1/1"), discharge("D2", slot="A/1/1/1"), discharge("D3", slot="A/1/1/2")])
     sent = [j.container_id for e, j in port.calls if e.startswith("AGV-")]

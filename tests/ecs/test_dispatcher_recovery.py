@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from fake_port import FakePort, FakeSlots, make_port
-from terminal_ecs.dispatcher import Dispatcher
+from fake_port import FakePort, FakeSlots, make_dispatcher, make_port
 from terminal_ecs.workorders import WorkOrder
 from terminal_model.types import Job, JobType, Position, State
 
@@ -20,7 +19,7 @@ def jobs_of(port, eid: str) -> list[str]:
 
 def test_fault_during_transport_replans():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([discharge("C1")])
     assert jobs_of(port, "AGV-01") == ["C1-TRANSPORT-1"]
 
@@ -41,7 +40,7 @@ def test_fault_during_transport_replans():
 
 def test_fault_state_change_is_idempotent_with_job_failed():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([discharge("C1")])
     port.set_state("AGV-01", State.FAULT)  # the sim first reports the FAULT state ...
     assert port.calls[-1][0] == "AGV-02"
@@ -54,7 +53,7 @@ def test_fault_state_change_is_idempotent_with_job_failed():
 
 def test_late_job_failed_does_not_hit_reissued_job():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([discharge("C1")])
     port.set_state("AGV-01", State.FAULT)
     port.fail("AGV-01", "FAULT")
@@ -64,7 +63,7 @@ def test_late_job_failed_does_not_hit_reissued_job():
 
 def test_watchdog_cancels_stuck_agv():
     port = make_port()
-    d = Dispatcher(port, FakeSlots(), watchdog_s=600)
+    d = make_dispatcher(port, FakeSlots(), watchdog_s=600)
     d.submit([discharge("C1")])
     port.advance(599)
     d.tick()
@@ -82,7 +81,7 @@ def test_watchdog_cancels_stuck_agv():
 
 def test_watchdog_counts_movement_as_progress():
     port = make_port()
-    d = Dispatcher(port, FakeSlots(), watchdog_s=600)
+    d = make_dispatcher(port, FakeSlots(), watchdog_s=600)
     d.submit([discharge("C1")])
     port.advance(500)
     port.set_position("AGV-01", Position(20, 50))
@@ -106,7 +105,7 @@ def test_watchdog_cancel_event_is_not_double_counted():
 
     base = make_port()
     port = CancellingPort({e: (base.snapshot(e).kind, base.snapshot(e).position) for e in base.equipment_ids()})
-    d = Dispatcher(port, FakeSlots(), watchdog_s=600)
+    d = make_dispatcher(port, FakeSlots(), watchdog_s=600)
     d.submit([discharge("C1")])
     port.advance(601)
     d.tick()
@@ -116,7 +115,7 @@ def test_watchdog_cancel_event_is_not_double_counted():
 
 def test_box_on_agv_stays_bound():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([discharge("C1")])
     port.complete("AGV-01")
     port.complete("STS-01")  # box on AGV-01, TRANSPORT-2 to the TP
@@ -139,7 +138,7 @@ def test_box_on_agv_stays_bound():
 
 def test_failed_discharge_is_retried_with_agv_kept_in_lane():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([discharge("C1")])
     port.complete("AGV-01")
     port.fail("STS-01", "FAULT")
@@ -152,7 +151,7 @@ def test_failed_discharge_is_retried_with_agv_kept_in_lane():
 
 def test_load_rollbacks():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([load("C1")])
     port.fail("ASC-A", "FAULT")  # UNSTACKING → AWAIT_ASC
     port.set_state("ASC-A", State.IDLE)
@@ -175,7 +174,7 @@ def test_load_rollbacks():
 
 def test_fifo_head_requeued_after_agv_fault():
     port = make_port(n_agv=4)
-    d = Dispatcher(port, FakeSlots())  # lookahead 2
+    d = make_dispatcher(port, FakeSlots())  # lookahead 2
     d.submit([discharge(f"C{i}", slot=f"A/{i}/1/1") for i in (1, 2, 3)])
     agv_of = {j.container_id: e for e, j in port.calls}
     assert agv_of == {"C1": "AGV-01", "C2": "AGV-02"}
@@ -195,7 +194,7 @@ def test_fifo_head_requeued_after_agv_fault():
 
 def test_transfer_error_quarantines_agv():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
 
     def hook(kind: str, eid: str, cid: str) -> None:
         if cid == "C1":
@@ -222,7 +221,7 @@ def test_transfer_error_quarantines_agv():
 
 def test_rolled_back_order_keeps_its_position():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([load("C1", slot="A/1/1/1"), load("C2", slot="A/2/1/1")])
     port.fail("ASC-A", "FAULT")  # C1 back to AWAIT_ASC, next to the waiting C2
     port.set_state("ASC-A", State.IDLE)
@@ -232,7 +231,7 @@ def test_rolled_back_order_keeps_its_position():
 def test_head_load_is_not_starved_of_agvs():
     # Reviewer repro: two AGVs, head LOAD still unstacking; later discharges must leave one AGV free.
     port = make_port(n_agv=2)
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([load("C1", slot="A/5/1/1"), discharge("C2", slot="A/1/1/1"), discharge("C3", slot="A/1/1/2")])
     transports = [(e, j.job_id) for e, j in port.calls if j.type is JobType.TRANSPORT]
     assert transports == [("AGV-01", "C2-TRANSPORT-1")]  # AGV-02 kept in reserve for C1
@@ -254,7 +253,7 @@ def test_crane_does_not_serve_faulted_lane_agv():
     port = make_port()
     port.assign_job("STS-01", Job("X", JobType.DISCHARGE, "X", "VESSEL", "STS-01"))  # crane busy
     port.calls.clear()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([discharge("C1")])
     port.complete("AGV-01")  # C1 AT_STS, waits for the crane
     port.set_state("AGV-01", State.FAULT)  # lane AGV faults (no running job)
@@ -267,7 +266,7 @@ def test_crane_does_not_serve_faulted_lane_agv():
 def test_open_counts_orders_parked_behind_a_faulted_crane():
     """An order waiting for a faulted STS has no job and is not pending, but is open."""
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([discharge("C1")])
     port.complete("AGV-01")  # AGV in the lane -> DISCHARGE issued
     port.set_state("STS-01", State.FAULT)  # crane job rolled back, STS excluded
@@ -279,7 +278,7 @@ def test_watchdog_gives_up_after_max_cancels_and_marks_order_stuck(caplog):
     from terminal_ecs.dispatcher import WATCHDOG_MAX_CANCELS
 
     port = make_port()
-    d = Dispatcher(port, FakeSlots(), watchdog_s=600.0)
+    d = make_dispatcher(port, FakeSlots(), watchdog_s=600.0)
     port.set_state("AGV-02", State.FAULT)  # only AGV-01 is usable
     d.submit([discharge("C1")])
     for _ in range(WATCHDOG_MAX_CANCELS):

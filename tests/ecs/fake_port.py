@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from terminal_ecs.dispatcher import Dispatcher
 from terminal_model.port import EquipmentEvent, EquipmentSnapshot, EventKind
 from terminal_model.types import Job, Kind, Position, State
 
@@ -76,9 +77,15 @@ class FakePort:
             EquipmentEvent(EventKind.JOB_FAILED, equipment_id, self._now, job_id=job.job_id, reason=reason)
         )
 
-    def set_state(self, equipment_id: str, state: State) -> None:
+    def set_state(self, equipment_id: str, state: State, reason: str | None = None) -> None:
         self._state[equipment_id] = state
-        self._emit(EquipmentEvent(EventKind.STATE_CHANGED, equipment_id, self._now, new_state=state))
+        self._emit(
+            EquipmentEvent(EventKind.STATE_CHANGED, equipment_id, self._now, reason=reason, new_state=state)
+        )
+
+    def emit(self, ev: EquipmentEvent) -> None:
+        """Deliver an arbitrary event (e.g. for equipment the port does not know)."""
+        self._emit(ev)
 
     def _finish(self, equipment_id: str) -> Job:
         job = self._job[equipment_id]
@@ -113,3 +120,10 @@ def make_port(n_agv: int = 2) -> FakePort:
     for i in range(3, n_agv + 1):
         eq[f"AGV-{i:02d}"] = (Kind.AGV, Position(400 + 10 * i, 50))
     return FakePort(eq)
+
+
+def make_dispatcher(port: FakePort, slots: FakeSlots | None = None, **kw) -> Dispatcher:
+    """Dispatcher for the pre-B2d dispatcher tests: ``auto_release=True`` (FAULT -> IDLE
+    re-admits the device, unknown outcomes fail at once), i.e. the behaviour they pin."""
+    kw.setdefault("auto_release", True)
+    return Dispatcher(port, slots if slots is not None else FakeSlots(), **kw)
