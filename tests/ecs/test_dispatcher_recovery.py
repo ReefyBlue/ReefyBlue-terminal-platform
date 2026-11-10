@@ -298,3 +298,34 @@ def test_watchdog_gives_up_after_max_cancels_and_marks_order_stuck(caplog):
 
     port.complete("AGV-01")  # it moves again after all: no longer stuck
     assert d.status()["stuck"] == 0
+
+
+def test_replan_streak_parks_order_as_stuck(caplog):
+    port = make_port()
+    d = make_dispatcher(port, FakeSlots())
+    d.submit([WorkOrder(container_id="C1", type=JobType.DISCHARGE, sts_id="STS-01", yard_slot="A/1/1/1")])
+    port.complete("AGV-01")  # AGV in the lane: the crane gets the discharge
+    for n in range(1, 6):
+        assert [j.job_id for e, j in port.calls if e == "STS-01"][-1] == f"C1-DISCHARGE-{n}"
+        port.fail("STS-01", "NO_AGV_IN_LANE")  # fails at once, every time
+        port.set_state("STS-01", State.IDLE)  # re-admitted after the replan
+    sts_jobs = [j.job_id for e, j in port.calls if e == "STS-01"]
+    assert len(sts_jobs) == 5  # no 6th assign
+    d.tick()
+    assert len([j for e, j in port.calls if e == "STS-01"]) == 5
+    s = d.status()
+    assert (s["stuck"], s["open"], s["failed"]) == (1, 1, 0)
+    assert "replan streak: C1 failed 5 times in a row on STS-01 (NO_AGV_IN_LANE); parked as stuck" in caplog.text
+
+
+def test_replan_streak_resets_on_completion():
+    port = make_port()
+    d = make_dispatcher(port, FakeSlots())
+    d.submit([WorkOrder(container_id="C1", type=JobType.DISCHARGE, sts_id="STS-01", yard_slot="A/1/1/1")])
+    port.complete("AGV-01")
+    for _ in range(4):
+        port.fail("STS-01", "NO_AGV_IN_LANE")
+        port.set_state("STS-01", State.IDLE)
+    port.complete("STS-01")  # 5th try works: the streak starts over
+    assert d.status()["stuck"] == 0
+    assert d._open["C1"].replan_streak == 0

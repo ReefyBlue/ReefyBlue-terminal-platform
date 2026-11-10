@@ -29,7 +29,7 @@ LINK LOSS (STATE_CHANGED->OFFLINE)
     UPSTREAM_RECONNECTED): BUSY -> the job runs on; FAULT -> as above; IDLE while the
     job had not ended -> its outcome is unknown: the order waits for
     ``resolve_job(job, "completed"|"failed")`` and the device for ``release()``
-    (with ``auto_release`` the job fails at once and is replanned). ``alarms()``
+    (with ``auto_release`` it counts as completed at once, see ``_come_back``). ``alarms()``
     lists what the operator has to do.
 
 A TP holds one discharge box, from ``agv_to_tp`` until its STACK_IN completes
@@ -51,6 +51,9 @@ still needs an AGV they also leave one AGV free.
 The watchdog cancels an AGV job that makes no progress for ``watchdog_s``; after
 ``WATCHDOG_MAX_CANCELS`` cancels of the same order it logs an ERROR, marks the order
 ``stuck`` (``status()["stuck"]``) and leaves it alone (the order is not failed).
+An order whose jobs fail (JOB_FAILED or FAULT replan) ``WATCHDOG_MAX_CANCELS`` times in
+a row without a completion in between is parked as ``stuck`` too: it is not re-issued
+(no endless loop of immediately failing jobs) and stays open.
 """
 
 from __future__ import annotations
@@ -377,14 +380,20 @@ class Dispatcher:
             return True
         return False
 
+    @staticmethod
+    def _parked(rec: OrderRecord) -> bool:
+        """Stuck without a running job (replan streak cap): never re-issued."""
+        return rec.stuck and rec.current_job_id is None
+
     def _waiting(self, stage: Stage) -> list[OrderRecord]:
-        recs = [r for r in self._open.values() if r.stage is stage and r.current_job_id is None]
+        recs = [r for r in self._open.values()
+                if r.stage is stage and r.current_job_id is None and not self._parked(r)]
         return sorted(recs, key=lambda r: r.seq)
 
     def _fifo_head(self, sts: str) -> OrderRecord | None:
         """Earliest (submit order) order for ``sts`` that the crane has not handled yet."""
         for r in self._open.values():
-            if r.order.sts_id == sts and r.stage in PRE_CRANE:
+            if r.order.sts_id == sts and r.stage in PRE_CRANE and not self._parked(r):
                 return r
         return None
 
@@ -397,7 +406,7 @@ class Dispatcher:
         # crane serves only the head, so a lane full of non-head AGVs would deadlock.
         head_outside = head is not None and head.stage not in IN_LANE
         for rec in mine:  # submit order
-            if rec.stage not in NEEDS_AGV or rec.current_job_id is not None:
+            if rec.stage not in NEEDS_AGV or rec.current_job_id is not None or self._parked(rec):
                 continue
             if rec is not head:
                 if in_lane >= self.lookahead_per_sts:
@@ -492,7 +501,7 @@ class Dispatcher:
         if rec is None:
             return
         self._detach(rec)
-        rec.watchdog_cancels, rec.stuck = 0, False  # the order made progress
+        rec.watchdog_cancels, rec.stuck, rec.replan_streak = 0, False, 0  # the order made progress
         log.debug("completed %s on %s", ev.job_id, ev.equipment_id)
         agv = rec.agv_id or ev.equipment_id
         match rec.stage:
@@ -545,7 +554,7 @@ class Dispatcher:
             log.error("slot %s empty for load %s; failing order", rec.yard_slot, rec.cid)
             self._fail_order(rec, "SLOT_EMPTY")
         else:
-            self._replan(rec, ev.equipment_id, ev.reason or "UNKNOWN")
+            self._replan(rec, ev.equipment_id, ev.reason or "UNKNOWN", streak=True)
 
     def _on_state(self, ev: EquipmentEvent) -> None:
         eid, state = ev.equipment_id, ev.new_state
@@ -576,7 +585,7 @@ class Dispatcher:
             self._release_cause.setdefault(eid, "fault")
             for job_id, jeq in list(self._job_eq.items()):
                 if jeq == eid and job_id not in self._unknown:  # unknown ones wait for resolve_job
-                    self._replan(self._by_job[job_id], jeq, "FAULT")
+                    self._replan(self._by_job[job_id], jeq, "FAULT", streak=True)
 
     def _go_offline(self, eid: str, reason: str | None) -> None:
         if eid in self._offline:
@@ -596,11 +605,16 @@ class Dispatcher:
         log.info("%s back online: %s (job %s)", eid, state, job_id)
         if state is State.IDLE and job_id is not None and job_id in self._job_eq:
             # The job ended while we could not see it: completed or failed is unknown.
+            # With auto_release it counts as completed: the premise of OFFLINE is that
+            # the equipment keeps working, so a job already running when the link dropped
+            # can only end in JOB_COMPLETED or in a FAULT (and then the device returns
+            # FAULT, not IDLE); start-time failures (NO_AGV_IN_LANE, SLOT_*) happen
+            # before the outage. Without auto_release the operator decides (resolve_job).
             log.warning("outcome of %s on %s unknown after link loss", job_id, eid)
             self._unknown[job_id] = eid
             self._raise(AlarmKind.UNKNOWN_OUTCOME, job_id)
             if self.auto_release:
-                self._resolve(job_id, "failed")
+                self._resolve(job_id, "completed")
             else:
                 self._raise(AlarmKind.NEEDS_RELEASE, eid)
                 self._needs_release.add(eid)
@@ -636,8 +650,11 @@ class Dispatcher:
         self._release_cause.pop(eid, None)
         self._alarm_since.pop((AlarmKind.NEEDS_RELEASE, eid), None)
 
-    def _replan(self, rec: OrderRecord, eid: str, reason: str) -> None:
-        """Roll the order back to its last stable stage; it keeps its TOS position."""
+    def _replan(self, rec: OrderRecord, eid: str, reason: str, *, streak: bool = False) -> None:
+        """Roll the order back to its last stable stage; it keeps its TOS position.
+
+        ``streak``: a JOB_FAILED/FAULT-driven replan. ``WATCHDOG_MAX_CANCELS`` of them in
+        a row (no completion between) park the order as ``stuck``: it is not re-issued."""
         self._detach(rec)
         self._excluded.add(eid)
         self._replans += 1
@@ -647,6 +664,12 @@ class Dispatcher:
         rec.stage = ROLLBACK.get(old, old)
         rec.seq = rec.submit_seq
         log.warning("replan %s: %s failed on %s (%s) -> %s", rec.cid, old, eid, reason, rec.stage)
+        if streak:
+            rec.replan_streak += 1
+            if rec.replan_streak >= WATCHDOG_MAX_CANCELS and not rec.stuck:
+                rec.stuck = True
+                log.error("replan streak: %s failed %d times in a row on %s (%s); parked as stuck",
+                          rec.cid, rec.replan_streak, eid, reason)
 
     def _reslot(self, rec: OrderRecord) -> None:
         old = rec.yard_slot

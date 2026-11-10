@@ -124,6 +124,6 @@ def make_port(n_agv: int = 2) -> FakePort:
 
 def make_dispatcher(port: FakePort, slots: FakeSlots | None = None, **kw) -> Dispatcher:
     """Dispatcher for the pre-B2d dispatcher tests: ``auto_release=True`` (FAULT -> IDLE
-    re-admits the device, unknown outcomes fail at once), i.e. the behaviour they pin."""
+    re-admits the device, unknown outcomes count as completed), i.e. the behaviour they pin."""
     kw.setdefault("auto_release", True)
     return Dispatcher(port, slots if slots is not None else FakeSlots(), **kw)

@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--auto-release", action="store_true",
-                    help="re-admit equipment after FAULT -> IDLE and fail unknown job outcomes at once "
+                    help="re-admit equipment after FAULT -> IDLE and count unknown job outcomes as completed "
                          "(unattended runs); default: the operator releases via POST "
                          "/equipment/{id}/release and resolves via POST /jobs/{id}/resolve")
     ap.add_argument("--log-level", default="info", choices=["critical", "error", "warning", "info", "debug"])

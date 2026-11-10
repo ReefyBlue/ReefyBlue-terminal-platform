@@ -196,16 +196,17 @@ def test_resolve_bad_outcome_valueerror():
     assert d.status()["unknown_outcomes"] == 1
 
 
-def test_auto_release_resolves_unknown_as_failed():
+def test_auto_release_resolves_unknown_as_completed():
     port = make_port()
     d = Dispatcher(port, FakeSlots(), auto_release=True)
     d.submit([order("C1")])
     port.set_state("AGV-01", State.OFFLINE, LOST)
     port.set_state("AGV-01", State.IDLE, RESTORED)
     s = d.status()
-    assert (s["replans"], s["unknown_outcomes"], s["needs_release"], s["offline"]) == (1, 0, 0, 0)
+    assert (s["replans"], s["unknown_outcomes"], s["needs_release"], s["offline"]) == (0, 0, 0, 0)
     assert d.alarms() == []
-    assert jobs_of(port, "AGV-01") == ["C1-TRANSPORT-1", "C1-TRANSPORT-2"]  # re-admitted at once
+    assert jobs_of(port, "AGV-01") == ["C1-TRANSPORT-1"]  # no re-issue: the leg counts as done
+    assert jobs_of(port, "STS-01") == ["C1-DISCHARGE-1"]  # order advanced AGV_EN_ROUTE -> AT_STS
 
 
 def test_fault_after_unknown_outcome_keeps_job_for_operator():
