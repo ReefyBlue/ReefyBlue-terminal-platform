@@ -31,7 +31,8 @@ log = logging.getLogger("terminal_runner.run")
 def _transfer_hook(world: World):
     def agv(agv_id: str) -> AGV:
         eq = world.equipment[agv_id]
-        assert isinstance(eq, AGV)
+        if not isinstance(eq, AGV):
+            raise TypeError(f"{agv_id} is not an AGV")
         return eq
 
     def on_transfer(kind: str, eid: str, cid: str) -> None:
@@ -71,7 +72,7 @@ def run_once(scenario: Scenario, layout: Layout, seed: int) -> dict[str, float]:
     t = 0.0
     timed_out = True
     while t < scenario.duration_s:
-        t += SAMPLE_INTERVAL_S
+        t = min(t + SAMPLE_INTERVAL_S, scenario.duration_s)
         world.run(until=t)
         dispatcher.tick()
         kpi.sample()
@@ -134,10 +135,17 @@ def run_replications(
     return summary_path
 
 
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="terminal_runner.run", description=__doc__.splitlines()[0])
     parser.add_argument("scenario", type=Path)
-    parser.add_argument("--replications", type=int, default=1)
+    parser.add_argument("--replications", type=_positive_int, default=1)
     parser.add_argument("--out", type=Path, default=Path("out"))
     parser.add_argument("--layout", type=Path, default=Path("terminal.yaml"))
     args = parser.parse_args(argv)

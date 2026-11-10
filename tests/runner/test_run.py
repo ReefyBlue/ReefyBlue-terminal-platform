@@ -3,12 +3,14 @@ from __future__ import annotations
 import csv
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from terminal_runner.run import main, run_once
+from terminal_runner.run import _transfer_hook, main, run_once
 from terminal_sim.layout import load_layout
 from terminal_sim.scenario import load_scenario
+from terminal_sim.world import World
 
 LAYOUT = Path(__file__).resolve().parents[2] / "terminal.yaml"
 
@@ -76,3 +78,24 @@ def test_cli_writes_csv_and_summary(small_yaml: Path, tmp_path: Path, capsys, re
     stats = summary["moves_per_hour_total"]
     assert stats["p5"] <= stats["mean"] <= stats["p95"]
     assert stats["mean"] > 0
+
+
+def test_duration_cap_is_never_overshot(small_yaml: Path):
+    scenario = replace(load_scenario(small_yaml), duration_s=90.0)
+    k = run_once(scenario, load_layout(LAYOUT), seed=scenario.seed)
+    assert k["sim_elapsed_s"] == 90.0
+    assert k["timed_out"] == 1.0
+    assert k["containers_done"] < 20
+
+
+def test_cli_rejects_zero_replications(small_yaml: Path, tmp_path: Path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main([str(small_yaml), "--replications", "0", "--out", str(tmp_path)])
+    assert exc.value.code == 2
+    assert "--replications" in capsys.readouterr().err
+
+
+def test_hook_rejects_a_non_agv_with_type_error(small_yaml: Path):
+    world = World(load_layout(LAYOUT), load_scenario(small_yaml))
+    with pytest.raises(TypeError, match="STS-01 is not an AGV"):
+        _transfer_hook(world)("tp_to_agv", "STS-01", "C0001")
