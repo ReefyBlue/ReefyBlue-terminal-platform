@@ -1,0 +1,119 @@
+"""Spawn ``terminal_sim.serve`` + ``terminal_gateway.serve`` as subprocesses for e2e tests."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import signal
+import socket
+import subprocess
+import sys
+import time
+from collections.abc import Iterator
+from pathlib import Path
+
+from asyncua import Client
+
+ROOT = Path(__file__).resolve().parents[2]
+READY_TIMEOUT_S = 60.0
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def free_base_port() -> int:
+    """A base port whose 13 successors are free right now (best effort)."""
+    for _ in range(50):
+        base = free_port() % 20000 + 20000
+        try:
+            socks = []
+            for p in range(base, base + 13):
+                s = socket.socket()
+                socks.append(s)
+                s.bind(("127.0.0.1", p))
+            return base
+        except OSError:
+            continue
+        finally:
+            for s in socks:
+                s.close()
+    raise RuntimeError("no free port range")
+
+
+async def _gateway_ready(endpoint: str, n_equipment: int) -> bool:
+    """True once the gateway answers and mirrors ``n_equipment`` non-Fault devices."""
+    client = Client(endpoint, timeout=2.0)
+    try:
+        await asyncio.wait_for(client.connect(), 2.0)
+    except Exception:
+        return False
+    try:
+        idx = await client.get_namespace_index("urn:terminal:model")
+        terminal = await client.nodes.objects.get_child(f"{idx}:Terminal")
+        states: list[str] = []
+        stack = [terminal]
+        while stack:
+            node = stack.pop()
+            for child in await node.get_children():
+                name = (await child.read_browse_name()).Name
+                if name == "State":
+                    states.append(await child.read_value())
+                elif name not in ("Clock",) and (await child.read_node_class()).name == "Object":
+                    stack.append(child)
+        return len(states) == n_equipment and all(s != "Fault" for s in states)
+    except Exception:
+        return False
+    finally:
+        with contextlib.suppress(Exception):
+            await client.disconnect()
+
+
+def _stop(proc: subprocess.Popen) -> int:
+    if proc.poll() is None:
+        proc.send_signal(signal.SIGTERM)
+    try:
+        return proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return -9
+
+
+@contextlib.contextmanager
+def sim_and_gateway(scenario: Path, *, n_sts: int, n_agv: int, log_dir: Path) -> Iterator[dict]:
+    """Start sim then gateway on free ports; yield ``{"endpoint", "returncodes"}``.
+
+    On exit both get SIGTERM; their exit codes land in ``returncodes`` (sim, gateway).
+    """
+    base = free_base_port()
+    gw_port = free_port()
+    sim_log = (log_dir / "sim.log").open("w")
+    gw_log = (log_dir / "gateway.log").open("w")
+    sim = subprocess.Popen(
+        [sys.executable, "-m", "terminal_sim.serve", str(scenario), "--layout", str(ROOT / "terminal.yaml"),
+         "--base-port", str(base), "--host", "127.0.0.1"],
+        cwd=ROOT, stdout=sim_log, stderr=subprocess.STDOUT)
+    gw = subprocess.Popen(
+        [sys.executable, "-m", "terminal_gateway.serve", "--config", str(ROOT / "terminal.yaml"),
+         "--port", str(gw_port), "--host", "127.0.0.1", "--upstream-host", "127.0.0.1",
+         "--base-port", str(base), "--n-sts", str(n_sts), "--n-agv", str(n_agv)],
+        cwd=ROOT, stdout=gw_log, stderr=subprocess.STDOUT)
+    endpoint = f"opc.tcp://127.0.0.1:{gw_port}"
+    info = {"endpoint": endpoint, "returncodes": None, "logs": (sim_log.name, gw_log.name)}
+    try:
+        deadline = time.monotonic() + READY_TIMEOUT_S
+        n_equipment = n_sts + n_agv + 4
+        while not asyncio.run(_gateway_ready(endpoint, n_equipment)):
+            if sim.poll() is not None or gw.poll() is not None:
+                raise RuntimeError(f"process died during startup; see {info['logs']}")
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"gateway {endpoint} not ready within {READY_TIMEOUT_S} s")
+            time.sleep(0.5)
+        yield info
+    finally:
+        info["returncodes"] = (_stop(sim), _stop(gw))
+        sim_log.close()
+        gw_log.close()

@@ -467,6 +467,7 @@ source = { editable = "packages/runner" }
 dependencies = [
     { name = "terminal-ecs" },
     { name = "terminal-model" },
+    { name = "terminal-opcua" },
     { name = "terminal-sim" },
     { name = "terminal-tos-stub" },
 ]
@@ -475,6 +476,7 @@ dependencies = [
 requires-dist = [
     { name = "terminal-ecs", editable = "packages/ecs" },
     { name = "terminal-model", editable = "packages/model" },
+    { name = "terminal-opcua", editable = "packages/opcua" },
     { name = "terminal-sim", editable = "packages/sim" },
     { name = "terminal-tos-stub", editable = "packages/tos_stub" },
 ]

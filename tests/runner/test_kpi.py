@@ -203,6 +203,19 @@ def test_faults_replans_and_counts():
     assert setup()[2].finish(60.0)["faults"] == 0.0
 
 
+def test_faults_counted_from_fault_events_without_total():
+    """OPC UA mode has no faults_total: count STATE_CHANGED -> FAULT events instead."""
+    port, disp, kpi = setup()
+    port.set_state("AGV-01", State.FAULT)
+    port.set_state("AGV-01", State.IDLE)
+    port.set_state("ASC-A", State.FAULT)
+    port.set_state("ASC-A", State.BUSY)
+    assert kpi.finish(60.0)["faults"] == 2.0
+    port2, disp2, kpi2 = setup(faults=lambda: 5)
+    port2.set_state("AGV-01", State.FAULT)
+    assert kpi2.finish(60.0)["faults"] == 5.0  # the explicit total wins
+
+
 def test_csv_header_once(tmp_path: Path):
     port, disp, kpi = setup()
     kpis = kpi.finish(3600.0)

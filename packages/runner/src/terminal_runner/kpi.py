@@ -10,6 +10,11 @@ locations and assignment times:
   the STS, per ``job_log``). The sim hands the box over on arrival, so this is the
   time the loaded AGV waits on the TP for the ECS.
 - ``agv_travel_s_mean``: TRANSPORT duration, assignment until JOB_COMPLETED.
+
+``faults`` is ``faults_total()`` when given (in-process: the sim's fault counter).
+Without it (OPC UA mode, where the counter is not exposed) it is the number of
+STATE_CHANGED -> FAULT events seen, which also counts gateway-synthesised faults
+for a lost equipment server.
 """
 
 from __future__ import annotations
@@ -57,9 +62,12 @@ class KpiCollector:
         self._tp_arrival: dict[str, float] = {}  # job id of an empty leg to a TP -> arrival
         self._wait_sts: list[float] = []
         self._travel: list[float] = []
+        self._fault_events = 0
         port.subscribe(self._on_event)
 
     def _on_event(self, ev: EquipmentEvent) -> None:
+        if ev.kind is EventKind.STATE_CHANGED and ev.new_state is State.FAULT:
+            self._fault_events += 1
         if ev.kind is not EventKind.JOB_COMPLETED:
             return
         logged = self.dispatcher.job_log.get(ev.job_id or "")
@@ -131,7 +139,8 @@ class KpiCollector:
         else:
             kpis["vessel_turnaround_s"] = 0.0
         status = self.dispatcher.status()
-        kpis["faults"] = float(self._faults_total()) if self._faults_total else 0.0
+        faults = self._faults_total() if self._faults_total is not None else self._fault_events
+        kpis["faults"] = float(faults)
         kpis["replans"] = float(status["replans"])
         energy = sum(self.port.snapshot(eid).energy_kwh for eid in ids)
         kpis["energy_kwh_per_move"] = energy / total_moves if total_moves else 0.0
