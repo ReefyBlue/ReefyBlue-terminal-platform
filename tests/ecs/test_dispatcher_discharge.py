@@ -173,23 +173,73 @@ def test_rejected_assignment_tries_next_agv():
     assert [(eid, j.job_id) for eid, j in port.calls] == [("AGV-02", "C1-TRANSPORT-1")]
 
 
-def test_stack_in_waits_for_busy_asc():
+def test_second_discharge_to_the_same_tp_waits_until_stack_in_completes():
     port = make_port()
     d = Dispatcher(port, FakeSlots())
     d.submit([order("C1", slot="A/1/1/1"), order("C2", slot="A/1/1/2")])
-    # C1 via AGV-01, C2 via AGV-02
-    port.complete("AGV-01")  # C1 at STS → discharge C1
+    agv02 = lambda: [j.job_id for e, j in port.calls if e == "AGV-02"]  # noqa: E731
+    port.complete("AGV-01")  # C1 at STS -> discharge C1
     port.complete("AGV-02")  # C2 at STS, STS busy
-    port.complete("STS-01")  # C1 → yard; C2 discharge starts
-    port.complete("AGV-01")  # C1 at TP → STACK_IN C1
-    port.complete("STS-01")  # C2 → yard
-    port.complete("AGV-02")  # C2 at TP, ASC busy → waits
+    port.complete("STS-01")  # C1 -> TP A; C2 discharge starts
+    port.complete("AGV-01")  # C1's box on TP A -> STACK_IN C1
+    port.complete("STS-01")  # C2 on AGV-02: TP A occupied, no leg yet
+    assert agv02() == ["C2-TRANSPORT-1"]
     assert [j.job_id for e, j in port.calls if e == "ASC-A"] == ["C1-STACK_IN-1"]
-    port.complete("ASC-A")
+    port.complete("ASC-A")  # STACK_IN done: TP A empty again
+    assert agv02() == ["C2-TRANSPORT-1", "C2-TRANSPORT-2"]
+    port.complete("AGV-02")
     assert [j.job_id for e, j in port.calls if e == "ASC-A"] == ["C1-STACK_IN-1", "C2-STACK_IN-1"]
     port.complete("ASC-A")
     assert d.completed == ["C1", "C2"]
     assert d.status()["active_jobs"] == 0
+
+
+def test_discharge_arriving_at_an_occupied_tp_waits_there_with_its_box():
+    port = make_port()
+    d = Dispatcher(port, FakeSlots())
+    transfers: list[tuple[str, str, str]] = []
+    d.on_transfer = lambda kind, eid, cid: transfers.append((kind, eid, cid))
+    d.submit([order("C1", slot="A/1/1/1"), order("C2", slot="A/1/1/2")])
+    port.complete("AGV-01")
+    port.complete("AGV-02")
+    port.complete("STS-01")  # C1 -> TP A (leg under way)
+    port.complete("STS-01")  # C2 -> TP A too: the TP is still empty
+    port.complete("AGV-01")  # C1's box on TP A -> STACK_IN C1
+    port.complete("AGV-02")  # C2 arrives: TP A occupied, box stays on AGV-02
+    assert ("agv_to_tp", "AGV-02", "C2") not in transfers
+    assert d._open["C2"].stage == "AWAIT_TP"
+    assert "AGV-02" in d.committed_agvs()
+    port.complete("ASC-A")  # C1 stacked -> C2 handed over, STACK_IN C2
+    assert transfers[-1] == ("agv_to_tp", "AGV-02", "C2")
+    assert port.calls[-1][1].job_id == "C2-STACK_IN-1"
+    port.complete("ASC-A")
+    assert d.completed == ["C1", "C2"]
+
+
+def test_discharge_reslots_away_from_a_tp_blocked_by_a_faulted_asc():
+    port = FakePort({
+        "STS-01": (Kind.STS, Position(100, 0)),
+        "ASC-A": (Kind.ASC, Position(50, 120)),
+        "ASC-B": (Kind.ASC, Position(150, 120)),
+        "AGV-01": (Kind.AGV, Position(10, 50)),
+        "AGV-02": (Kind.AGV, Position(300, 50)),
+    })
+    slots = FakeSlots(["B/7/1/1"])
+    d = Dispatcher(port, slots)
+    d.submit([order("C1", slot="A/1/1/1"), order("C2", slot="A/1/1/2")])
+    port.complete("AGV-01")
+    port.complete("AGV-02")
+    port.complete("STS-01")  # C1 -> TP A
+    port.complete("AGV-01")  # C1's box on TP A, STACK_IN C1 starts
+    port.set_state("ASC-A", State.FAULT)  # ... and ASC-A breaks down
+    assert slots.calls == []
+    port.complete("STS-01")  # C2 on AGV-02: TP A full and its ASC down -> block B
+    assert slots.calls == [("B", None)]
+    eid, job = port.calls[-1]
+    assert (eid, job.job_id, job.to_loc) == ("AGV-02", "C2-TRANSPORT-2", "TP/B/WS")
+    port.complete("AGV-02")
+    assert port.calls[-1][0] == "ASC-B" and port.calls[-1][1].to_loc == "B/7/1/1"
+    assert d.status()["replans"] == 2  # C1's STACK_IN rolled back, C2 re-slotted
 
 
 def test_subscribes_and_reports_equipment_state():
@@ -309,14 +359,33 @@ def test_stack_in_assigns_at_most_one_job_per_asc_per_tick():
         "AGV-02": (Kind.AGV, Position(210, 50)),
     })
     port.assign_job("ASC-A", Job("X", JobType.STACK_IN, "X", "TP/A/WS", "A/9/9/1"))
-    port._state["ASC-A"] = State.BUSY  # hold the ASC while both boxes reach the TP
+    port._state["ASC-A"] = State.BUSY  # hold the ASC while C1 reaches the TP
     d = Dispatcher(port, FakeSlots())
-    d.submit([order("C1", slot="A/1/1/1"), order("C2", slot="A/1/1/2", sts="STS-02")])
-    for agv, sts in (("AGV-01", "STS-01"), ("AGV-02", "STS-02")):
-        port.complete(agv)
-        port.complete(sts)
-        port.complete(agv)
+    load = WorkOrder(container_id="L2", type=JobType.LOAD, sts_id="STS-02", yard_slot="A/3/1/1")
+    d.submit([order("C1", slot="A/1/1/1"), load])
+    port.complete("AGV-01")
+    port.complete("STS-01")
+    port.complete("AGV-01")  # C1 on the TP, L2 still waiting for the ASC
     port._state["ASC-A"] = State.IDLE
     d.tick()
-    stack_ins = [j.job_id for e, j in port.calls if e == "ASC-A" and j.container_id != "X"]
-    assert stack_ins == ["C1-STACK_IN-1"]
+    d.tick()
+    asc_jobs = [j.job_id for e, j in port.calls if e == "ASC-A" and j.container_id != "X"]
+    assert asc_jobs == ["C1-STACK_IN-1"]
+
+
+def test_box_waiting_at_a_tp_moves_on_when_its_asc_faults():
+    port = FakePort({
+        "STS-01": (Kind.STS, Position(100, 0)),
+        "ASC-A": (Kind.ASC, Position(50, 120)),
+        "ASC-B": (Kind.ASC, Position(150, 120)),
+        "AGV-01": (Kind.AGV, Position(10, 50)),
+        "AGV-02": (Kind.AGV, Position(300, 50)),
+    })
+    d = Dispatcher(port, FakeSlots(["B/7/1/1"]))
+    d.submit([order("C1", slot="A/1/1/1"), order("C2", slot="A/1/1/2")])
+    for eid in ("AGV-01", "AGV-02", "STS-01", "STS-01", "AGV-01", "AGV-02"):
+        port.complete(eid)  # C1's box on TP A (STACK_IN), C2 waits at TP A
+    assert d._open["C2"].stage == "AWAIT_TP"
+    port.set_state("ASC-A", State.FAULT)
+    eid, job = port.calls[-1]
+    assert (eid, job.job_id, job.from_loc, job.to_loc) == ("AGV-02", "C2-TRANSPORT-3", "TP/A/WS", "TP/B/WS")

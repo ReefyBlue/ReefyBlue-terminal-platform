@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from terminal_model.locations import parse_location
 from terminal_model.port import EquipmentPort, EventKind
 from terminal_model.types import Job, JobType, Position, State
 from terminal_sim.layout import load_layout
@@ -98,3 +99,16 @@ def test_idle_agv_parks_off_the_tp(world):
     world.run(300)
     assert agv.state == State.IDLE and agv.cell in world.staging_cells
     assert world.grid.owner_of((2, 5)) is None
+
+
+def test_transfer_tp_to_agv_frees_the_ws_tp(world):
+    asc = world.equipment["ASC-A"]
+    world.yard.occupy(parse_location("A/1/1/1"), "C9")
+    assert world.port.assign_job("ASC-A", Job("S1", JobType.STACK_OUT, "C9", "A/1/1/1", "TP/A/WS"))
+    world.port.assign_job("AGV-01", _transport("TP/A/WS"))
+    world.run(300)
+    assert world.port.snapshot("ASC-A").extra["ws_tp_occupied"] is True
+    assert world.equipment["AGV-01"].cell == asc.block.tp_ws_cell
+    world.transfer_tp_to_agv("AGV-01", "C9")
+    assert world.port.snapshot("AGV-01").extra["loaded_container_id"] == "C9"
+    assert world.port.snapshot("ASC-A").extra["ws_tp_occupied"] is False

@@ -163,6 +163,16 @@ class World:
                 return eq.equipment_id
         return None
 
+    def transfer_tp_to_agv(self, agv_id: str, container_id: str) -> None:
+        """The AGV standing on a block's TP cell takes ``container_id`` from that TP."""
+        agv = self.equipment[agv_id]
+        if not isinstance(agv, AGV):
+            raise TypeError(f"{agv_id} is not an AGV")
+        agv.load(container_id)
+        for eq in self.equipment.values():
+            if isinstance(eq, ASC) and eq.block.tp_ws_cell == agv.cell:
+                eq.tp_ws_occupied = False
+
     def transfer_agv_to_tp(self, agv_id: str) -> str:
         agv = self.equipment[agv_id]
         assert isinstance(agv, AGV)

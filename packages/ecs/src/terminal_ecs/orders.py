@@ -18,6 +18,7 @@ class Stage(StrEnum):
     AT_STS = "AT_STS"
     DISCHARGING = "DISCHARGING"
     TO_YARD = "TO_YARD"
+    AWAIT_TP = "AWAIT_TP"  # AGV with the box at the TP, another discharge box still on it
     STACKING = "STACKING"
     # load
     AWAIT_ASC = "AWAIT_ASC"
@@ -90,6 +91,7 @@ class OrderRecord:
     seq: int = 0  # set on every stage entry; FIFO key for waiting orders
     submit_seq: int = 0  # position in the TOS sequence; restored as ``seq`` on rollback
     fail_reason: str | None = None
+    agv_at: str | None = None  # where a bound AGV stands when not at its STS (re-slotted at a TP)
     watchdog_cancels: int = 0  # reset when one of the order's jobs completes
     stuck: bool = False  # watchdog gave up re-cancelling (see Dispatcher._watchdog)
     job_counts: dict[JobType, int] = field(default_factory=dict)

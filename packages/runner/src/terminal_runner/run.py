@@ -44,7 +44,7 @@ def _transfer_hook(world: World):
             if got != cid:
                 raise RuntimeError(f"{eid} unloaded {got} at TP, expected {cid}")
         elif kind == "tp_to_agv":
-            agv(eid).load(cid)
+            world.transfer_tp_to_agv(eid, cid)
         elif kind == "agv_to_sts":
             got = agv(eid).unload()
             if got != cid:

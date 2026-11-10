@@ -65,6 +65,9 @@ class ASC(Equipment):
         self.block = block
         self.yard = yard
         self.gantry_bay = 1.0
+        # Waterside TP holds a box: from STACK_IN assignment (the AGV has put it down)
+        # until that STACK_IN completes, and from STACK_OUT completion until the box is
+        # taken by an AGV (``World.transfer_tp_to_agv``).
         self.tp_ws_occupied = False
         self.tp_ls_occupied = False
 
@@ -85,6 +88,12 @@ class ASC(Equipment):
         if job.type == JobType.STACK_OUT:
             return self._is_own_slot(src) and self._is_ws_tp(dst)
         return False
+
+    def assign_job(self, job: Job) -> bool:
+        ok = super().assign_job(job)
+        if ok and job.type == JobType.STACK_IN:
+            self.tp_ws_occupied = True
+        return ok
 
     def process(self):
         job = self.current_job
@@ -133,6 +142,7 @@ class ASC(Equipment):
             return
         self.energy_kwh += ENERGY_PER_MOVE_KWH
         self.gantry_bay = float(slot.bay) if stack_in else 0.0
+        self.tp_ws_occupied = not stack_in
         self.complete_job()
 
     def extra(self) -> dict:

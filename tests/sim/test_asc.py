@@ -130,3 +130,20 @@ def test_rejects_wrong_block_or_bad_location(rig):
         rig.asc.assign_job(Job("J4", JobType.STACK_IN, "C1", "nonsense", "A/1/1/1"))
         is False
     )
+
+
+def test_ws_tp_occupied_from_stack_in_assignment_to_completion(rig):
+    assert rig.asc.extra()["ws_tp_occupied"] is False
+    assert rig.asc.assign_job(stack_in())
+    assert rig.asc.extra()["ws_tp_occupied"] is True  # the AGV has put the box down
+    rig.env.run(till=300)
+    assert of_kind(rig, EventKind.JOB_COMPLETED)
+    assert rig.asc.extra()["ws_tp_occupied"] is False
+
+
+def test_ws_tp_occupied_after_stack_out(rig):
+    rig.yard.occupy(SlotLoc("A", 10, 3, 1), "C1")
+    assert rig.asc.assign_job(stack_out())
+    assert rig.asc.extra()["ws_tp_occupied"] is False
+    rig.env.run(till=300)
+    assert rig.asc.extra()["ws_tp_occupied"] is True  # box waits on the TP for an AGV

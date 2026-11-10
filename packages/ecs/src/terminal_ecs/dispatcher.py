@@ -7,6 +7,8 @@ DISCHARGE
     AWAIT_AGV(None) --TRANSPORT (agv->sts)--> AGV_EN_ROUTE(job) --done--> AT_STS(None)
     AT_STS(None) --DISCHARGE (VESSEL->sts)--> DISCHARGING(job) --done/sts_to_agv--> TO_YARD(None)
     TO_YARD(None) --TRANSPORT (sts->TP)--> TO_YARD(job) --done/agv_to_tp, AGV freed--> STACKING(None)
+    TO_YARD(job) --done, TP still holds another discharge box--> AWAIT_TP(None)
+    AWAIT_TP(None) --TP empty: agv_to_tp, AGV freed--> STACKING(None)
     STACKING(None) --STACK_IN (TP->slot)--> STACKING(job) --done--> DONE
     STACKING(job) --SLOT_OCCUPIED--> STACKING(None) with a new valid slot, or FAILED (YARD_FULL)
 LOAD
@@ -20,6 +22,15 @@ RECOVERY (any other JOB_FAILED, STATE_CHANGED->FAULT with a running job, watchdo
     on the AGV / at the TP), keeps its TOS position, ``replans += 1``; the equipment
     is excluded until STATE_CHANGED->IDLE.
     any stage --on_transfer raises--> FAILED (TRANSFER_ERROR), AGV quarantined for good.
+
+A TP holds one discharge box, from ``agv_to_tp`` until its STACK_IN completes
+(``_tp_occupied``). No TO_YARD leg is issued to an occupied TP (the box waits on its
+AGV); a leg already under way ends in AWAIT_TP and hands over once the TP is empty.
+If the block's ASC is down while its TP is occupied, waiting orders (TO_YARD, AWAIT_TP)
+are re-slotted to the first other block with a free TP and a working ASC. No STACK_OUT
+is issued while a discharge box is on or heading for the TP, or a LOAD uses it
+(``TP_BUSY``). A LOAD box waiting on the TP does not block a discharge: loads are
+unstacked before an AGV is free, so waiting on them deadlocks.
 
 Each STS serves its orders (DISCHARGE and LOAD together) in submit order: only the
 FIFO head may use the crane; the head is also exempt from the lane lookahead, which
@@ -106,6 +117,7 @@ class Dispatcher:
         self._quarantined: set[str] = set()  # AGVs never dispatched again
         self._last_progress: dict[str, float] = {}
         self._last_pos: dict[str, Position] = {}
+        self._tp_occupied: dict[str, str] = {}  # block -> container whose box is on its TP
         self._seq = itertools.count(1)
         self._failed = 0
         self._replans = 0
@@ -212,7 +224,13 @@ class Dispatcher:
                 else:
                     job = Job(head.next_job_id(jtype), jtype, head.cid, sts, "VESSEL")
                 self._issue(sts, head, job, stage)
-        # 2. Loaded AGVs (box on board): to the TP (discharge) or to the STS (load).
+        # 2. Loaded AGVs (box on board): hand over at a freed TP, or drive to the TP
+        # (discharge) / the STS (load). A discharge box waits on its AGV while the TP is occupied.
+        for rec in self._waiting(Stage.AWAIT_TP):
+            if rec.block not in self._tp_occupied and rec.agv_id not in self._excluded | self._quarantined:
+                self._deliver_to_tp(rec, rec.agv_id)
+            elif self._reslot_away(rec):  # ASC down: drive the box on to another block
+                self._enter(rec, Stage.TO_YARD)
         for stage, src, dst in ((Stage.TO_YARD, "sts", "tp"), (Stage.TO_STS, "tp", "sts")):
             for rec in self._waiting(stage):
                 if rec.agv_id is None:
@@ -220,7 +238,9 @@ class Dispatcher:
                     continue
                 if not self._available(rec.agv_id):  # e.g. still BUSY finishing the last leg
                     continue
-                locs = {"sts": rec.order.sts_id, "tp": rec.tp}
+                if stage is Stage.TO_YARD and rec.block in self._tp_occupied and not self._reslot_away(rec):
+                    continue  # one box per TP
+                locs = {"sts": rec.agv_at or rec.order.sts_id, "tp": rec.tp}
                 job = Job(rec.next_job_id(JobType.TRANSPORT), JobType.TRANSPORT, rec.cid, locs[src], locs[dst])
                 self._issue(rec.agv_id, rec, job, stage)
         # 3. ASCs, at most one job each per pass: STACK_IN (clears the TP) before STACK_OUT.
@@ -231,18 +251,60 @@ class Dispatcher:
                 job = Job(rec.next_job_id(JobType.STACK_IN), JobType.STACK_IN, rec.cid, rec.tp, rec.yard_slot)
                 self._issue(asc, rec, job, Stage.STACKING)
             used.add(asc)
-        tp_busy = {r.block for r in self._open.values() if r.stage in TP_BUSY}
+        claimed = self._tp_claimed(loads=True)
         for rec in self._waiting(Stage.AWAIT_ASC):
             asc = self._asc_by_block[rec.block]
-            if asc in used or rec.block in tp_busy or not self._available(asc):
+            if asc in used or rec.block in claimed or not self._available(asc):
                 continue
             used.add(asc)
             job = Job(rec.next_job_id(JobType.STACK_OUT), JobType.STACK_OUT, rec.cid, rec.yard_slot, rec.tp)
             if self._issue(asc, rec, job, Stage.UNSTACKING):
-                tp_busy.add(rec.block)
+                claimed.add(rec.block)
         # 4. Empty AGVs to STS lanes / TPs, bounded by the lookahead.
         for sts in self._sts:
             self._dispatch_agvs(sts)
+
+    def _tp_claimed(self, *, loads: bool) -> set[str]:
+        """Blocks whose TP holds a discharge box or has one on its way or waiting at it;
+        with ``loads`` also those whose TP a LOAD uses."""
+        claimed = set(self._tp_occupied)
+        for r in self._open.values():
+            if (
+                (r.stage is Stage.TO_YARD and r.current_job_id is not None)
+                or r.stage is Stage.AWAIT_TP
+                or (loads and r.stage in TP_BUSY)
+            ):
+                claimed.add(r.block)
+        return claimed
+
+    def _asc_down(self, block: str) -> bool:
+        asc = self._asc_by_block[block]
+        return asc in self._excluded or self.port.snapshot(asc).state is State.FAULT
+
+    def _reslot_away(self, rec: OrderRecord) -> bool:
+        """The TP of ``rec``'s block holds a box its faulted ASC cannot stack: move the
+        order to the first other block (layout order) with an unclaimed TP and a working ASC."""
+        if rec.block not in self._tp_occupied or not self._asc_down(rec.block):
+            return False
+        claimed = self._tp_claimed(loads=False)
+        old = rec.yard_slot
+        for block in self._asc_by_block:
+            if block == rec.block or block in claimed or self._asc_down(block):
+                continue
+            new = self.slot_provider.next_slot(block)
+            if new is None:
+                continue
+            new_block = new.split("/", 1)[0]
+            if new_block not in self._asc_by_block or not valid_slot(new, new_block):
+                log.error("slot provider returned invalid slot %r for %s", new, rec.cid)
+                continue
+            if new_block == rec.block or new_block in claimed or self._asc_down(new_block):
+                continue  # provider fell back to an unusable block
+            rec.yard_slot = new
+            self._replans += 1
+            log.info("replan %s: TP of %s blocked behind faulted ASC, slot %s -> %s", rec.cid, old.split("/")[0], old, new)
+            return True
+        return False
 
     def _waiting(self, stage: Stage) -> list[OrderRecord]:
         recs = [r for r in self._open.values() if r.stage is stage and r.current_job_id is None]
@@ -360,10 +422,13 @@ class Dispatcher:
                 self._enter(rec, Stage.TO_YARD)
                 self._transfer(rec, "sts_to_agv", ev.equipment_id, rec.agv_id)
             case Stage.TO_YARD:
-                rec.agv_id = None  # AGV is free once the box is on the TP
-                self._enter(rec, Stage.STACKING)
-                self._transfer(rec, "agv_to_tp", agv, agv)
+                rec.agv_at = rec.tp
+                if rec.block in self._tp_occupied:  # another discharge box still on the TP
+                    self._enter(rec, Stage.AWAIT_TP)
+                else:
+                    self._deliver_to_tp(rec, agv)
             case Stage.STACKING:
+                self._clear_tp(rec)
                 self._finish(rec)
             case Stage.UNSTACKING:
                 self._enter(rec, Stage.AT_TP)
@@ -375,6 +440,12 @@ class Dispatcher:
             case Stage.LOADING:
                 if self._transfer(rec, "agv_to_sts", agv, agv):
                     self._finish(rec)
+
+    def _deliver_to_tp(self, rec: OrderRecord, agv: str) -> None:
+        rec.agv_id = rec.agv_at = None  # AGV is free once the box is on the TP
+        self._tp_occupied[rec.block] = rec.cid
+        self._enter(rec, Stage.STACKING)
+        self._transfer(rec, "agv_to_tp", agv, agv)
 
     def _finish(self, rec: OrderRecord) -> None:
         rec.agv_id = None
@@ -456,7 +527,15 @@ class Dispatcher:
             self.port.cancel_job(eid)
             self.port.reset(eid)
 
+    def _clear_tp(self, rec: OrderRecord) -> None:
+        for block, cid in list(self._tp_occupied.items()):
+            if cid == rec.cid:
+                del self._tp_occupied[block]
+
     def _fail_order(self, rec: OrderRecord, reason: str) -> None:
+        # A failed order's box may physically stay on the TP; free the TP anyway so the
+        # block keeps working (the failure is logged and counted).
+        self._clear_tp(rec)
         rec.fail_reason = reason
         rec.agv_id = None
         self._enter(rec, Stage.FAILED)
