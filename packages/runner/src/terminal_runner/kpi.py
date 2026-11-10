@@ -48,7 +48,7 @@ class KpiCollector:
         self.dispatcher = dispatcher
         self._faults_total = faults_total
         self._moves: dict[str, int] = defaultdict(int)
-        self._first_completed: float | None = None
+        self._first_move: float | None = None
         self._last_move: float | None = None
         self._busy_obs: dict[Kind, int] = defaultdict(int)
         self._total_obs: dict[Kind, int] = defaultdict(int)
@@ -63,12 +63,12 @@ class KpiCollector:
     def _on_event(self, ev: EquipmentEvent) -> None:
         if ev.kind is not EventKind.JOB_COMPLETED:
             return
-        if self._first_completed is None:
-            self._first_completed = ev.sim_time
         logged = self.dispatcher.job_log.get(ev.job_id or "")
         jtype = logged.job.type.value if logged else _job_type(ev.job_id)
         if jtype in _CRANE_JOBS:
             self._moves[ev.equipment_id] += 1
+            if self._first_move is None:
+                self._first_move = ev.sim_time
             self._last_move = ev.sim_time
             if logged and (arrived := self._sts_arrival.pop(logged.job.container_id, None)) is not None:
                 self._wait_sts.append(ev.sim_time - arrived)
@@ -124,8 +124,9 @@ class KpiCollector:
         kpis["agv_travel_s_mean"] = _mean(self._travel)
         for kind in (Kind.STS, Kind.AGV, Kind.ASC):
             kpis[f"utilisation_{kind.value}"] = self._utilisation(kind)
-        if self._last_move is not None and self._first_completed is not None:
-            kpis["vessel_turnaround_s"] = self._last_move - self._first_completed
+        # first to last completed crane move (DISCHARGE/LOAD)
+        if self._last_move is not None and self._first_move is not None:
+            kpis["vessel_turnaround_s"] = self._last_move - self._first_move
         else:
             kpis["vessel_turnaround_s"] = 0.0
         status = self.dispatcher.status()

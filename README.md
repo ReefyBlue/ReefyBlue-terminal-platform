@@ -31,9 +31,9 @@ Tests: `uv run pytest -q` (inclusief de e2e-runs met 200 containers, marker `e2e
 | `n_sts` | aantal STS-kranen (1..2) |
 | `n_agv` | aantal AGV's (1..6) |
 | `n_containers` | aantal containers (werkorders) |
-| `share_40ft` | aandeel 40ft-containers (0..1) |
+| `share_40ft` | aandeel 40ft-containers (0..1); niet gebruikt in Plan A (voorbereid) |
 | `discharge_share` | aandeel lossen (1.0 = alleen lossen, 0 = alleen laden) |
-| `speed_factor` | snelheidsfactor van de gesimuleerde apparatuur |
+| `speed_factor` | niet gebruikt in Plan A: wandkloktempo voor Plan B (de runner draait zo snel mogelijk in sim-tijd) |
 | `duration_s` | harde bovengrens op de gesimuleerde tijd (s) |
 | `faults` | optioneel; per `sts`/`agv`/`asc`: `mtbf_s`, `mttr_s` (mtbf 0 = geen storingen) |
 
@@ -48,7 +48,7 @@ Tests: `uv run pytest -q` (inclusief de e2e-runs met 200 containers, marker `e2e
 | `agv_travel_s_mean` | gemiddelde duur van een TRANSPORT-job, van toewijzing tot voltooiing (s) |
 | `utilisation_STS` / `_ASC` | aandeel samples waarin het apparaattype BUSY was |
 | `utilisation_AGV` | aandeel samples (AGV × sample) waarin een AGV BUSY was **of** door de dispatcher aan een order gekoppeld (bijv. wachtend in de lane) |
-| `vessel_turnaround_s` | tijd van de eerste tot de laatste voltooide STS-move (s) |
+| `vessel_turnaround_s` | tijd van de eerste tot de laatste voltooide STS-move (DISCHARGE/LOAD) (s) |
 | `faults` | aantal opgetreden storingen |
 | `replans` | aantal herplanningen door de dispatcher |
 | `energy_kwh_per_move` | energieverbruik per STS-move (kWh) |

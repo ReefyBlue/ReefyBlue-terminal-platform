@@ -147,14 +147,14 @@ def test_kpi_key_order_is_stable():
 def test_turnaround():
     port, disp, kpi = setup()
     port.advance(100)
-    run_job(port, "AGV-01", JobType.TRANSPORT)  # first completion of any kind
+    run_job(port, "AGV-01", JobType.TRANSPORT)  # earlier, non-crane: ignored for start
     port.advance(400)
-    run_job(port, "STS-01", JobType.DISCHARGE)
+    run_job(port, "STS-01", JobType.DISCHARGE)  # first crane move at t=500
     port.advance(500)
     run_job(port, "STS-01", JobType.LOAD, n=2)  # last crane move at t=1000
     port.advance(300)
     run_job(port, "ASC-A", JobType.STACK_IN)  # later, non-crane: ignored for end
-    assert kpi.finish(2000.0)["vessel_turnaround_s"] == 900.0
+    assert kpi.finish(2000.0)["vessel_turnaround_s"] == 500.0
 
 
 def test_turnaround_zero_without_moves():
