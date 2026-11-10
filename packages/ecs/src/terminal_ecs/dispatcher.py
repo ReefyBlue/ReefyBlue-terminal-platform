@@ -19,58 +19,21 @@ from __future__ import annotations
 import itertools
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from enum import StrEnum
 
 from terminal_model.locations import SlotLoc, parse_location
 from terminal_model.port import EquipmentEvent, EquipmentPort, EventKind
 from terminal_model.types import Job, JobType, Kind, State
 
+from terminal_ecs.orders import (
+    LOOKAHEAD_STAGES,
+    PRE_DISCHARGE,
+    OrderRecord,
+    Stage,
+    valid_slot,
+)
 from terminal_ecs.workorders import SlotProvider, WorkOrder, WorkOrderError
 
 log = logging.getLogger("terminal_ecs")
-
-
-class Stage(StrEnum):
-    AWAIT_AGV = "AWAIT_AGV"
-    AGV_EN_ROUTE = "AGV_EN_ROUTE"
-    AT_STS = "AT_STS"
-    DISCHARGING = "DISCHARGING"
-    TO_YARD = "TO_YARD"
-    STACKING = "STACKING"
-    DONE = "DONE"
-    FAILED = "FAILED"
-
-
-_LOOKAHEAD_STAGES = (Stage.AGV_EN_ROUTE, Stage.AT_STS)
-_PRE_DISCHARGE = (Stage.AWAIT_AGV, Stage.AGV_EN_ROUTE, Stage.AT_STS)
-
-
-@dataclass
-class _OrderRecord:
-    order: WorkOrder
-    yard_slot: str
-    stage: Stage = Stage.AWAIT_AGV
-    agv_id: str | None = None
-    current_job_id: str | None = None
-    seq: int = 0  # set on every stage entry; FIFO key for waiting orders
-    fail_reason: str | None = None
-    job_counts: dict[JobType, int] = field(default_factory=dict)
-
-    @property
-    def cid(self) -> str:
-        return self.order.container_id
-
-    @property
-    def block(self) -> str:
-        return self.yard_slot.split("/", 1)[0]
-
-    @property
-    def tp(self) -> str:
-        return f"TP/{self.block}/WS"
-
-    def next_job_id(self, job_type: JobType) -> str:
-        return f"{self.cid}-{job_type}-{self.job_counts.get(job_type, 0) + 1}"
 
 
 class Dispatcher:
@@ -103,8 +66,8 @@ class Dispatcher:
                 self._asc_by_block[eid.split("-", 1)[1]] = eid
 
         self._known: set[str] = set()
-        self._open: dict[str, _OrderRecord] = {}  # submit order = per-STS FIFO
-        self._by_job: dict[str, _OrderRecord] = {}
+        self._open: dict[str, OrderRecord] = {}  # submit order = per-STS FIFO
+        self._by_job: dict[str, OrderRecord] = {}
         self._seq = itertools.count(1)
         self._failed = 0
         self._replans = 0
@@ -133,7 +96,7 @@ class Dispatcher:
                 raise WorkOrderError("INVALID_SLOT", f"{o.container_id}: {o.yard_slot}")
         for o in orders:
             self._known.add(o.container_id)
-            self._open[o.container_id] = _OrderRecord(o, o.yard_slot, seq=next(self._seq))
+            self._open[o.container_id] = OrderRecord(o, o.yard_slot, seq=next(self._seq))
         self.tick()
 
     def status(self) -> dict:
@@ -169,7 +132,7 @@ class Dispatcher:
 
     # ------------------------------------------------------------ internals
 
-    def _waiting(self, stage: Stage) -> list[_OrderRecord]:
+    def _waiting(self, stage: Stage) -> list[OrderRecord]:
         recs = [r for r in self._open.values() if r.stage is stage and r.current_job_id is None]
         return sorted(recs, key=lambda r: r.seq)
 
@@ -201,16 +164,16 @@ class Dispatcher:
         for sts in self._sts:
             self._dispatch_agvs(sts)
 
-    def _fifo_head(self, sts: str) -> _OrderRecord | None:
+    def _fifo_head(self, sts: str) -> OrderRecord | None:
         """Earliest (submit order) DISCHARGE order for ``sts`` that has not started discharging."""
         for r in self._open.values():
-            if r.order.sts_id == sts and r.order.type is JobType.DISCHARGE and r.stage in _PRE_DISCHARGE:
+            if r.order.sts_id == sts and r.order.type is JobType.DISCHARGE and r.stage in PRE_DISCHARGE:
                 return r
         return None
 
     def _dispatch_agvs(self, sts: str) -> None:
         mine = [r for r in self._open.values() if r.order.sts_id == sts]
-        in_lane = sum(r.stage in _LOOKAHEAD_STAGES for r in mine)
+        in_lane = sum(r.stage in LOOKAHEAD_STAGES for r in mine)
         queue = [r for r in mine if r.stage is Stage.AWAIT_AGV and r.order.type is JobType.DISCHARGE]
         for rec in queue:
             if in_lane >= self.lookahead_per_sts:
@@ -219,7 +182,7 @@ class Dispatcher:
                 return  # no AGV available
             in_lane += 1
 
-    def _send_agv(self, sts: str, rec: _OrderRecord) -> bool:
+    def _send_agv(self, sts: str, rec: OrderRecord) -> bool:
         reserved = {r.agv_id for r in self._open.values() if r.agv_id is not None}
         sts_pos = self.port.snapshot(sts).position
         candidates = []
@@ -237,7 +200,7 @@ class Dispatcher:
             rec.agv_id = None
         return False
 
-    def _issue(self, eid: str, rec: _OrderRecord, job: Job, stage: Stage) -> bool:
+    def _issue(self, eid: str, rec: OrderRecord, job: Job, stage: Stage) -> bool:
         # Book-keep before assign_job: the port may emit events synchronously.
         prev = (rec.stage, rec.seq)
         rec.stage, rec.seq, rec.current_job_id = stage, next(self._seq), job.job_id
@@ -257,7 +220,7 @@ class Dispatcher:
     def _is_idle(self, eid: str) -> bool:
         return self.port.snapshot(eid).state is State.IDLE
 
-    def _finish_job(self, ev: EquipmentEvent) -> _OrderRecord | None:
+    def _finish_job(self, ev: EquipmentEvent) -> OrderRecord | None:
         rec = self._by_job.pop(ev.job_id, None) if ev.job_id else None
         if rec is None:
             log.debug("ignoring %s for unknown job %s", ev.kind, ev.job_id)
@@ -266,7 +229,7 @@ class Dispatcher:
         rec.current_job_id = None
         return rec
 
-    def _enter(self, rec: _OrderRecord, stage: Stage) -> None:
+    def _enter(self, rec: OrderRecord, stage: Stage) -> None:
         rec.stage, rec.seq = stage, next(self._seq)
 
     def _on_completed(self, ev: EquipmentEvent) -> None:
@@ -299,7 +262,7 @@ class Dispatcher:
         self._finish_job(ev)
         old = rec.yard_slot
         new = self.slot_provider.next_slot(rec.block, exclude=old)
-        if new is None or not self._valid_slot(new, rec.block):
+        if new is None or not valid_slot(new, rec.block):
             if new is not None:
                 log.error("slot provider returned invalid slot %r for %s in block %s", new, rec.cid, rec.block)
             log.error("yard full for %s in block %s", rec.cid, rec.block)
@@ -309,22 +272,14 @@ class Dispatcher:
         rec.yard_slot = new
         self._replans += 1
 
-    @staticmethod
-    def _valid_slot(slot: str, block: str) -> bool:
-        try:
-            loc = parse_location(slot)
-        except ValueError:
-            return False
-        return isinstance(loc, SlotLoc) and loc.block == block
-
-    def _fail_order(self, rec: _OrderRecord, reason: str) -> None:
+    def _fail_order(self, rec: OrderRecord, reason: str) -> None:
         rec.fail_reason = reason
         rec.agv_id = None
         self._enter(rec, Stage.FAILED)
         self._open.pop(rec.cid, None)
         self._failed += 1
 
-    def _transfer(self, rec: _OrderRecord, kind: str, eid: str) -> None:
+    def _transfer(self, rec: OrderRecord, kind: str, eid: str) -> None:
         if self.on_transfer is None:
             return
         try:
