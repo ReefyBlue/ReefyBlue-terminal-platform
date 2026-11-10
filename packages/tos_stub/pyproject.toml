@@ -6,10 +6,12 @@ build-backend = "hatchling.build"
 name = "terminal-tos-stub"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["terminal-model", "pyyaml>=6"]
+dependencies = ["terminal-model", "terminal-ecs", "terminal-sim", "pyyaml>=6"]
 
 [tool.uv.sources]
 terminal-model = { workspace = true }
+terminal-ecs = { workspace = true }
+terminal-sim = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terminal_tos_stub"]
