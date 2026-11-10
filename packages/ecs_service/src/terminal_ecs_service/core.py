@@ -63,7 +63,10 @@ class EcsCore:
         *,
         connect: Callable[[], EquipmentPort],
         broadcaster: Broadcaster | None = None,
+        auto_release: bool = False,
     ) -> None:
+        self.auto_release = auto_release
+        self._last_alarms: dict[tuple[str, str, str | None], dict] = {}
         self._connect = connect  # returns a connected port or raises ConnectionError
         self.port = ReconnectingPort()
         self.broadcaster = broadcaster if broadcaster is not None else Broadcaster()
@@ -104,7 +107,7 @@ class EcsCore:
         now = self.port.now()
         self._check_time(now)
         if self.dispatcher is None:
-            self.dispatcher = Dispatcher(self.port, self.allocator)
+            self.dispatcher = Dispatcher(self.port, self.allocator, auto_release=self.auto_release)
             self.kpi = KpiCollector(self.port, self.dispatcher)
             self.t0 = now
             self.next_tick = now + SAMPLE_INTERVAL_S
@@ -114,6 +117,7 @@ class EcsCore:
             self.next_tick = self.t0 + (math.floor((now - self.t0) / SAMPLE_INTERVAL_S) + 1) * SAMPLE_INTERVAL_S
         log.info("equipment link connected at sim time %.1f", now)
         self._publish_link()
+        self.publish_alarms()
         return True
 
     def _check_time(self, now: float) -> None:
@@ -132,6 +136,7 @@ class EcsCore:
         log.warning("equipment link lost at sim time %.1f", self.port.now())
         self._drop_link(blocking=False)
         self._publish_link()
+        self.publish_alarms()
 
     def _drop_link(self, *, blocking: bool = True) -> None:
         self.port.unbind()
@@ -174,6 +179,7 @@ class EcsCore:
                 self.tick_count += 1
                 self.publish_status()
                 self.publish_new_jobs()
+                self.publish_alarms()
         except ConnectionError:
             self.on_link_lost()
 
@@ -221,6 +227,7 @@ class EcsCore:
             log.warning("equipment link failed after the work orders were taken: %s", e)
             self.on_link_lost()
             self.publish_new_jobs()
+            self.publish_alarms()
             return
         except BaseException:
             self.known_containers.update(o.container_id for o in orders)  # taken before the tick failed
@@ -232,6 +239,37 @@ class EcsCore:
             log.warning("equipment link failed after the work orders were taken: %s", e)
             self.on_link_lost()
         self.publish_new_jobs()
+        self.publish_alarms()
+
+    def release(self, equipment_id: str) -> None:
+        """Operator release; ``KeyError``/``ReleaseRefused`` propagate from the Dispatcher."""
+        if not self.connected or self.dispatcher is None:
+            raise RuntimeError("not connected")
+        self.dispatcher.release(equipment_id)
+        self.publish_alarms()
+        self.publish_status()
+
+    def resolve_job(self, job_id: str, outcome: str) -> None:
+        """Operator verdict on a job with unknown outcome; ``KeyError``/``ValueError`` propagate."""
+        if not self.connected or self.dispatcher is None:
+            raise RuntimeError("not connected")
+        self.dispatcher.resolve_job(job_id, outcome)  # type: ignore[arg-type]
+        self.publish_alarms()
+        self.publish_status()
+
+    def alarms(self) -> list[dict]:
+        if self.dispatcher is None:
+            return []
+        return [
+            {
+                "kind": str(a.kind),
+                "equipment_id": a.equipment_id,
+                "job_id": a.job_id,
+                "since_sim_time": float(a.since),
+                "detail": a.detail,
+            }
+            for a in self.dispatcher.alarms()
+        ]
 
     def status(self) -> dict:
         base = self.dispatcher.status() if self.dispatcher is not None else {**_EMPTY_STATUS, "equipment": {}}
@@ -287,6 +325,20 @@ class EcsCore:
                 "equipment_id": logged.equipment_id,
                 "sim_time": logged.assigned_at,
             })
+
+    def publish_alarms(self) -> None:
+        """Publish ``alarm`` raised/cleared messages for the diff against the last call."""
+        if self.dispatcher is None:
+            return
+        current = {(a["kind"], a["equipment_id"], a["job_id"]): a for a in self.alarms()}
+        now = self.port.now()
+        for key, a in current.items():
+            if key not in self._last_alarms:
+                self.broadcaster.publish({"type": "alarm", "action": "raised", **a, "sim_time": now})
+        for key, a in self._last_alarms.items():
+            if key not in current:
+                self.broadcaster.publish({"type": "alarm", "action": "cleared", **a, "sim_time": now})
+        self._last_alarms = current
 
     def _publish_link(self) -> None:
         self.broadcaster.publish({"type": "link", "connected": self.connected, "sim_time": self.port.now()})

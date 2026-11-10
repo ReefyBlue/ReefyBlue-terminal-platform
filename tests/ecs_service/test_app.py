@@ -215,6 +215,9 @@ def test_ws_link_messages_on_reconnect():
             def next_link() -> dict:
                 # LINK_LOST/LINK_RESTORED equipment events (one per device) precede/follow it
                 while (msg := ws.receive_json())["type"] != "link":
+                    if msg["type"] == "alarm":  # LINK_LOST raised/cleared per device
+                        assert msg["kind"] == "LINK_LOST"
+                        continue
                     assert msg["type"] == "equipment" and msg["kind"] == "STATE_CHANGED"
                 return msg
 
