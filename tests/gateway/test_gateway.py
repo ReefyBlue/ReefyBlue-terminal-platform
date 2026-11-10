@@ -390,7 +390,8 @@ async def test_fresh_upstream_restart_keeps_gateway_seq_monotonic(rig, caplog):
     assert not [r for r in caplog.records if "not ahead" in r.getMessage() or "Seq gap" in r.getMessage()]
 
 
-async def test_event_for_other_equipment_ignored(rig):
+async def test_event_for_other_equipment_ignored(rig, caplog):
+    caplog.set_level(logging.WARNING, logger="terminal_gateway.mirror")
     await _start_connected(rig)
     async with Client(rig.server.endpoint) as up:
         up_types = await resolve_event_types(up)
@@ -401,3 +402,45 @@ async def test_event_for_other_equipment_ignored(rig):
     await asyncio.sleep(0.2)
     assert mirror._emitter.seq == 0
     assert not [ev for _, ev in rig.sink.received if ev.equipment_id in ("AGV-99", "STS-01")]
+    # ignored (spec section 7), not skipped as undecodable
+    assert not [r for r in caplog.records if "undecodable" in r.getMessage()]
+
+
+@pytest.mark.parametrize("rig", [1.0], indirect=True)
+async def test_reconnect_window_state_change_still_delivered(rig, monkeypatch):
+    """Upstream BUSY -> IDLE right around the snapshot read after a blip: the IDLE event
+    must still reach the ECS after the recovery, or it would exclude the device for good."""
+    await _start_connected(rig)
+    rig.sts.set_state(State.BUSY)
+    await rig.server.sync()
+    assert await _wait_for(lambda: _is(rig, "State", "BUSY"), 1.0)
+    real_read_values = Client.read_values
+    armed = []
+
+    async def read_then_finish(self, nodes):
+        values = await real_read_values(self, nodes)
+        if armed and armed.pop():  # once, on the mirror's reconnect snapshot read
+            rig.sts.set_state(State.IDLE)  # emits STATE_CHANGED -> IDLE upstream
+            await rig.server.sync()
+            await asyncio.sleep(0.3)  # let the event reach the gateway client meanwhile
+        return values
+
+    monkeypatch.setattr(Client, "read_values", read_then_finish)
+    rig.proxy.cut()
+    assert await _wait_until(
+        lambda: any(ev.reason == "UPSTREAM_DISCONNECTED" for _, ev in _sts(rig)), 3.0)
+    armed.append(True)
+    rig.proxy.restore()
+    assert await _wait_until(
+        lambda: any(ev.reason == "UPSTREAM_RECONNECTED" for _, ev in _sts(rig)), 4.0)
+    assert not armed  # the window was actually hit
+    [(rec_seq, rec)] = [(seq, ev) for seq, ev in _sts(rig) if ev.reason == "UPSTREAM_RECONNECTED"]
+    assert rec.new_state == State.BUSY  # the snapshot read saw BUSY
+
+    def idle_after_recovery():
+        return any(seq > rec_seq and ev.kind == EventKind.STATE_CHANGED
+                   and ev.new_state == State.IDLE for seq, ev in _sts(rig))
+
+    assert await _wait_until(idle_after_recovery, 2.0)
+    assert _sts(rig)[-1][1].new_state == State.IDLE
+    assert await _wait_for(lambda: _is(rig, "State", "IDLE"), 1.0)
