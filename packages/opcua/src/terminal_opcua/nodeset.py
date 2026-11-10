@@ -1,8 +1,7 @@
-"""OPC UA namespace definition: object types, object creation, snapshot/event writes."""
+"""OPC UA namespace definition: object types, object creation, snapshot writes."""
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 import weakref
@@ -13,16 +12,15 @@ from asyncua import Node, Server, ua
 from asyncua.common.instantiate_util import instantiate
 from asyncua.common.methods import uamethod
 
-from terminal_model.port import EquipmentEvent, EquipmentSnapshot
+from terminal_model.port import EquipmentSnapshot
 from terminal_model.types import Kind
 
-from terminal_opcua.codec import event_to_json
-
-NAMESPACE_URI = "urn:terminal:model"
+# NAMESPACE_URI lives in events (which nodeset imports) and stays importable from here.
+from terminal_opcua.events import NAMESPACE_URI, EventTypes, register_event_types
 
 EQUIPMENT_VARS = (
     "Id", "Kind", "Vendor", "State", "PositionX", "PositionY",
-    "CurrentJobId", "EnergyKwh", "Extra", "LastEvent", "EventSeq",
+    "CurrentJobId", "EnergyKwh", "Extra",
 )
 
 KIND_VARS: dict[Kind, tuple[str, ...]] = {
@@ -46,22 +44,19 @@ EXTRA_KEY_MAP: dict[str, str] = {
     "ls_tp_occupied": "LsTpOccupied",
 }
 
-_S, _D, _B, _U64 = (
-    ua.VariantType.String, ua.VariantType.Double,
-    ua.VariantType.Boolean, ua.VariantType.UInt64,
-)
+_S, _D, _B = ua.VariantType.String, ua.VariantType.Double, ua.VariantType.Boolean
 
 VAR_TYPES: dict[str, ua.VariantType] = {
     "Id": _S, "Kind": _S, "Vendor": _S, "State": _S,
     "PositionX": _D, "PositionY": _D, "CurrentJobId": _S, "EnergyKwh": _D,
-    "Extra": _S, "LastEvent": _S, "EventSeq": _U64,
+    "Extra": _S,
     "BerthSide": _S, "SpreaderHeightM": _D, "TrolleyPositionM": _D,
     "HandoverLaneOccupied": _B,
     "BatteryPct": _D, "LoadedContainerId": _S, "Route": _S, "SpeedMps": _D,
     "BlockId": _S, "GantryPositionM": _D, "WsTpOccupied": _B, "LsTpOccupied": _B,
 }
 
-_DEFAULTS = {_S: "", _D: 0.0, _B: False, _U64: 0}
+_DEFAULTS = {_S: "", _D: 0.0, _B: False}
 
 
 @dataclass
@@ -71,6 +66,7 @@ class Types:
     agv: ua.NodeId
     asc: ua.NodeId
     control: ua.NodeId
+    events: EventTypes
 
 
 @dataclass
@@ -143,12 +139,14 @@ async def register_types(server: Server) -> tuple[int, Types]:
     in_j.ValueRank = -1
     await control.add_method(idx, "PrefillYard", noop_b, [in_j], [_B])
     await control.add_method(idx, "Start", noop_b, [], [_B])
+    events = await register_event_types(server, idx)
     return idx, Types(
         equipment=equipment.nodeid,
         sts=kind_nodes[Kind.STS].nodeid,
         agv=kind_nodes[Kind.AGV].nodeid,
         asc=kind_nodes[Kind.ASC].nodeid,
         control=control.nodeid,
+        events=events,
     )
 
 
@@ -246,7 +244,6 @@ async def block_folder(server: Server, idx: int, yard: Node, block: str) -> Node
 # NodeIds repeat across servers (numeric ids per namespace), so per-node state
 # is scoped by the node's session (one per server) as well as by NodeId.
 _VAR_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
-_EMITTERS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
 async def get_var(node: Node, name: str) -> Node:
@@ -285,29 +282,3 @@ async def write_snapshot(node: Node, snap: EquipmentSnapshot) -> None:
             value = json.dumps(value)
         await _write(node, var, value)
 
-
-class EventEmitter:
-    """Emits events on one equipment node; owns the in-memory EventSeq counter."""
-
-    def __init__(self, node: Node) -> None:
-        self.node = node
-        self.seq = 0
-        self._lock = asyncio.Lock()
-
-    async def emit(self, ev: EquipmentEvent) -> None:
-        # Lock keeps LastEvent/EventSeq in order; the counter is never re-read
-        # from the node, so concurrent emits cannot lose increments.
-        async with self._lock:
-            self.seq += 1
-            await _write(self.node, "LastEvent", event_to_json(ev))
-            seq = await get_var(self.node, "EventSeq")
-            await seq.write_value(ua.Variant(self.seq, ua.VariantType.UInt64))
-
-
-async def emit_event(node: Node, ev: EquipmentEvent) -> None:
-    """Compatibility wrapper: one EventEmitter per node, kept in a registry."""
-    scope = _EMITTERS.setdefault(node.session, {})
-    em = scope.get(node.nodeid)
-    if em is None:
-        em = scope[node.nodeid] = EventEmitter(node)
-    await em.emit(ev)
