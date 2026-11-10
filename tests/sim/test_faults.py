@@ -37,7 +37,7 @@ def test_fault_cycle():
     assert states[0] == State.FAULT
     assert all(a != b for a, b in pairwise(states))
     assert all(s in (State.FAULT, State.IDLE) for s in states)
-    assert world.faults_total() == sum(i.count for i in world.fault_injectors)
+    assert world.faults_total() >= 5
 
 
 def test_fault_fails_running_job():
@@ -52,6 +52,19 @@ def test_fault_fails_running_job():
     assert failed
     assert failed[0].reason == "FAULT"
     assert failed[0].job_id == "J1"
+    # FAULT is set first: no transient IDLE between the FAULT and JOB_FAILED events
+    agv = [e for e in events if e.equipment_id == "AGV-01"]
+    i_fail = agv.index(failed[0])
+    i_fault = max(
+        i
+        for i, e in enumerate(agv[:i_fail])
+        if e.kind == EventKind.STATE_CHANGED and e.new_state == State.FAULT
+    )
+    between = agv[i_fault + 1 : i_fail]
+    assert not any(
+        e.kind == EventKind.STATE_CHANGED and e.new_state == State.IDLE for e in between
+    )
+    assert world.port.snapshot("AGV-01").state == State.FAULT
 
 
 def test_no_injector_when_mtbf_zero():
@@ -61,3 +74,16 @@ def test_no_injector_when_mtbf_zero():
     )
     assert world.fault_injectors == []
     assert world.faults_total() == 0
+
+
+def test_injector_rejects_non_positive_params():
+    import random
+
+    import pytest
+    from terminal_sim.faults import FaultInjector
+
+    world = _world(FaultParams(0, 0))
+    eq = world.equipment["AGV-01"]
+    for bad in (FaultParams(0, 10), FaultParams(10, 0)):
+        with pytest.raises(ValueError):
+            FaultInjector(target=eq, params=bad, rng=random.Random(1), env=world.env)

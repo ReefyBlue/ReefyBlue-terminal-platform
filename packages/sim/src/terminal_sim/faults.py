@@ -20,6 +20,10 @@ class FaultInjector(salabim.Component):
         rng: random.Random,
         env: salabim.Environment,
     ) -> None:
+        if params.mtbf_s <= 0 or params.mttr_s <= 0:
+            raise ValueError(
+                f"FaultInjector needs mtbf_s > 0 and mttr_s > 0, got {params}"
+            )
         self.target = target
         self.params = params
         self.rng = rng
@@ -31,9 +35,9 @@ class FaultInjector(salabim.Component):
             yield self.hold(self.rng.expovariate(1 / self.params.mtbf_s))
             if self.target.state is State.FAULT:
                 continue
+            self.target.set_state(State.FAULT)
             if self.target.current_job is not None:
                 self.target.fail_job("FAULT")
-            self.target.set_state(State.FAULT)
             self.count += 1
             yield self.hold(self.rng.expovariate(1 / self.params.mttr_s))
             self.target.set_state(State.IDLE)

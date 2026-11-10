@@ -39,3 +39,20 @@ def test_scenario_rejects(tmp_path, field, value):
     p.write_text(yaml.safe_dump({**BASE, field: value}))
     with pytest.raises(ValueError, match=field):
         load_scenario(p)
+
+
+@pytest.mark.parametrize(
+    "kind,mtbf,mttr,field",
+    [
+        ("agv", 100, 0, "faults.agv.mttr_s"),
+        ("sts", -1, 10, "faults.sts.mtbf_s"),
+        ("asc", 100, -5, "faults.asc.mttr_s"),
+    ],
+)
+def test_scenario_rejects_bad_faults(tmp_path, kind, mtbf, mttr, field):
+    p = tmp_path / "s.yaml"
+    p.write_text(
+        yaml.safe_dump({**BASE, "faults": {kind: {"mtbf_s": mtbf, "mttr_s": mttr}}})
+    )
+    with pytest.raises(ValueError, match=field):
+        load_scenario(p)

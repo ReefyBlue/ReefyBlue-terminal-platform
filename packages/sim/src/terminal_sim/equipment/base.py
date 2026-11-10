@@ -93,7 +93,8 @@ class Equipment(salabim.Component):
         self.current_job = None
         if self.env.current_component() is not self:
             self.cancel()  # called from outside: stop the running process
-        self.set_state(State.IDLE)
+        if self.state is not State.FAULT:
+            self.set_state(State.IDLE)
 
     def _emit_event(self, kind: EventKind, **kwargs) -> None:
         self._emit(

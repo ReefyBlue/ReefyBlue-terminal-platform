@@ -38,6 +38,16 @@ def load_scenario(path: Path) -> Scenario:
         )
         for kind in Kind
     }
+    for kind, fp in faults.items():
+        name = kind.value.lower()
+        if fp.mtbf_s < 0:
+            raise ValueError(f"faults.{name}.mtbf_s must be >= 0, got {fp.mtbf_s}")
+        if fp.mttr_s < 0:
+            raise ValueError(f"faults.{name}.mttr_s must be >= 0, got {fp.mttr_s}")
+        if fp.mtbf_s > 0 and fp.mttr_s == 0:
+            raise ValueError(
+                f"faults.{name}.mttr_s must be > 0 when mtbf_s > 0"
+            )
     s = Scenario(
         name=raw["name"],
         seed=int(raw["seed"]),
