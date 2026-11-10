@@ -20,6 +20,7 @@ class Grid:
         self.rows = rows
         self.cell_m = cell_m
         self._owners: dict[Cell, str] = {}
+        self._waiting: dict[str, Cell] = {}  # owner -> cell it is blocked on
 
     def _check(self, c: Cell) -> None:
         x, y = c
@@ -76,6 +77,15 @@ class Grid:
 
     def owner_of(self, c: Cell) -> str | None:
         return self._owners.get(c)
+
+    def set_waiting(self, owner: str, c: Cell | None) -> None:
+        if c is None:
+            self._waiting.pop(owner, None)
+        else:
+            self._waiting[owner] = c
+
+    def waiting_for(self, owner: str) -> Cell | None:
+        return self._waiting.get(owner)
 
     def center(self, c: Cell) -> Position:
         self._check(c)

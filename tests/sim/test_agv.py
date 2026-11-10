@@ -187,3 +187,17 @@ def test_blocked_goal_is_re_resolved():
     rig.env.run(till=300)
     assert len(of_kind(rig, EventKind.JOB_COMPLETED)) == 2
     assert {a.cell, b.cell} == set(lane)
+
+
+def test_head_on_deadlock_is_broken_by_giving_way():
+    # AGV-01 leaves the lane cell (4, 0) via (4, 1); AGV-02 sits on (4, 1) waiting
+    # for (4, 0). The other exit (5, 0) is held. Without giving way both wait forever.
+    rig = Rig(locs={"LANE": (4, 0), "TP/A/WS": (2, 5)})
+    rig.grid.try_reserve((5, 0), "X")
+    a, b = rig.agv(1, (4, 0)), rig.agv(2, (4, 1))
+    assert a.assign_job(transport("TP/A/WS", "J1"))
+    assert b.assign_job(transport("LANE", "J2"))
+    rig.env.run(till=300)
+    assert len(of_kind(rig, EventKind.JOB_COMPLETED)) == 2
+    assert (a.cell, b.cell) == ((2, 5), (4, 0))
+    assert rig.owned_by("AGV-01") == [(2, 5)] and rig.owned_by("AGV-02") == [(4, 0)]

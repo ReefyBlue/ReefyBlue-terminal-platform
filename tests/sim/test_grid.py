@@ -90,3 +90,12 @@ def test_reserved_by_others_excludes_own_cells():
     g.try_reserve((3, 3), "AGV-02")
     assert g.reserved_by_others("AGV-01") == {(2, 2), (3, 3)}
     assert g.reserved_by_others("AGV-03") == {(1, 1), (2, 2), (3, 3)}
+
+
+def test_waiting_registry():
+    g = Grid(4, 2, 10.0)
+    assert g.waiting_for("A") is None
+    g.set_waiting("A", (1, 0))
+    assert g.waiting_for("A") == (1, 0)
+    g.set_waiting("A", None)
+    assert g.waiting_for("A") is None

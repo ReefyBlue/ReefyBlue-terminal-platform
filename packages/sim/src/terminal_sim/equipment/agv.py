@@ -76,6 +76,7 @@ class AGV(Equipment):
         return cid
 
     def _release_pending(self) -> None:
+        self.grid.set_waiting(self.equipment_id, None)
         if self._pending is not None:
             self.grid.release(self._pending, self.equipment_id)
             self._pending = None
@@ -97,6 +98,20 @@ class AGV(Equipment):
         )
         return route or self.grid.shortest_path(self.cell, goal)
 
+    def _give_way(self, blocked: Cell, goal: Cell) -> list[Cell]:
+        """Break a head-on deadlock: if the AGV holding ``blocked`` waits for our
+        cell, step aside to a free neighbour and route on to ``goal`` from there."""
+        blocker = self.grid.owner_of(blocked)
+        if blocker is None or self.grid.waiting_for(blocker) != self.cell:
+            return []
+        for side in self.grid.neighbors(self.cell):
+            if side == blocked or self.grid.owner_of(side) is not None:
+                continue
+            onward = self.grid.shortest_path(side, goal, avoid={blocked}) or self.grid.shortest_path(side, goal)
+            if onward:
+                return [self.cell, *onward]
+        return []
+
     def process(self):
         job = self.current_job
         assert job is not None
@@ -111,20 +126,25 @@ class AGV(Equipment):
             nxt = route[i]
             waited = 0.0
             while not self.grid.try_reserve(nxt, self.equipment_id):
+                self.grid.set_waiting(self.equipment_id, nxt)
                 if waited >= REPLAN_AFTER_S:
                     waited = 0.0
                     # Re-resolve the goal: another AGV may hold the cell this one was
                     # heading for (e.g. the other STS lane cell is still free).
                     new_goal = self.resolve_cell(job.to_loc)
+                    new: list[Cell] = []
                     if nxt != goal or new_goal != goal:
                         goal = new_goal
                         new = self._plan(goal)
-                        if len(new) > 1:
-                            route, i, nxt = new, 1, new[1]
-                            self.route = route
-                            continue
+                    if len(new) < 2 or new[1] == nxt:  # no detour: maybe a head-on deadlock
+                        new = self._give_way(nxt, goal) or new
+                    if len(new) > 1:
+                        route, i, nxt = new, 1, new[1]
+                        self.route = route
+                        continue
                 yield self.hold(RESERVE_RETRY_S)
                 waited += RESERVE_RETRY_S
+            self.grid.set_waiting(self.equipment_id, None)
             self._pending = nxt
             yield self.hold(self.grid.cell_m / self.speed_mps)
             prev = self.cell
