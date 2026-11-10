@@ -1,0 +1,36 @@
+[project]
+name = "terminal-platform"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "terminal-model",
+    "terminal-sim",
+    "terminal-ecs",
+    "terminal-tos-stub",
+    "terminal-runner",
+]
+
+[tool.uv.sources]
+terminal-model = { workspace = true }
+terminal-sim = { workspace = true }
+terminal-ecs = { workspace = true }
+terminal-tos-stub = { workspace = true }
+terminal-runner = { workspace = true }
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["e2e: full 200-container scenario runs (a few seconds each)"]
+pythonpath = [
+    "packages/model/src",
+    "packages/sim/src",
+    "packages/ecs/src",
+    "packages/tos_stub/src",
+    "packages/runner/src",
+]
