@@ -19,6 +19,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from terminal_ecs.alarms import ReleaseRefused
 from terminal_ecs.workorders import WorkOrder, WorkOrderError
 from terminal_model.locations import SlotLoc, parse_location
 from terminal_model.types import JobType
@@ -26,7 +27,12 @@ from terminal_model.types import JobType
 from terminal_ecs_service.core import EcsCore
 from terminal_ecs_service.schemas import (
     AcceptedOut,
+    AlarmOut,
     HealthOut,
+    RefusedOut,
+    ReleaseOut,
+    ResolveIn,
+    ResolveOut,
     WorkOrderErrorOut,
     WorkOrderErrorsOut,
     WorkOrderIn,
@@ -39,6 +45,11 @@ log = logging.getLogger(__name__)
 T = TypeVar("T")
 
 _NOT_CONNECTED = {"detail": "not connected to the equipment"}
+_503 = {"description": "Not connected to the equipment"}
+
+
+def _refused(code: str, message: str, status: int) -> JSONResponse:
+    return JSONResponse(RefusedOut(code=code, message=message).model_dump(), status_code=status)
 
 
 def _error(container_id: str | None, code: str, message: str) -> dict:
@@ -157,6 +168,50 @@ def create_app(core: EcsCore, *, run_loop: bool = True) -> FastAPI:
     @app.get("/equipment")
     async def get_equipment() -> Any:
         return guarded(core.equipment)
+
+    @app.get("/alarms", response_model=list[AlarmOut])
+    async def get_alarms() -> Any:
+        """Open alarms, oldest first (``since_sim_time``, then kind); last-known while
+        the link is down, ``[]`` before the first connection."""
+        return guarded(lambda: sorted(core.alarms(), key=lambda a: (
+            a["since_sim_time"], a["kind"], a["equipment_id"], a["job_id"] or "")))
+
+    @app.post("/equipment/{equipment_id}/release", response_model=ReleaseOut, responses={
+        404: {"model": RefusedOut, "description": "UNKNOWN_EQUIPMENT"},
+        409: {"model": RefusedOut, "description": "RELEASE_REFUSED (FAULT/OFFLINE or unresolved job)"},
+        503: _503,
+    })
+    async def post_release(equipment_id: str) -> Any:
+        if not core.connected or core.dispatcher is None:
+            return JSONResponse(_NOT_CONNECTED, status_code=503)
+
+        def release() -> Any:
+            try:
+                core.release(equipment_id)
+            except KeyError:
+                return _refused("UNKNOWN_EQUIPMENT", f"{equipment_id} is not equipment of the fleet", 404)
+            except ReleaseRefused as e:
+                return _refused("RELEASE_REFUSED", e.reason, 409)
+            return ReleaseOut(released=equipment_id)
+
+        return guarded(release)
+
+    @app.post("/jobs/{job_id}/resolve", response_model=ResolveOut, responses={
+        404: {"model": RefusedOut, "description": "UNKNOWN_JOB (no job with an unknown outcome)"},
+        503: _503,
+    })
+    async def post_resolve(job_id: str, body: ResolveIn) -> Any:
+        if not core.connected or core.dispatcher is None:
+            return JSONResponse(_NOT_CONNECTED, status_code=503)
+
+        def resolve() -> Any:
+            try:
+                core.resolve_job(job_id, body.outcome)
+            except KeyError:
+                return _refused("UNKNOWN_JOB", f"{job_id} has no unknown outcome", 404)
+            return ResolveOut(job_id=job_id, outcome=body.outcome)
+
+        return guarded(resolve)
 
     @app.get("/health", response_model=HealthOut, response_model_exclude_none=True,
              responses={503: {"model": HealthOut}})

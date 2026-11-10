@@ -8,10 +8,11 @@ import httpx
 import pytest
 from fake_port import FakePort
 from fastapi.testclient import TestClient
+from terminal_ecs.workorders import WorkOrder
 from terminal_ecs_service import serve
 from terminal_ecs_service.app import create_app
 from terminal_ecs_service.core import EcsCore
-from terminal_model.types import Kind, Position, State
+from terminal_model.types import JobType, Kind, Position, State
 
 ROOT = Path(__file__).resolve().parents[2]
 LAYOUT = SimpleNamespace(blocks=[SimpleNamespace(block="A", bays=2, rows=2, tiers=2)])
@@ -318,3 +319,182 @@ def test_openapi_declares_workorder_errors_and_health_503():
     health = spec["paths"]["/health"]["get"]["responses"]
     assert set(health) >= {"200", "503"}
     assert "error" in spec["components"]["schemas"]["HealthOut"]["properties"]
+
+
+# -- B2d: alarms, release, resolve (spec §6) ----------------------------------------------
+
+
+async def test_alarms_endpoint_lists_sorted():
+    fake, core, client = _setup()
+    async with client:
+        assert (await client.get("/alarms")).json() == []  # before the first connection
+        await core.connect_once()
+        fake.advance(10)
+        fake.set_state("ASC-A", State.FAULT)
+        fake.set_state("AGV-01", State.FAULT)
+        fake.advance(5)
+        fake.set_state("STS-01", State.FAULT)
+        r = await client.get("/alarms")
+        assert r.status_code == 200
+        alarms = r.json()
+        assert [(a["kind"], a["equipment_id"], a["since_sim_time"]) for a in alarms] == [
+            ("NEEDS_RELEASE", "AGV-01", 10.0), ("NEEDS_RELEASE", "ASC-A", 10.0),
+            ("NEEDS_RELEASE", "STS-01", 15.0)]
+        assert set(alarms[0]) == {"kind", "equipment_id", "job_id", "since_sim_time", "detail"}
+        assert alarms[0]["job_id"] is None and isinstance(alarms[0]["detail"], str)
+        core.on_link_lost()  # LINK_LOST alarms at sim time 15 sort after the NEEDS_RELEASE at 15
+        kinds = [(a["kind"], a["since_sim_time"]) for a in (await client.get("/alarms")).json()]
+        assert kinds[2:] == [("LINK_LOST", 15.0)] * 3 + [("NEEDS_RELEASE", 15.0)]
+
+
+async def test_release_409_while_fault_then_200():
+    fake, core, client = _setup()
+    async with client:
+        await core.connect_once()
+        fake.set_state("AGV-01", State.FAULT)
+        r = await client.post("/equipment/AGV-01/release")
+        assert r.status_code == 409
+        assert r.json() == {"code": "RELEASE_REFUSED", "message": "equipment reports FAULT"}
+        assert [(a["kind"], a["equipment_id"]) for a in (await client.get("/alarms")).json()] == [
+            ("NEEDS_RELEASE", "AGV-01")]
+        fake.set_state("AGV-01", State.IDLE)
+        r = await client.post("/equipment/AGV-01/release")
+        assert r.status_code == 200 and r.json() == {"released": "AGV-01"}
+        assert (await client.get("/alarms")).json() == []
+
+
+async def test_release_404_unknown():
+    _, core, client = _setup()
+    async with client:
+        await core.connect_once()
+        r = await client.post("/equipment/AGV-99/release")
+        assert r.status_code == 404
+        body = r.json()
+        assert body["code"] == "UNKNOWN_EQUIPMENT" and "AGV-99" in body["message"]
+
+
+async def _unknown_outcome() -> tuple[EcsCore, httpx.AsyncClient, str]:
+    """A core whose AGV-01 came back IDLE without its job after a reconnect."""
+    first, second = _fake(LosingPort), _fake()
+    ports = [first, second]
+    core = EcsCore(LAYOUT, connect=lambda: ports.pop(0))
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(core, run_loop=False)),
+                               base_url="http://t")
+    await core.connect_once()
+    core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")])
+    job_id = first.calls[0][1].job_id
+    assert first.calls[0][0] == "AGV-01"
+    core.on_link_lost()
+    assert await core.connect_once() is True
+    return core, client, job_id
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed"])
+async def test_resolve_200_completed_and_failed(outcome):
+    core, client, job_id = await _unknown_outcome()
+    async with client:
+        assert any(a["kind"] == "UNKNOWN_OUTCOME" for a in (await client.get("/alarms")).json())
+        # release is refused while the outcome is open
+        r = await client.post("/equipment/AGV-01/release")
+        assert r.status_code == 409 and r.json() == {"code": "RELEASE_REFUSED",
+                                                     "message": f"resolve job {job_id} first"}
+        r = await client.post(f"/jobs/{job_id}/resolve", json={"outcome": outcome})
+        assert r.status_code == 200 and r.json() == {"job_id": job_id, "outcome": outcome}
+        assert core.status()["unknown_outcomes"] == 0
+        assert [a["kind"] for a in (await client.get("/alarms")).json()] == ["NEEDS_RELEASE"]
+        assert (await client.post("/equipment/AGV-01/release")).status_code == 200
+        if outcome == "failed":
+            assert core.status()["replans"] == 1
+
+
+async def test_resolve_404_and_422():
+    _, client, job_id = await _unknown_outcome()
+    async with client:
+        r = await client.post("/jobs/J-nope/resolve", json={"outcome": "completed"})
+        assert r.status_code == 404
+        assert r.json()["code"] == "UNKNOWN_JOB" and "J-nope" in r.json()["message"]
+        r = await client.post(f"/jobs/{job_id}/resolve", json={"outcome": "maybe"})
+        assert r.status_code == 422
+        r = await client.post(f"/jobs/{job_id}/resolve", json={})
+        assert r.status_code == 422
+        r = await client.post(f"/jobs/{job_id}/resolve", json={"outcome": "completed"})
+        assert r.status_code == 200
+        r = await client.post(f"/jobs/{job_id}/resolve", json={"outcome": "completed"})
+        assert r.status_code == 404  # no longer an unknown outcome
+
+
+async def test_endpoints_503_without_connection():
+    _, core, client = _setup(_fake(LosingPort))
+    async with client:
+        assert (await client.post("/equipment/AGV-01/release")).status_code == 503
+        assert (await client.post("/jobs/J1/resolve", json={"outcome": "failed"})).status_code == 503
+        await core.connect_once()
+        core.on_link_lost()
+        assert (await client.post("/equipment/AGV-01/release")).status_code == 503
+        assert (await client.post("/jobs/J1/resolve", json={"outcome": "failed"})).status_code == 503
+        assert (await client.get("/alarms")).status_code == 200  # last-known alarms stay readable
+
+
+async def test_release_connection_error_drops_link_and_503():
+    fake, core, client = _setup(_fake(LosingPort))
+    async with client:
+        await core.connect_once()
+        fake.lost = True  # Dispatcher.release reads the device state
+        r = await client.post("/equipment/AGV-01/release")
+        assert r.status_code == 503 and core.connected is False
+
+
+def test_ws_alarm_messages():
+    fake = _fake()
+    core = EcsCore(LAYOUT, connect=lambda: fake)
+    with TestClient(create_app(core, run_loop=False)) as client:
+        client.portal.call(core.connect_once)
+        with client.websocket_connect("/events") as ws:
+            assert ws.receive_json()["type"] == "status"
+
+            def fault():
+                fake.advance(3)
+                fake.set_state("AGV-01", State.FAULT)
+                core.step()
+
+            def next_alarm() -> dict:
+                while (msg := ws.receive_json())["type"] != "alarm":
+                    pass
+                return msg
+
+            client.portal.call(fault)
+            msg = next_alarm()
+            assert msg == {"type": "alarm", "action": "raised", "kind": "NEEDS_RELEASE",
+                           "equipment_id": "AGV-01", "job_id": None, "since_sim_time": 3.0,
+                           "detail": msg["detail"], "sim_time": 3.0}
+            fake.set_state("AGV-01", State.IDLE)
+            assert client.post("/equipment/AGV-01/release").status_code == 200
+            msg = next_alarm()
+            assert (msg["action"], msg["kind"], msg["equipment_id"]) == ("cleared", "NEEDS_RELEASE", "AGV-01")
+
+
+def test_openapi_declares_operator_endpoints():
+    _, core, _ = _setup()
+    spec = create_app(core, run_loop=False).openapi()
+    rel = spec["paths"]["/equipment/{equipment_id}/release"]["post"]["responses"]
+    refused = {"$ref": "#/components/schemas/RefusedOut"}
+    assert rel["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/ReleaseOut"}
+    assert rel["404"]["content"]["application/json"]["schema"] == refused
+    assert rel["409"]["content"]["application/json"]["schema"] == refused
+    assert "503" in rel
+    res = spec["paths"]["/jobs/{job_id}/resolve"]["post"]
+    assert set(res["responses"]) >= {"200", "404", "422", "503"}
+    assert res["responses"]["404"]["content"]["application/json"]["schema"] == refused
+    assert spec["components"]["schemas"]["ResolveIn"]["properties"]["outcome"]["enum"] == ["completed", "failed"]
+    assert "AlarmOut" in spec["components"]["schemas"]
+
+
+def test_serve_auto_release_flag(monkeypatch):
+    cores = []
+    monkeypatch.setattr(serve.uvicorn, "run", lambda app, **kw: cores.append(app.state.core))
+    monkeypatch.setattr(signal, "signal", lambda sig, h: None)
+    monkeypatch.setattr(serve, "configure_json_logging", lambda level: None)
+    base = ["--gateway", "opc.tcp://x", "--layout", str(ROOT / "terminal.yaml")]
+    assert serve.main(base) == 0
+    assert serve.main([*base, "--auto-release"]) == 0
+    assert [c.auto_release for c in cores] == [False, True]

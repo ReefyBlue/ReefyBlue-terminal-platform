@@ -1,7 +1,7 @@
 """CLI: run the ECS service against the OPC UA gateway.
 
 Usage: python -m terminal_ecs_service.serve --gateway opc.tcp://localhost:4840 --layout terminal.yaml \
-    --host 0.0.0.0 --port 8000
+    --host 0.0.0.0 --port 8000 [--auto-release]
 
 SIGTERM/SIGINT stop uvicorn; the app's lifespan then cancels ``EcsCore.run()``,
 which closes the gateway connection. uvicorn re-raises the signal afterwards: SIGTERM hits
@@ -68,11 +68,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--layout", default="terminal.yaml")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--auto-release", action="store_true",
+                    help="re-admit equipment after FAULT -> IDLE and fail unknown job outcomes at once "
+                         "(unattended runs); default: the operator releases via POST "
+                         "/equipment/{id}/release and resolves via POST /jobs/{id}/resolve")
     ap.add_argument("--log-level", default="info", choices=["critical", "error", "warning", "info", "debug"])
     args = ap.parse_args(argv)
 
     configure_json_logging(getattr(logging, args.log_level.upper()))
-    core = EcsCore(load_layout(args.layout), connect=port_factory(args.gateway))
+    core = EcsCore(load_layout(args.layout), connect=port_factory(args.gateway),
+                   auto_release=args.auto_release)
     # uvicorn restores the pre-run() handler and re-raises the captured signal into it after its
     # graceful shutdown; with the default SIGTERM handler that would exit -15, so exit 0 instead.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))

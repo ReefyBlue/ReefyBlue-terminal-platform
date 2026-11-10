@@ -47,7 +47,8 @@ def free_base_port() -> int:
 
 
 async def _gateway_ready(endpoint: str, n_equipment: int) -> bool:
-    """True once the gateway answers and mirrors ``n_equipment`` non-Fault devices."""
+    """True once the gateway answers and mirrors ``n_equipment`` devices, none FAULT or
+    OFFLINE (OFFLINE: the gateway's placeholder before its first upstream connection)."""
     client = Client(endpoint, timeout=2.0)
     try:
         await asyncio.wait_for(client.connect(), 2.0)
@@ -66,7 +67,8 @@ async def _gateway_ready(endpoint: str, n_equipment: int) -> bool:
                     states.append(await child.read_value())
                 elif name not in ("Clock",) and (await child.read_node_class()).name == "Object":
                     stack.append(child)
-        return len(states) == n_equipment and all(s != State.FAULT.value for s in states)
+        down = {State.FAULT.value, State.OFFLINE.value}
+        return len(states) == n_equipment and not any(s in down for s in states)
     except Exception:
         return False
     finally:
@@ -122,11 +124,20 @@ def sim_and_gateway(scenario: Path, *, n_sts: int, n_agv: int, log_dir: Path) ->
         gw_log.close()
 
 
+def _fleet_up(url: str) -> bool:
+    resp = httpx.get(f"{url}/equipment", timeout=2.0)
+    if resp.status_code != 200:
+        return False
+    eq = resp.json()
+    return bool(eq) and all(e["state"] not in (State.FAULT.value, State.OFFLINE.value) for e in eq)
+
+
 @contextlib.contextmanager
 def ecs_service(gateway_endpoint: str, *, log_dir: Path) -> Iterator[dict]:
     """Start ``terminal_ecs_service.serve`` on a free port; yield ``{"url", "returncode", "log"}``.
 
-    Waits for ``GET /health`` 200; on exit SIGTERM and the exit code lands in ``returncode``.
+    Waits for ``GET /health`` 200 and no device FAULT or OFFLINE in ``GET /equipment``; on
+    exit SIGTERM and the exit code lands in ``returncode``.
     """
     port = free_port()
     log = (log_dir / "ecs.log").open("w")
@@ -142,7 +153,7 @@ def ecs_service(gateway_endpoint: str, *, log_dir: Path) -> Iterator[dict]:
             if proc.poll() is not None:
                 raise RuntimeError(f"ECS service died during startup; see {log.name}")
             try:
-                if httpx.get(f"{url}/health", timeout=2.0).status_code == 200:
+                if httpx.get(f"{url}/health", timeout=2.0).status_code == 200 and _fleet_up(url):
                     break
             except httpx.HTTPError:
                 pass
