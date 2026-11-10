@@ -78,6 +78,8 @@ class EcsCore:
         self._seen_jobs: set[str] = set()
         self.known_containers: set[str] = set()  # every container accepted by submit()
         self._closing: set[asyncio.Future[None]] = set()  # off-loop closes in flight
+        self._last_now: float | None = None  # last sim time seen while connected
+        self.time_reversed = False  # sim time went backwards (sim restarted): /health 503
         self.port.subscribe(self._on_equipment_event)
 
     @property
@@ -100,6 +102,7 @@ class EcsCore:
             self._drop_link(blocking=False)
             return False
         now = self.port.now()
+        self._check_time(now)
         if self.dispatcher is None:
             self.dispatcher = Dispatcher(self.port, self.allocator)
             self.kpi = KpiCollector(self.port, self.dispatcher)
@@ -112,6 +115,16 @@ class EcsCore:
         log.info("equipment link connected at sim time %.1f", now)
         self._publish_link()
         return True
+
+    def _check_time(self, now: float) -> None:
+        """Flag (once) sim time going backwards: the sim was restarted under this ECS,
+        whose Dispatcher/KPIs still hold the old run. The loop keeps running; ``/health``
+        answers 503 ``sim_time_reversed`` until the service is restarted."""
+        last, self._last_now = self._last_now, now
+        if last is not None and now < last and not self.time_reversed:
+            log.error("sim time went backwards (%.1f -> %.1f): restart the ECS service per sim run",
+                      last, now)
+            self.time_reversed = True
 
     def on_link_lost(self) -> None:
         """Unbind at once and publish ``link``; the old connection is closed off the
@@ -153,6 +166,7 @@ class EcsCore:
         assert self.dispatcher is not None and self.kpi is not None
         try:
             self.port.drain_events()
+            self._check_time(self.port.now())
             while self.port.now() >= self.next_tick:
                 self.dispatcher.tick()
                 self.kpi.sample()

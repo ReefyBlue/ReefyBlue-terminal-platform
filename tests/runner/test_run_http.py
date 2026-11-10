@@ -31,8 +31,11 @@ class ScriptedEcs:
     """The ECS service API: ``statuses`` is a list of ``(open, sim_time)`` served in turn
     (the last one repeats)."""
 
-    def __init__(self, statuses, *, healthy=True, fleet=None, post_status=202):
+    def __init__(self, statuses, *, healthy=True, fleet=None, post_status=202, fresh=None):
         self.statuses = list(statuses)
+        # served by the first GET /status (the freshness check), not taken from ``statuses``
+        self.fresh = fresh if fresh is not None else {"pending": 0, "open": 0, "done": 0, "failed": 0}
+        self.fresh_served = False
         self.healthy = healthy
         self.fleet = fleet if fleet is not None else _fleet()
         self.post_status = post_status
@@ -53,6 +56,9 @@ class ScriptedEcs:
             if self.post_status == 422:
                 return httpx.Response(422, json={"errors": [{"container_id": None, "code": "X", "message": "x"}]})
             return httpx.Response(202, json={"accepted": len(self.posted)})
+        if path == "/status" and not self.fresh_served:
+            self.fresh_served = True
+            return httpx.Response(200, json={**self.fresh, "sim_time": self.statuses[0][1]})
         if path == "/status":
             open_, sim_time = self.statuses[0] if len(self.statuses) == 1 else self.statuses.pop(0)
             return httpx.Response(200, json={"open": open_, "sim_time": sim_time})
@@ -65,6 +71,7 @@ class FakeGatewayPort:
     def __init__(self, calls: list[str]):
         self.calls = calls
         self.prefill_ok = True
+        self.drain_error = False
 
     def prefill_yard(self, slots):
         self.calls.append("prefill")
@@ -79,6 +86,9 @@ class FakeGatewayPort:
         return True
 
     def drain_events(self):
+        self.calls.append("drain")
+        if self.drain_error:
+            raise ConnectionError("runner link lost")
         return 0
 
     def close(self):
@@ -118,14 +128,16 @@ def test_run_once_http_happy_path(setup):
     _, log, sleeps, gateways, make = setup
     ecs = ScriptedEcs([(200, 0.0), (3, 60.0), (3, 120.0), (0, 180.0)])
     k = _run(make(ecs))
-    assert k == {**KPIS, "sim_elapsed_s": 180.0, "timed_out": 0.0}
-    assert list(k)[-2:] == ["sim_elapsed_s", "timed_out"]
+    assert k == {**KPIS, "timed_out": 0.0}  # sim_elapsed_s as the service reports it
+    assert list(k) == [*KPIS, "timed_out"]
     assert gateways == ["opc.tcp://gw"]
     assert len(ecs.posted) == SCENARIO.n_containers
     assert ecs.posted[0].keys() == {"container_id", "type", "sts_id", "yard_slot"}
-    # health -> fleet -> connect -> (no LOAD: no prefill) -> t0 -> POST -> Start -> poll -> kpis -> Stop
-    assert log == ["GET /health", "GET /equipment", "connect", "GET /status", "POST /workorders",
-                   "start", "GET /status", "GET /status", "GET /status", "GET /kpis", "stop", "close"]
+    # health -> fresh? -> fleet -> connect -> (no LOAD: no prefill) -> t0 -> POST -> Start -> poll
+    # -> kpis -> Stop
+    assert log == ["GET /health", "GET /status", "GET /equipment", "connect", "GET /status",
+                   "POST /workorders", "start", "GET /status", "drain", "GET /status", "drain",
+                   "GET /status", "GET /kpis", "stop", "close"]
     assert sleeps == [run.STATUS_POLL_S] * 2
     assert (run.STATUS_POLL_S, run.HEALTH_TIMEOUT_S, run.STALL_TIMEOUT_S) == (0.5, 30.0, 120.0)
 
@@ -155,7 +167,7 @@ def test_timed_out_at_duration_cap(setup):
     _, log, _, _, make = setup
     scenario = replace(SCENARIO, duration_s=120.0)
     k = _run(make(ScriptedEcs([(200, 10.0), (5, 70.0), (5, 130.0)])), scenario=scenario)
-    assert k["timed_out"] == 1.0 and k["sim_elapsed_s"] == 120.0  # from t0 = 10
+    assert k["timed_out"] == 1.0 and k["sim_elapsed_s"] == KPIS["sim_elapsed_s"]  # the service's
     assert log[-2:] == ["stop", "close"]
 
 
@@ -199,7 +211,32 @@ def test_fleet_mismatch_exits_1(setup, capsys):
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "--n-sts 2 --n-agv 6" in err and "AGV 3" in err
-    assert gateways == [] and log == ["GET /health", "GET /equipment"]
+    assert gateways == [] and log == ["GET /health", "GET /status", "GET /equipment"]
+
+
+@pytest.mark.parametrize("key", ["done", "open", "failed"])
+def test_not_fresh_ecs_exits_1(setup, capsys, key):
+    _, log, _, gateways, make = setup
+    with pytest.raises(SystemExit) as exc:
+        _run(make(ScriptedEcs([(0, 0.0)], fresh={"done": 0, "open": 0, "failed": 0, key: 3})))
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "http://ecs" in err and "not fresh" in err and "restart it per run" in err
+    assert f"{key} 3" in err
+    assert gateways == [] and log == ["GET /health", "GET /status"]  # nothing sent to the sim
+
+
+def test_runner_link_loss_while_polling_does_not_fail_the_run(setup, caplog):
+    import logging
+
+    port, log, _, _, make = setup
+    port.drain_error = True
+    with caplog.at_level(logging.WARNING, logger="terminal_runner.run"):
+        k = _run(make(ScriptedEcs([(200, 0.0), (3, 60.0), (3, 120.0), (3, 180.0), (0, 240.0)])))
+    assert k["timed_out"] == 0.0
+    assert log.count("drain") == 1  # stops draining after the first failure
+    assert sum("runner's gateway link failed" in r.message for r in caplog.records) == 1
+    assert log[-3:] == ["GET /kpis", "stop", "close"]
 
 
 def test_fleet_mismatch_message_shared_with_opcua():

@@ -295,3 +295,16 @@ async def test_workorders_202_when_link_drops_after_take():
         assert (await client.get("/health")).status_code == 503
         r = await client.post("/workorders", json=[_order("C1")])
         assert r.status_code == 503  # not connected; after reconnect it would be a duplicate
+
+
+def test_openapi_declares_workorder_errors_and_health_503():
+    _, core, _ = _setup()
+    spec = create_app(core, run_loop=False).openapi()
+    wo = spec["paths"]["/workorders"]["post"]["responses"]
+    ref = "#/components/schemas/WorkOrderErrorsOut"
+    assert wo["422"]["content"]["application/json"]["schema"] == {"$ref": ref}
+    assert wo["500"]["content"]["application/json"]["schema"] == {"$ref": ref}
+    assert "503" in wo and "202" in wo
+    health = spec["paths"]["/health"]["get"]["responses"]
+    assert set(health) >= {"200", "503"}
+    assert "error" in spec["components"]["schemas"]["HealthOut"]["properties"]

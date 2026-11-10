@@ -28,6 +28,7 @@ from terminal_ecs_service.schemas import (
     AcceptedOut,
     HealthOut,
     WorkOrderErrorOut,
+    WorkOrderErrorsOut,
     WorkOrderIn,
 )
 
@@ -121,7 +122,11 @@ def create_app(core: EcsCore, *, run_loop: bool = True) -> FastAPI:
                                  f"{field}: {err.get('msg', 'invalid')}"))
         return JSONResponse({"errors": errors}, status_code=422)
 
-    @app.post("/workorders", status_code=202, response_model=AcceptedOut)
+    @app.post("/workorders", status_code=202, response_model=AcceptedOut, responses={
+        422: {"model": WorkOrderErrorsOut, "description": "Batch rejected (nothing accepted)"},
+        500: {"model": WorkOrderErrorsOut, "description": "Dispatcher rejected a validated batch"},
+        503: {"description": "Not connected to the equipment"},
+    })
     async def post_workorders(orders: list[WorkOrderIn]) -> Any:
         if not core.connected:
             return JSONResponse(_NOT_CONNECTED, status_code=503)
@@ -153,10 +158,14 @@ def create_app(core: EcsCore, *, run_loop: bool = True) -> FastAPI:
     async def get_equipment() -> Any:
         return guarded(core.equipment)
 
-    @app.get("/health", response_model=HealthOut)
+    @app.get("/health", response_model=HealthOut, response_model_exclude_none=True,
+             responses={503: {"model": HealthOut}})
     async def get_health() -> Any:
         if not core.connected:
-            return JSONResponse(HealthOut(connected=False, sim_time=None).model_dump(), status_code=503)
+            return JSONResponse({"connected": False, "sim_time": None}, status_code=503)
+        if core.time_reversed:  # sim restarted under this ECS: unusable until restarted
+            return JSONResponse({"connected": True, "sim_time": core.port.now(), "error": "sim_time_reversed"},
+                                status_code=503)
         return HealthOut(connected=True, sim_time=core.port.now())
 
     @app.websocket("/events")

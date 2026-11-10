@@ -182,10 +182,10 @@ def _advance(port: OpcUaEquipmentPort, t: float, timeout_s: float) -> None:
                 log.error("sim time stalled at %.1f s, waiting for %.1f s (%.0f s wall)",
                           port.now(), t, timeout_s)
                 raise RuntimeError("sim time stalled")
+        port.drain_events()
     except ConnectionError as e:
         log.error("sim time stalled at %.1f s: %s", port.now(), e)
         raise RuntimeError(f"sim time stalled: {e}") from e
-    port.drain_events()
 
 
 def run_once_opcua(scenario: Scenario, layout: Layout, seed: int, *, gateway: str) -> dict[str, float]:
@@ -278,13 +278,14 @@ def run_once_http(
     ``gateway``; the runner's own OPC UA connection to the gateway is used only for
     ``PrefillYard``, ``Start`` and ``Stop``.
 
-    Waits up to ``HEALTH_TIMEOUT_S`` for ``GET /health`` 200 and checks the fleet of
-    ``GET /equipment`` (exit 1 otherwise), prefills the LOAD containers, POSTs the
+    Waits up to ``HEALTH_TIMEOUT_S`` for ``GET /health`` 200, refuses an ECS that already
+    holds orders (one ECS process per sim run) and checks the fleet of ``GET /equipment``
+    (exit 1 otherwise), prefills the LOAD containers, POSTs the
     orders, calls ``Start`` and polls ``GET /status`` every ``STATUS_POLL_S`` wall
     seconds until no order is open or ``duration_s`` of sim time from ``t0`` (the sim
     time before the POST) has passed. ``sim_time`` standing still for
     ``STALL_TIMEOUT_S`` wall seconds raises ``RuntimeError``. The KPIs are ``GET
-    /kpis`` plus ``sim_elapsed_s`` (from ``t0``) and ``timed_out``; ``Stop`` follows,
+    /kpis`` (its ``sim_elapsed_s`` included) plus ``timed_out``; ``Stop`` follows,
     and a run that fails after connecting to the gateway sends a best-effort ``Stop``."""
     scenario = replace(scenario, seed=seed)
     orders = make_workorders(scenario, layout, make_allocator(layout), random.Random(seed))
@@ -294,6 +295,11 @@ def run_once_http(
         if not ecs_client.wait_healthy(HEALTH_TIMEOUT_S):
             _fail(f"ECS service {ecs} not healthy after {HEALTH_TIMEOUT_S:.0f} s "
                   "(is it running and connected to the gateway?)")
+        fresh = ecs_client.status()
+        if (n := sum(int(fresh.get(k, 0)) for k in ("done", "open", "failed"))) > 0:
+            _fail(f"ECS service {ecs} is not fresh ({n} orders from an earlier run: done "
+                  f"{fresh.get('done', 0)}, open {fresh.get('open', 0)}, failed {fresh.get('failed', 0)}): "
+                  "restart it per run")
         got = {kind: 0 for kind in Kind}
         for e in ecs_client.equipment():
             got[Kind(e["kind"])] += 1
@@ -311,9 +317,10 @@ def run_once_http(
                 raise RuntimeError(f"Start rejected by the sim behind {gateway}")
             log.info("run started at sim time %.1f s", t0,
                      extra={"gateway": gateway, "ecs": ecs, "seed": seed})
-            sim_time, timed_out = _poll_until_done(ecs_client, port, t0, scenario.duration_s)
-            kpis = ecs_client.kpis()  # before Stop: the gateway marks stopped servers Fault
-            kpis["sim_elapsed_s"] = sim_time - t0
+            timed_out = _poll_until_done(ecs_client, port, t0, scenario.duration_s)
+            # Before Stop (the gateway marks stopped servers Fault). ``sim_elapsed_s`` is
+            # the service's own (from its t0), the denominator of its rates.
+            kpis = ecs_client.kpis()
             kpis["timed_out"] = 1.0 if timed_out else 0.0
             stopped = True
             if not port.stop_sim():
@@ -329,24 +336,35 @@ def run_once_http(
 
 
 def _poll_until_done(client: EcsClient, port: OpcUaEquipmentPort, t0: float,
-                     duration_s: float) -> tuple[float, bool]:
-    """Poll ``GET /status`` until ``open == 0`` (``timed_out`` False) or ``duration_s`` of
-    sim time from ``t0`` (True); returns the last ``sim_time`` and ``timed_out``."""
+                     duration_s: float) -> bool:
+    """Poll ``GET /status`` until ``open == 0`` (returns ``timed_out`` False) or
+    ``duration_s`` of sim time from ``t0`` (True).
+
+    The runner's port has no subscribers; its queue is drained to keep it empty. If
+    only that link fails (the ECS has its own), a warning is logged and draining stops:
+    the port is needed again only for ``Stop``, which tolerates a dead link."""
     last_sim = t0
     last_change = _clock()
+    draining = True
     while True:
         status = client.status()
         sim_time = float(status["sim_time"])
         if status["open"] == 0:
-            return sim_time, False
+            return False
         if sim_time - t0 >= duration_s:
-            return sim_time, True
+            return True
         if sim_time != last_sim:
             last_sim, last_change = sim_time, _clock()
         elif _clock() - last_change >= STALL_TIMEOUT_S:
             log.error("sim time stalled at %.1f s (%.0f s wall)", sim_time, STALL_TIMEOUT_S)
             raise RuntimeError("sim time stalled")
-        port.drain_events()  # no subscribers on the runner's port: keep its queue empty
+        if draining:
+            try:
+                port.drain_events()
+            except ConnectionError as e:
+                log.warning("runner's gateway link failed (%s); the run continues through the "
+                            "ECS service, Stop at the end may fail", e)
+                draining = False
         _sleep(STATUS_POLL_S)
 
 

@@ -43,9 +43,10 @@ def test_reconnecting_port_swaps_and_redelivers(caplog):
     assert len(seen) == 1
 
     p2 = _fake()
-    rp.bind(p2)
+    rp.bind(p2)  # AGV-01 BUSY -> IDLE during the outage: reconciled on bind
+    assert len(seen) == 2 and seen[1].reason == "LINK_RESTORED"
     p2.set_state("AGV-01", State.IDLE)
-    assert len(seen) == 2
+    assert len(seen) == 3 and seen[2].reason is None
     assert rp.assign_job("AGV-01", JOB) is True and p2.calls == [("AGV-01", JOB)]
 
 
@@ -90,3 +91,50 @@ def test_unbound_before_any_bind():
 
 def test_reconnecting_port_satisfies_protocol():
     assert isinstance(ReconnectingPort(), EquipmentPort)
+
+
+def test_rebind_synthesises_missed_state_changes():
+    rp = ReconnectingPort()
+    p1 = _fake()
+    rp.bind(p1)
+    p1.set_state("AGV-01", State.FAULT)
+    rp.unbind()
+    p2 = _fake()  # AGV-01 back to IDLE while unbound
+    p2.advance(300.0)
+    seen = []
+    snaps_seen = []
+    # a callback reading the snapshot (as the Dispatcher does) sees the fresh state
+    rp.subscribe(lambda ev: (seen.append(ev), snaps_seen.append(rp.snapshot(ev.equipment_id).state)))
+    rp.bind(p2)
+    assert len(seen) == 1
+    ev = seen[0]
+    assert (ev.kind, ev.equipment_id, ev.sim_time, ev.reason, ev.new_state) == (
+        EventKind.STATE_CHANGED, "AGV-01", 300.0, "LINK_RESTORED", State.IDLE)
+    assert snaps_seen == [State.IDLE]
+
+
+def test_rebind_with_unchanged_state_delivers_nothing():
+    rp = ReconnectingPort()
+    rp.bind(_fake())
+    rp.unbind()
+    seen = []
+    rp.subscribe(seen.append)
+    rp.bind(_fake())
+    assert seen == []
+
+
+def test_rebind_logs_current_job_changes(caplog):
+    rp = ReconnectingPort()
+    p1 = _fake()
+    rp.bind(p1)
+    assert rp.assign_job("AGV-01", JOB) is True  # cache tracks J-1 (FakePort: BUSY, no event)
+    p1.set_state("AGV-01", State.BUSY)
+    rp.unbind()
+    seen = []
+    rp.subscribe(seen.append)
+    with caplog.at_level(logging.WARNING):
+        rp.bind(_fake())  # J-1 completed during the outage: JOB_COMPLETED lost
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "AGV-01 (J-1 -> None)" in warnings[0].getMessage()
+    assert "not reconciled" in warnings[0].getMessage()
+    assert [(e.equipment_id, e.new_state) for e in seen] == [("AGV-01", State.IDLE)]  # BUSY -> IDLE

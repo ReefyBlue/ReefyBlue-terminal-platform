@@ -31,3 +31,4 @@ class AcceptedOut(BaseModel):
 class HealthOut(BaseModel):
     connected: bool
     sim_time: float | None
+    error: str | None = None  # "sim_time_reversed": the sim restarted under this ECS

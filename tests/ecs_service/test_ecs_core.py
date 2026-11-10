@@ -388,3 +388,72 @@ async def test_connect_once_bind_failure_closes_off_loop():
             break
         await asyncio.sleep(0.01)
     assert fake.closed is True and core.connected is False
+
+
+async def test_reconnect_readmits_device_that_recovered_during_the_outage():
+    first = _fake(LosingPort)
+    second = _fake()  # AGV-01 IDLE again on the new link
+    ports = [first, second]
+    b = Broadcaster()
+    q = b.register()
+    core = EcsCore(LAYOUT, connect=lambda: ports.pop(0), broadcaster=b)
+    await core.connect_once()
+    first.set_state("AGV-01", State.FAULT)  # the Dispatcher excludes AGV-01
+    first.lost = True
+    core.step()
+    assert core.connected is False
+    # FAULT -> IDLE happened while unbound: that STATE_CHANGED never arrives
+    second.advance(90.0)
+    _drain(q)
+    assert await core.connect_once() is True
+    msgs = _drain(q)
+    restored = [m for m in msgs if m["type"] == "equipment"]
+    assert restored == [{"type": "equipment", "kind": "STATE_CHANGED", "equipment_id": "AGV-01",
+                         "sim_time": 90.0, "job_id": None, "reason": "LINK_RESTORED",
+                         "new_state": "IDLE"}]
+    core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")])
+    assert "AGV-01" in [eid for eid, _ in second.calls]  # dispatched again: no longer excluded
+
+
+async def test_sim_time_going_backwards_flags_and_health_503(caplog):
+    import httpx
+    from terminal_ecs_service.app import create_app
+
+    first = _fake(LosingPort)
+    second = _fake()  # restarted sim: time back at 0
+    ports = [first, second]
+    core = EcsCore(LAYOUT, connect=lambda: ports.pop(0))
+    app = create_app(core, run_loop=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        await core.connect_once()
+        first.advance(300.0)
+        core.step()
+        assert core.time_reversed is False
+        assert (await client.get("/health")).status_code == 200
+        first.lost = True
+        core.step()
+        with caplog.at_level(logging.ERROR):
+            assert await core.connect_once() is True
+        assert core.time_reversed is True
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert errors == ["sim time went backwards (300.0 -> 0.0): restart the ECS service per sim run"]
+        r = await client.get("/health")
+        assert r.status_code == 503
+        assert r.json() == {"connected": True, "sim_time": 0.0, "error": "sim_time_reversed"}
+        second.advance(60.0)
+        core.step()  # the loop keeps running
+        assert core.connected is True and core.time_reversed is True
+
+
+async def test_sim_time_going_backwards_detected_in_step(caplog):
+    fake = _fake()
+    core, _ = _core(fake)
+    await core.connect_once()
+    fake.advance(120.0)
+    core.step()
+    fake._now = 10.0  # same link, sim restarted behind it
+    with caplog.at_level(logging.ERROR):
+        core.step()
+        core.step()
+    assert core.time_reversed is True and core.connected is True
+    assert sum("sim time went backwards" in r.getMessage() for r in caplog.records) == 1
