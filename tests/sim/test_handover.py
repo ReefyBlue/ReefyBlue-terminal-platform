@@ -63,12 +63,12 @@ def test_agv_unloads_at_tp_and_asc_flag_set(world):
     assert world.port.assign_job("AGV-01", _transport("AGV-01", "C1", "TP/A/WS"))
     world.run(200)
     assert agv.loaded_container_id is None
-    assert world.handover.tp_box["A"] == ["C1"]
+    assert world.handover.boxes("A") == ["C1"]
     assert _ws_occupied(world) is True
     assert world.port.assign_job("ASC-A", Job("S1", JobType.STACK_IN, "C1", "TP/A/WS", "A/1/1/1"))
     world.run(600)
     assert world.yard.locate("C1") == parse_location("A/1/1/1")
-    assert world.handover.tp_box["A"] == []
+    assert world.handover.boxes("A") == []
     assert _ws_occupied(world) is False
 
 
@@ -76,13 +76,13 @@ def test_stack_out_then_agv_loads_at_tp(world):
     world.yard.occupy(parse_location("A/1/1/1"), "C9")
     assert world.port.assign_job("ASC-A", Job("S1", JobType.STACK_OUT, "C9", "A/1/1/1", "TP/A/WS"))
     world.run(200)
-    assert world.handover.tp_box["A"] == ["C9"]
+    assert world.handover.boxes("A") == ["C9"]
     assert _ws_occupied(world) is True
     agv = world.equipment["AGV-01"]
     assert world.port.assign_job("AGV-01", _transport("AGV-01", "C9", "TP/A/WS"))
     world.run(600)
     assert agv.loaded_container_id == "C9"
-    assert world.handover.tp_box["A"] == []
+    assert world.handover.boxes("A") == []
     assert _ws_occupied(world) is False
 
 
@@ -92,7 +92,7 @@ def test_agv_sent_for_another_box_does_not_take_it(world):
     assert world.port.assign_job("AGV-01", _transport("AGV-01", "C8", "TP/A/WS"))
     world.run(600)
     assert world.equipment["AGV-01"].loaded_container_id is None
-    assert world.handover.tp_box["A"] == ["C9"]
+    assert world.handover.boxes("A") == ["C9"]
     assert _ws_occupied(world) is True
 
 
@@ -106,15 +106,15 @@ def test_second_box_on_tp_is_recorded_and_flag_stays_set(world):
     agv1.load("D1")
     assert world.port.assign_job("AGV-01", _transport("AGV-01", "D1", "TP/A/WS"))
     world.run(400)
-    assert world.handover.tp_box["A"] == ["L1", "D1"]
+    assert world.handover.boxes("A") == ["L1", "D1"]
     assert world.port.assign_job("ASC-A", Job("S2", JobType.STACK_IN, "D1", "TP/A/WS", "A/2/1/1"))
     world.run(800)
-    assert world.handover.tp_box["A"] == ["L1"]
+    assert world.handover.boxes("A") == ["L1"]
     assert _ws_occupied(world) is True
     assert world.port.assign_job("AGV-02", _transport("AGV-02", "L1", "TP/A/WS", job_id="T2"))
     world.run(1400)
     assert world.equipment["AGV-02"].loaded_container_id == "L1"
-    assert world.handover.tp_box["A"] == []
+    assert world.handover.boxes("A") == []
     assert _ws_occupied(world) is False
 
 
@@ -126,3 +126,47 @@ def test_load_empties_agv(world, events):
     world.run(600)
     assert any(e.kind is EventKind.JOB_COMPLETED and e.job_id == "LD1" for e in events)
     assert agv.loaded_container_id is None
+
+
+def test_second_discharge_box_waits_on_its_agv_until_stack_in_completes(world, events):
+    # The TP takes one discharge box: a second loaded AGV keeps its box on board and
+    # stays on the TP cell; when the first box's STACK_IN completes, the waiting AGV
+    # puts its box down (before the ECS sees that JOB_COMPLETED).
+    agv1, agv2 = world.equipment["AGV-01"], world.equipment["AGV-02"]
+    agv1.load("D1")
+    assert world.port.assign_job("AGV-01", _transport("AGV-01", "D1", "TP/A/WS"))
+    world.run(200)
+    assert world.handover.boxes("A") == ["D1"]
+    world.run(400)  # AGV-01 has cleared the TP cell
+    agv2.load("D2")
+    assert world.port.assign_job("AGV-02", _transport("AGV-02", "D2", "TP/A/WS", job_id="T2"))
+    world.run(1000)
+    tp_cell = world.equipment["ASC-A"].block.tp_ws_cell
+    assert agv2.cell == tp_cell and agv2.state is State.IDLE
+    assert agv2.loaded_container_id == "D2"  # kept on board, not auto-cleared
+    assert world.handover.boxes("A") == ["D1"]
+
+    seen = []
+    world.port.subscribe(
+        lambda e: seen.append((world.handover.boxes("A"), agv2.loaded_container_id))
+        if e.kind is EventKind.JOB_COMPLETED and e.job_id == "S1"
+        else None
+    )
+    assert world.port.assign_job("ASC-A", Job("S1", JobType.STACK_IN, "D1", "TP/A/WS", "A/1/1/1"))
+    world.run(1600)
+    assert seen == [(["D2"], None)]  # already moved when later subscribers see the event
+    assert world.handover.boxes("A") == ["D2"]
+    assert _ws_occupied(world) is True
+    assert agv2.loaded_container_id is None
+
+
+def test_load_box_on_tp_does_not_block_a_discharge_box(world):
+    world.yard.occupy(parse_location("A/1/1/1"), "L1")
+    assert world.port.assign_job("ASC-A", Job("S1", JobType.STACK_OUT, "L1", "A/1/1/1", "TP/A/WS"))
+    world.run(200)
+    agv = world.equipment["AGV-01"]
+    agv.load("D1")
+    assert world.port.assign_job("AGV-01", _transport("AGV-01", "D1", "TP/A/WS"))
+    world.run(400)
+    assert agv.loaded_container_id is None
+    assert [(b.cid, b.origin) for b in world.handover.tp_box["A"]] == [("L1", "stack_out"), ("D1", "discharge")]

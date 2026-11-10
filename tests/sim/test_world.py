@@ -102,7 +102,7 @@ def test_idle_agv_parks_off_the_tp(world):
     assert world.port.assign_job("AGV-02", Job("J2", JobType.TRANSPORT, "C2", "STS-02", "TP/A/WS"))
     world.equipment["AGV-02"].load("C2")
     world.run(500)
-    assert world.handover.tp_box["A"] == ["C2"]
+    assert world.handover.boxes("A") == ["C2"]
     assert world.equipment["AGV-02"].cell in world.staging_cells
     assert world.grid.owner_of((2, 5)) is None
 
