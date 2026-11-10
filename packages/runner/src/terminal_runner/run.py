@@ -163,11 +163,13 @@ def run_once_opcua(scenario: Scenario, layout: Layout, seed: int, *, gateway: st
     rates are relative to the sim time ``t0`` at ``Start`` (0, unless the sim was
     started with ``--autostart``). The sim must serve the same scenario file (the sim
     uses its seed for equipment timings, the runner for the work orders). At the end
-    the sim is told to ``Stop``."""
+    the sim is told to ``Stop``; a run that fails after connecting sends a best-effort
+    ``Stop`` too, so a paused or running sim does not linger."""
     scenario = replace(scenario, seed=seed)
     allocator = make_allocator(layout)
     orders = make_workorders(scenario, layout, allocator, random.Random(seed))
     port = _connect(gateway)
+    stopped = False
     try:
         _wait_ready(port)
         slots = [(o.yard_slot, o.container_id) for o in orders if o.type is JobType.LOAD]
@@ -200,11 +202,24 @@ def run_once_opcua(scenario: Scenario, layout: Layout, seed: int, *, gateway: st
         kpis = kpi.finish(elapsed)  # before Stop: the gateway marks stopped servers Fault
         kpis["sim_elapsed_s"] = elapsed
         kpis["timed_out"] = 1.0 if timed_out else 0.0
+        stopped = True
         if not port.stop_sim():
             log.warning("Stop on %s failed; the sim process keeps running", gateway)
         return kpis
     finally:
+        if not stopped:  # failed run: do not leave the sim running (or paused) behind
+            _stop_quietly(port, gateway)
         port.close()
+
+
+def _stop_quietly(port: OpcUaEquipmentPort, gateway: str) -> None:
+    """Best-effort ``Stop`` on a failed run; errors are logged, never raised."""
+    try:
+        if not port.stop_sim():
+            log.warning("Stop on %s failed after a failed run; the sim process keeps running",
+                        gateway)
+    except Exception:
+        log.warning("Stop on %s failed after a failed run", gateway, exc_info=True)
 
 
 def _percentile(values: list[float], pct: float) -> float:

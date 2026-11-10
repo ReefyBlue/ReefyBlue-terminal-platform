@@ -44,3 +44,111 @@ def test_cli_port_choices(capsys):
     with pytest.raises(SystemExit):
         run.main([str(ROOT / "scenarios/baseline.yaml"), "--port", "tcp"])
     assert "invalid choice" in capsys.readouterr().err
+
+
+class FakeOpcPort:
+    """The OPC UA port surface the runner uses, backed by an in-process World."""
+
+    def __init__(self, world):
+        self.world = world
+        self.calls: list[str] = []
+        self.started = False
+
+    def equipment_ids(self):
+        return self.world.port.equipment_ids()
+
+    def snapshot(self, eid):
+        return self.world.port.snapshot(eid)
+
+    def assign_job(self, eid, job):
+        return self.world.port.assign_job(eid, job)
+
+    def cancel_job(self, eid):
+        return self.world.port.cancel_job(eid)
+
+    def reset(self, eid):
+        return self.world.port.reset(eid)
+
+    def subscribe(self, cb):
+        self.world.port.subscribe(cb)
+
+    def now(self):
+        return self.world.now()
+
+    def drain_events(self):
+        return 0
+
+    def prefill_yard(self, slots):
+        self.calls.append("prefill")
+        return True
+
+    def start_sim(self):
+        self.calls.append("start")
+        self.started = True
+        return True
+
+    def stop_sim(self):
+        self.calls.append("stop")
+        return True
+
+    def wait_for_sim_time(self, t, timeout_s):
+        self.world.run(until=t)
+        return True
+
+    def close(self):
+        self.calls.append("close")
+
+
+def _fake(monkeypatch, scenario, **world_overrides):
+    from dataclasses import replace
+
+    from terminal_sim.world import World
+
+    layout = load_layout(ROOT / "terminal.yaml")
+    fake = FakeOpcPort(World(layout, replace(scenario, **world_overrides)))
+    monkeypatch.setattr(run, "_connect", lambda gateway: fake)
+    return fake, layout
+
+
+def test_failure_after_start_stops_sim(monkeypatch):
+    scenario = load_scenario(ROOT / "scenarios/baseline.yaml")
+    fake, layout = _fake(monkeypatch, scenario)
+
+    class Boom(run.Dispatcher):
+        def tick(self):
+            if fake.started:
+                raise RuntimeError("boom")
+            super().tick()
+
+    monkeypatch.setattr(run, "Dispatcher", Boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        run.run_once_opcua(scenario, layout, 1, gateway="opc.tcp://fake")
+    assert fake.calls[-3:] == ["start", "stop", "close"]
+
+
+def test_failure_before_start_stops_paused_sim(monkeypatch):
+    from dataclasses import replace
+
+    scenario = replace(load_scenario(ROOT / "scenarios/baseline.yaml"), discharge_share=0.5)
+    fake, layout = _fake(monkeypatch, scenario)
+    monkeypatch.setattr(fake, "prefill_yard", lambda slots: False)
+    with pytest.raises(RuntimeError, match="PrefillYard rejected"):
+        run.run_once_opcua(scenario, layout, 1, gateway="opc.tcp://fake")
+    assert fake.calls == ["stop", "close"]
+
+
+def test_stop_errors_on_failed_run_are_swallowed(monkeypatch, caplog):
+    from dataclasses import replace
+
+    scenario = replace(load_scenario(ROOT / "scenarios/baseline.yaml"), discharge_share=0.5)
+    fake, layout = _fake(monkeypatch, scenario)
+    monkeypatch.setattr(fake, "prefill_yard", lambda slots: False)
+
+    def stop_raises():
+        raise ConnectionError("gone")
+
+    monkeypatch.setattr(fake, "stop_sim", stop_raises)
+    with pytest.raises(RuntimeError, match="PrefillYard rejected"):  # the original error
+        run.run_once_opcua(scenario, layout, 1, gateway="opc.tcp://fake")
+    assert fake.calls == ["close"]
+    assert any("Stop on opc.tcp://fake failed" in r.getMessage() for r in caplog.records)
