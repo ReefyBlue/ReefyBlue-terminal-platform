@@ -4,9 +4,9 @@ import random
 from collections.abc import Callable
 
 import salabim
-
 from terminal_model.port import EquipmentEvent
 from terminal_model.types import Job, JobType, Kind, Position
+
 from terminal_sim.equipment.base import Equipment
 from terminal_sim.grid import Cell, Grid
 

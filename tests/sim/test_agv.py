@@ -2,9 +2,8 @@ import random
 
 import pytest
 import salabim
-
 from terminal_model.port import EventKind
-from terminal_model.types import Job, JobType, Kind, Position, State
+from terminal_model.types import Job, JobType, Position, State
 from terminal_sim.equipment.agv import AGV
 from terminal_sim.grid import Grid
 
