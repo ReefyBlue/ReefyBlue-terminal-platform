@@ -1,4 +1,8 @@
-"""Run the Salabim world paced to wall-clock while serving OPC UA."""
+"""Run the Salabim world paced to wall-clock while serving OPC UA.
+
+The clock starts paused at sim time 0 (so ``PrefillYard`` can still be called) and
+runs once ``Terminal/Clock.Start`` is called, or immediately with ``--autostart``.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +31,8 @@ log = logging.getLogger("terminal_sim.serve")
 
 class SimService:
     def __init__(
-        self, scenario: Scenario, layout: Layout, *, base_port: int = 48400, host: str = "0.0.0.0"
+        self, scenario: Scenario, layout: Layout, *, base_port: int = 48400, host: str = "0.0.0.0",
+        autostart: bool = False,
     ) -> None:
         self.scenario = scenario
         self.world = World(layout, scenario)
@@ -40,16 +45,28 @@ class SimService:
             for i, (eid, eq) in enumerate(self.world.equipment.items())
         }
         self.control = ControlServer(
-            self.world, port=base_port + CONTROL_PORT_OFFSET, on_stop=self.stop, host=host
+            self.world, port=base_port + CONTROL_PORT_OFFSET, on_stop=self.stop, host=host,
+            on_start=self.start,
         )
         self.world.port.subscribe(self._route)
         self._stop_event: asyncio.Event | None = None
         self._stop_requested = False
+        self._start_event: asyncio.Event | None = None
+        self._start_requested = autostart
 
     def _route(self, ev: EquipmentEvent) -> None:
         server = self.servers.get(ev.equipment_id)
         if server is not None:
             server.on_emit(ev)
+
+    def start(self) -> bool:
+        """Let the clock run (idempotent); True."""
+        if not self._start_requested:
+            log.info("Start received at sim time %.1f", self.world.now())
+        self._start_requested = True
+        if self._start_event is not None:
+            self._start_event.set()
+        return True
 
     def stop(self) -> None:
         self._stop_requested = True
@@ -61,13 +78,23 @@ class SimService:
 
     async def run(self) -> None:
         self._stop_event = asyncio.Event()
+        self._start_event = asyncio.Event()
         if self._stop_requested:
             self._stop_event.set()
+        if self._start_requested:
+            self._start_event.set()
         started: list = []
         try:
             started = [*self.servers.values(), self.control]
             await asyncio.gather(*[s.start() for s in started])
             await self._sync()
+            if not self._start_event.is_set() and not self._stop_event.is_set():
+                log.info("waiting for Start (sim time %.1f)", self.world.now())
+                waits = [asyncio.create_task(self._start_event.wait()),
+                         asyncio.create_task(self._stop_event.wait())]
+                _, pending = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
             period = SIM_TICK_S / self.scenario.speed_factor
             deadline = time.monotonic()
             last_warn = -LAG_WARN_S
@@ -100,11 +127,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--layout", type=Path, default=Path("terminal.yaml"))
     ap.add_argument("--base-port", type=int, default=48400)
     ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--autostart", action="store_true",
+                    help="run the clock at once instead of waiting for Terminal/Clock.Start")
     args = ap.parse_args(argv)
     configure_json_logging()
     service = SimService(
         load_scenario(args.scenario), load_layout(args.layout),
-        base_port=args.base_port, host=args.host,
+        base_port=args.base_port, host=args.host, autostart=args.autostart,
     )
     asyncio.run(_amain(service))
     return 0

@@ -157,12 +157,13 @@ def _advance(port: OpcUaEquipmentPort, t: float, timeout_s: float) -> None:
 def run_once_opcua(scenario: Scenario, layout: Layout, seed: int, *, gateway: str) -> dict[str, float]:
     """One run against a live sim process behind the gateway at ``gateway``.
 
-    The sim paces itself (``speed_factor``) and is already running when the runner
-    connects; the run starts at the sim time ``t0`` seen after connecting, so all
-    times and rates are relative to ``t0``. The sim must serve the same scenario file
-    (the sim uses its seed for equipment timings, the runner for the work orders).
-    LOAD containers are placed via ``PrefillYard``, which the sim only accepts at sim
-    time 0. At the end the sim is told to ``Stop``."""
+    The sim starts paused at sim time 0: the runner places the LOAD containers
+    (``PrefillYard``), submits the orders and runs the first dispatch at sim time 0,
+    then calls ``Start``; from there the sim paces itself (``speed_factor``). Times and
+    rates are relative to the sim time ``t0`` at ``Start`` (0, unless the sim was
+    started with ``--autostart``). The sim must serve the same scenario file (the sim
+    uses its seed for equipment timings, the runner for the work orders). At the end
+    the sim is told to ``Stop``."""
     scenario = replace(scenario, seed=seed)
     allocator = make_allocator(layout)
     orders = make_workorders(scenario, layout, allocator, random.Random(seed))
@@ -173,14 +174,16 @@ def run_once_opcua(scenario: Scenario, layout: Layout, seed: int, *, gateway: st
         if slots and not port.prefill_yard(slots):
             raise RuntimeError(
                 f"PrefillYard rejected for {len(slots)} LOAD containers (the sim accepts it only "
-                "at sim time 0)")
+                "at sim time 0: was it started with --autostart?)")
         port.drain_events()  # events from before the run: no subscriber yet, dropped
         dispatcher = Dispatcher(port, allocator)
         kpi = KpiCollector(port, dispatcher, faults_total=None)
         t0 = port.now()
-        log.info("run starts at sim time %.1f s", t0, extra={"gateway": gateway, "seed": seed})
         dispatcher.submit(orders)
-        dispatcher.tick()
+        dispatcher.tick()  # first assignments at t0, as in-process
+        if not port.start_sim():
+            raise RuntimeError(f"Start rejected by the sim behind {gateway}")
+        log.info("run started at sim time %.1f s", t0, extra={"gateway": gateway, "seed": seed})
         window_timeout = max(30.0, 120 * SAMPLE_INTERVAL_S / scenario.speed_factor)
         t = t0
         cap = t0 + scenario.duration_s

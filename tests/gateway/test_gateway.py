@@ -182,7 +182,9 @@ async def test_prefill_forwarded(rig):
     world = SimpleNamespace(
         now=lambda: 0.0, yard=Yard(rig.layout.blocks),
         scenario=SimpleNamespace(speed_factor=10.0))
-    rig.control = ControlServer(world, port=rig.base + 12, on_stop=lambda: None, host="127.0.0.1")
+    started = []
+    rig.control = ControlServer(world, port=rig.base + 12, on_stop=lambda: None, host="127.0.0.1",
+                                on_start=lambda: started.append(1) or True)
     await rig.control.start()
     await rig.control.sync()
     await _start_connected(rig)
@@ -193,6 +195,7 @@ async def test_prefill_forwarded(rig):
     assert await clock.call_method(f"{rig.idx}:PrefillYard", payload) is True
     assert world.yard.locate("P1") is not None
     assert await clock.call_method(f"{rig.idx}:PrefillYard", payload) is False
+    assert await clock.call_method(f"{rig.idx}:Start") is True and started == [1]
 
 
 async def _eq(node, value):

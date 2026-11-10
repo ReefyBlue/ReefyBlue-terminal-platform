@@ -142,6 +142,7 @@ async def register_types(server: Server) -> tuple[int, Types]:
     in_j.DataType = ua.NodeId(ua.ObjectIds.String)
     in_j.ValueRank = -1
     await control.add_method(idx, "PrefillYard", noop_b, [in_j], [_B])
+    await control.add_method(idx, "Start", noop_b, [], [_B])
     return idx, Types(
         equipment=equipment.nodeid,
         sts=kind_nodes[Kind.STS].nodeid,
@@ -195,6 +196,7 @@ async def create_control_object(
     server: Server, idx: int, types: Types, parent: Node, *,
     stop: Callable[[], None | Awaitable[None]],
     prefill: Callable[[str], bool | Awaitable[bool]],
+    start: Callable[[], bool | Awaitable[bool]],
 ) -> Node:
     nodes = await instantiate(
         parent, server.get_node(types.control), bname=f"{idx}:Clock", idx=idx)
@@ -210,8 +212,13 @@ async def create_control_object(
     async def _prefill(_parent, json_str):
         return bool(await _resolve(prefill(json_str)))
 
+    @uamethod
+    async def _start(_parent):
+        return bool(await _resolve(start()))
+
     await obj.add_method(idx, "Stop", _stop, [], [])
     await obj.add_method(idx, "PrefillYard", _prefill, [_string_arg("json")], [_B])
+    await obj.add_method(idx, "Start", _start, [], [_B])
     return obj
 
 

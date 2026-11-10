@@ -74,8 +74,10 @@ async def _start_rig() -> Rig:
     r.sim_events = []  # ground truth: what the sim emitted
     r.world.port.subscribe(r.sim_events.append)
     r.world.port.subscribe(lambda ev: r.servers[ev.equipment_id].on_emit(ev))
+    r.started = []
     r.control = ControlServer(
-        r.world, port=base + CONTROL_PORT_OFFSET, on_stop=lambda: None, host="127.0.0.1")
+        r.world, port=base + CONTROL_PORT_OFFSET, on_stop=lambda: None, host="127.0.0.1",
+        on_start=lambda: r.started.append(1) or True)
     await asyncio.gather(*(s.start() for s in r.servers.values()), r.control.start())
     await r.step(0.0)
     r.gateway = Gateway(layout, port=_free_port(), upstream_host="127.0.0.1",
@@ -180,6 +182,12 @@ async def test_now_follows_sim_time(rig):
     assert await asyncio.to_thread(rig.port.wait_for_sim_time, t, 2.0) is True
     assert rig.port.now() == t
     assert await asyncio.to_thread(rig.port.wait_for_sim_time, t + 1000, 0.1) is False
+
+
+async def test_start_sim_forwarded(rig):
+    rig.started.clear()
+    assert await asyncio.to_thread(rig.port.start_sim) is True
+    assert rig.started == [1]
 
 
 async def test_unknown_id_keyerror(rig):

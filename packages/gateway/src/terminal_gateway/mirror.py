@@ -322,7 +322,7 @@ class EquipmentMirror(_UpstreamLink):
 
 
 class ControlMirror(_UpstreamLink):
-    """``Terminal/Clock`` on the gateway: mirrors SimTime/SpeedFactor, forwards Stop/PrefillYard."""
+    """``Terminal/Clock`` on the gateway: mirrors SimTime/SpeedFactor, forwards Stop/PrefillYard/Start."""
 
     name = "control"
 
@@ -343,7 +343,8 @@ class ControlMirror(_UpstreamLink):
 
     async def start(self) -> None:
         self.obj = await create_control_object(
-            self.server, self.idx, self.types, self.parent, stop=self._stop, prefill=self._prefill)
+            self.server, self.idx, self.types, self.parent, stop=self._stop, prefill=self._prefill,
+            start=self._start)
         self._launch()
 
     async def _stop(self) -> None:
@@ -351,6 +352,9 @@ class ControlMirror(_UpstreamLink):
 
     async def _prefill(self, json_str: str) -> bool:
         return bool(await self._call(self._uobj, self._uidx, "PrefillYard", json_str))
+
+    async def _start(self) -> bool:
+        return bool(await self._call(self._uobj, self._uidx, "Start"))
 
     async def _write(self, name: str, value: float) -> None:
         assert self.obj is not None

@@ -49,7 +49,7 @@ async def _control(port):
 async def test_sim_time_advances_with_pacing(tmp_path):
     port = _free_base_port()
     svc = SimService(load_scenario(_scenario(tmp_path)), load_layout(ROOT / "terminal.yaml"),
-                     base_port=port, host="127.0.0.1")
+                     base_port=port, host="127.0.0.1", autostart=True)
     task = asyncio.create_task(svc.run())
     try:
         for _ in range(100):  # startup: ~1 s CPU per server
@@ -117,6 +117,64 @@ async def test_prefill_yard_is_atomic(tmp_path):
     finally:
         for s in [*svc.servers.values(), svc.control]:
             await s.stop()
+
+
+async def test_sim_starts_paused_until_start(tmp_path, caplog):
+    port = _free_base_port()
+    svc = SimService(load_scenario(_scenario(tmp_path)), load_layout(ROOT / "terminal.yaml"),
+                     base_port=port, host="127.0.0.1")
+    caplog.set_level("INFO", logger="terminal_sim.serve")
+    task = asyncio.create_task(svc.run())
+    try:
+        for _ in range(100):
+            try:
+                c, idx, obj = await _control(port)
+                break
+            except OSError:
+                await asyncio.sleep(0.5)
+        try:
+            sim_time = await obj.get_child(f"{idx}:SimTime")
+            assert await sim_time.read_value() == 0.0
+            await asyncio.sleep(1.0)
+            assert await sim_time.read_value() == 0.0
+            assert svc.world.now() == 0.0
+            assert any("waiting for Start" in r.getMessage() for r in caplog.records)
+            assert await obj.call_method(f"{idx}:Start") is True
+            await asyncio.sleep(0.5)
+            assert await sim_time.read_value() > 0.0
+            assert await obj.call_method(f"{idx}:Start") is True  # idempotent
+        finally:
+            await c.disconnect()
+    finally:
+        svc.stop()
+        await asyncio.wait_for(task, 10)
+
+
+async def test_stop_while_paused_ends_run(tmp_path):
+    svc = SimService(load_scenario(_scenario(tmp_path)), load_layout(ROOT / "terminal.yaml"),
+                     base_port=_free_base_port(), host="127.0.0.1")
+    svc.stop()
+    await asyncio.wait_for(svc.run(), 60)
+    assert svc.world.now() == 0.0
+
+
+def test_autostart_flag_parsed(monkeypatch, tmp_path):
+    from terminal_sim import serve
+    seen = {}
+
+    class Fake:
+        def __init__(self, *a, **kw):
+            seen.update(kw)
+
+    async def fake_amain(service):
+        return None
+
+    monkeypatch.setattr(serve, "SimService", Fake)
+    monkeypatch.setattr(serve, "_amain", fake_amain)
+    serve.main([str(_scenario(tmp_path)), "--autostart"])
+    assert seen["autostart"] is True
+    serve.main([str(_scenario(tmp_path))])
+    assert seen["autostart"] is False
 
 
 def test_too_many_equipment_raises(tmp_path, monkeypatch):

@@ -48,6 +48,9 @@ async def test_types_registered(server):
     assert "BatteryPct" in names
     for n in (types.sts, types.asc, types.control):
         assert await server.get_node(n).read_browse_name()
+    ctl = server.get_node(types.control)
+    names = {(await c.read_browse_name()).Name for c in await ctl.get_children()}
+    assert {"Stop", "PrefillYard", "Start"} <= names
 
 
 async def test_create_agv_object_and_read(server):
@@ -155,21 +158,26 @@ async def test_emit_event_concurrent_no_lost_increments(server):
 async def test_create_control_object(server):
     idx, types = await nodeset.register_types(server)
     folders = await nodeset.ensure_folders(server, idx, server.nodes.objects)
-    stopped, prefilled = [], []
+    stopped, prefilled, started = [], [], []
 
     def prefill(s):
         prefilled.append(s)
         return False
 
+    def start():
+        started.append(1)
+        return True
+
     await nodeset.create_control_object(
         server, idx, types, folders["Terminal"],
-        stop=lambda: stopped.append(1), prefill=prefill)
+        stop=lambda: stopped.append(1), prefill=prefill, start=start)
     async with Client(server.url) as c:
         o = await c.nodes.objects.get_child([f"{idx}:Terminal", f"{idx}:Clock"])
         assert (await o.read_browse_name()).Name == "Clock"
         await o.call_method(f"{idx}:Stop")
         assert await o.call_method(f"{idx}:PrefillYard", "[]") is False
-    assert stopped == [1] and prefilled == ["[]"]
+        assert await o.call_method(f"{idx}:Start") is True
+    assert stopped == [1] and prefilled == ["[]"] and started == [1]
 
 
 async def test_async_handlers_are_awaited(server):
@@ -195,8 +203,12 @@ async def test_async_handlers_are_awaited(server):
     async def prefill(s):
         return True
 
+    async def start():
+        calls.append("start")
+        return False
+
     await nodeset.create_control_object(
-        server, idx, types, folders["Terminal"], stop=stop, prefill=prefill)
+        server, idx, types, folders["Terminal"], stop=stop, prefill=prefill, start=start)
     async with Client(server.url) as c:
         o = await c.nodes.objects.get_child(
             [f"{idx}:Terminal", f"{idx}:Fleet", f"{idx}:AGV-01"])
@@ -205,4 +217,5 @@ async def test_async_handlers_are_awaited(server):
         clk = await c.nodes.objects.get_child([f"{idx}:Terminal", f"{idx}:Clock"])
         await clk.call_method(f"{idx}:Stop")
         assert await clk.call_method(f"{idx}:PrefillYard", "[]") is True
-    assert calls == ["{}", "stop"]
+        assert await clk.call_method(f"{idx}:Start") is False
+    assert calls == ["{}", "stop", "start"]

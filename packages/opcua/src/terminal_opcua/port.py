@@ -323,6 +323,12 @@ class OpcUaEquipmentPort:
         payload = json.dumps([{"slot": s, "container_id": c} for s, c in slots])
         return self._call_bool("Clock", self._clock, self._clock_methods, "PrefillYard", payload)
 
+    def start_sim(self) -> bool:
+        """``Terminal/Clock.Start``: let a paused sim clock run; True if the sim accepted."""
+        if not self._connected or self._clock is None:
+            raise RuntimeError("port not connected")
+        return self._call_bool("Clock", self._clock, self._clock_methods, "Start")
+
     def stop_sim(self) -> bool:
         """``Terminal/Clock.Stop``; True if the call went through."""
         if not self._connected or self._clock is None:

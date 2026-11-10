@@ -1,4 +1,5 @@
-"""Sim process + gateway process + runner over OPC UA: a small scenario completes."""
+"""Sim process + gateway process + runner over OPC UA: a small mixed scenario completes
+(10 LOAD containers placed via PrefillYard while the sim clock is paused)."""
 
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ n_sts: 1
 n_agv: 2
 n_containers: 20
 share_40ft: 0.5
-discharge_share: 1.0
+discharge_share: 0.5
 speed_factor: 100
 duration_s: 7200
 """

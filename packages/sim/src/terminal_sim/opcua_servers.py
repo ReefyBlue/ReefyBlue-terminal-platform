@@ -90,16 +90,27 @@ class EquipmentServer:
 
 
 class ControlServer:
-    """Clock + control server: ``Terminal/Clock`` with SimTime, SpeedFactor, Stop, PrefillYard."""
+    """Clock + control server: ``Terminal/Clock`` with SimTime, SpeedFactor, Stop, PrefillYard,
+    Start. ``Start`` calls ``on_start`` (False without one)."""
 
-    def __init__(self, world, *, port: int, on_stop: Callable[[], None], host: str = "0.0.0.0") -> None:
+    def __init__(
+        self, world, *, port: int, on_stop: Callable[[], None], host: str = "0.0.0.0",
+        on_start: Callable[[], bool] | None = None,
+    ) -> None:
         self.world = world
+        self._on_start = on_start
         self.port = port
         self.host = host
         self.endpoint = f"opc.tcp://{host}:{port}/terminal/control"
         self._on_stop = on_stop
         self._server: Server | None = None
         self._obj = None
+
+    def _start(self) -> bool:
+        if self._on_start is None:
+            log.warning("Start not supported by this control server")
+            return False
+        return bool(self._on_start())
 
     def _prefill(self, json_str: str) -> bool:
         if self.world.now() > 0:
@@ -145,7 +156,8 @@ class ControlServer:
         idx, types = await register_types(server)
         folders = await ensure_folders(server, idx, server.nodes.objects)
         self._obj = await create_control_object(
-            server, idx, types, folders["Terminal"], stop=self._on_stop, prefill=self._prefill
+            server, idx, types, folders["Terminal"], stop=self._on_stop, prefill=self._prefill,
+            start=self._start,
         )
         await server.start()
         self._server = server
