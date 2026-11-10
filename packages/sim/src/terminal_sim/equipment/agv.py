@@ -20,6 +20,17 @@ AUTO_CLEAR_AFTER_S = 5.0  # idle time on a handover cell before the AGV clears i
 
 
 class AGV(Equipment):
+    """Grid-routed transport vehicle (TRANSPORT jobs only).
+
+    Auto-clear of handover cells: an AGV idle for ``AUTO_CLEAR_AFTER_S`` on a
+    handover cell (STS lane cell or block TP cell) drives, BUSY but without job
+    events, to the nearest free staging cell and goes IDLE again. Only an *empty*
+    AGV with *no pending handover* does this, i.e. ``loaded_container_id`` and
+    ``job_container_id`` are both None (the latter is cleared when the AGV unloads
+    or its job fails / is cancelled). An empty AGV waiting under the crane for a
+    discharge, or a loaded one waiting for a LOAD, keeps its lane cell.
+    """
+
     def __init__(
         self,
         *,
