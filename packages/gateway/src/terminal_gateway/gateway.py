@@ -104,6 +104,8 @@ class Gateway:
             await self._create_mirrors(server, idx, types, folders)
         except BaseException:
             await self.stop()
+            self.mirrors.clear()
+            self.control = None
             raise
         log.info("gateway serving %s (%d equipment)", self.endpoint, len(self.table))
 

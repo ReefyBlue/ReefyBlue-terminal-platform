@@ -10,7 +10,7 @@ from collections.abc import Callable
 from asyncua import Client, Node, Server, ua
 from terminal_model.port import EquipmentEvent, EquipmentSnapshot, EventKind
 from terminal_model.types import Kind, Position, State
-from terminal_opcua.codec import event_to_json
+from terminal_opcua.codec import event_from_json, event_to_json
 from terminal_opcua.nodeset import (
     EQUIPMENT_VARS,
     KIND_VARS,
@@ -32,6 +32,17 @@ CONNECT_TIMEOUT_S = 2.0
 WATCHDOG_S = 1.0
 EVENT_QUEUE = 100  # server-side FIFO per monitored item: no coalescing between publishes
 FAULT_REASON = "UPSTREAM_DISCONNECTED"
+
+
+def _is_event(payload: object) -> bool:
+    """True if ``payload`` is a decodable event (a fresh upstream has LastEvent "")."""
+    if not isinstance(payload, str) or not payload:
+        return False
+    try:
+        event_from_json(payload)
+    except (ValueError, TypeError):
+        return False
+    return True
 
 
 async def _safe_disconnect(client: Client) -> None:
@@ -241,7 +252,8 @@ class EquipmentMirror(_UpstreamLink):
             up_seq, up_le = int(current["EventSeq"]), current["LastEvent"]
             self._le_queue.clear()
             self._last_upstream_le = up_le
-            if up_seq != self._delivered_up_seq and up_le != self._delivered_le:
+            if (up_seq != self._delivered_up_seq and up_le != self._delivered_le
+                    and _is_event(up_le)):
                 # new events (or an upstream restart) while away: deliver the latest
                 # one above everything delivered; adopt the upstream seq verbatim
                 # when it is already ahead (first connect, no Fault in between)
@@ -277,6 +289,10 @@ class EquipmentMirror(_UpstreamLink):
                     if self._le_queue:
                         self._last_upstream_le = self._le_queue.popleft()
                     le, up_seq = self._last_upstream_le, int(val)
+                    if not _is_event(le):
+                        log.warning("%s: EventSeq %d without a decodable LastEvent; skipped",
+                                    self.equipment_id, up_seq)
+                        return
                     if (le == self._delivered_le and self._delivered_up_seq is not None
                             and up_seq <= self._delivered_up_seq):
                         return  # already delivered (e.g. initial notification after resync)

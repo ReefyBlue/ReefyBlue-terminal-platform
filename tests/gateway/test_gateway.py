@@ -330,11 +330,48 @@ async def test_blip_without_events_writes_no_last_event(rig):
 async def test_start_failure_stops_server(rig, monkeypatch):
     from terminal_gateway import gateway as gw_mod
 
+    real_start = gw_mod.EquipmentMirror.start
+    calls = []
+
     async def boom(self):
-        raise RuntimeError("boom")
+        calls.append(self.equipment_id)
+        if len(calls) == 2:  # first mirror created, second fails
+            raise RuntimeError("boom")
+        await real_start(self)
 
     monkeypatch.setattr(gw_mod.EquipmentMirror, "start", boom)
     with pytest.raises(RuntimeError):
         await rig.gateway.start()
+    assert rig.gateway.mirrors == {} and rig.gateway.control is None
     with socket.socket() as s:
         assert s.connect_ex(("127.0.0.1", rig.gw_port)) != 0
+
+
+@pytest.mark.parametrize("rig", [1.0], indirect=True)
+async def test_fresh_upstream_restart_emits_no_empty_event(rig):
+    await _start_connected(rig)
+    c = EventConsumer()
+    await c.attach(rig)
+    rig.server.on_emit(_done("J1"))
+    await rig.server.sync()
+    assert await _wait_until(lambda: len(c.delivered) >= 1, 1.0)
+    await rig.server.stop()
+    assert await _wait_until(
+        lambda: any(ev and ev.new_state == State.FAULT for _, ev in c.delivered), 3.0)
+    await rig.server.start()  # fresh server on the same port: EventSeq 0, LastEvent ""
+    assert await _val_eventually(rig, "State", "IDLE", 4.0)
+    await asyncio.sleep(0.3)
+    assert c.le_writes == 2  # J1 and the synthesized Fault, no "" payload
+    (j1_seq, j1), (fault_seq, fault) = c.delivered
+    assert j1.job_id == "J1" and fault.new_state == State.FAULT
+    for j in ("J2", "J3"):
+        rig.server.on_emit(_done(j))
+    await rig.server.sync()
+    assert await _wait_until(lambda: len(c.delivered) >= 4, 1.0)
+    await asyncio.sleep(0.2)
+    assert c.jobs()[2:] == [(fault_seq + 1, "J2"), (fault_seq + 2, "J3")]
+    assert all(ev is not None for _, ev in c.delivered) and c.queue == []
+
+
+async def _val_eventually(r, name, value, timeout):
+    return await _wait_for(lambda: _is(r, name, value), timeout, step=0.05)
