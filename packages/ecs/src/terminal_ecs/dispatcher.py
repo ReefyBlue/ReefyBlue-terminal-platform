@@ -140,6 +140,7 @@ class Dispatcher:
         self._offline_job: dict[str, str] = {}  # offline device -> job it was running then
         self._needs_release: set[str] = set()  # until release() (or IDLE with auto_release)
         self._unknown: dict[str, str] = {}  # job whose outcome was lost -> equipment id
+        self._release_cause: dict[str, str] = {}  # why a device needs release (first cause)
         self._alarm_since: dict[tuple[AlarmKind, str], float] = {}
         self._seq = itertools.count(1)
         self._failed = 0
@@ -187,7 +188,7 @@ class Dispatcher:
             "bound": sum(
                 r.stage in (Stage.TO_YARD, Stage.TO_STS)
                 and r.current_job_id is None
-                and r.agv_id in self._excluded | self._quarantined
+                and r.agv_id in self._unusable()
                 for r in self._open.values()
             ),
             "equipment": {eid: self.port.snapshot(eid).state for eid in sorted(self.port.equipment_ids())},
@@ -203,7 +204,7 @@ class Dispatcher:
         out = [Alarm(AlarmKind.LINK_LOST, eid, None, since.get((AlarmKind.LINK_LOST, eid), now),
                      "no link to equipment") for eid in self._offline]
         out += [Alarm(AlarmKind.NEEDS_RELEASE, eid, None, since.get((AlarmKind.NEEDS_RELEASE, eid), now),
-                      "fault: release required") for eid in self._needs_release]
+                      f"{self._release_cause.get(eid, 'fault')}: release required") for eid in self._needs_release]
         out += [Alarm(AlarmKind.UNKNOWN_OUTCOME, eid, job_id, since.get((AlarmKind.UNKNOWN_OUTCOME, job_id), now),
                       f"outcome of {job_id} unknown after link loss") for job_id, eid in self._unknown.items()]
         return sorted(out, key=lambda a: (a.since, a.kind, a.equipment_id, a.job_id or ""))
@@ -572,8 +573,9 @@ class Dispatcher:
             self._excluded.add(eid)
             self._raise(AlarmKind.NEEDS_RELEASE, eid)
             self._needs_release.add(eid)
+            self._release_cause.setdefault(eid, "fault")
             for job_id, jeq in list(self._job_eq.items()):
-                if jeq == eid:
+                if jeq == eid and job_id not in self._unknown:  # unknown ones wait for resolve_job
                     self._replan(self._by_job[job_id], jeq, "FAULT")
 
     def _go_offline(self, eid: str, reason: str | None) -> None:
@@ -602,6 +604,7 @@ class Dispatcher:
             else:
                 self._raise(AlarmKind.NEEDS_RELEASE, eid)
                 self._needs_release.add(eid)
+                self._release_cause.setdefault(eid, "unknown outcome")
         self._apply_state(eid, state)
 
     def _resolve(self, job_id: str, outcome: str) -> None:
@@ -610,6 +613,7 @@ class Dispatcher:
         rec = self._by_job.get(job_id)
         log.info("resolve %s on %s: %s", job_id, eid, outcome)
         if rec is None:  # no longer running (should not happen while unknown)
+            log.warning("resolve %s (%s): job no longer running on %s; verdict ignored", job_id, outcome, eid)
             return
         if outcome == "completed":
             self._on_completed(EquipmentEvent(EventKind.JOB_COMPLETED, eid, self.port.now(), job_id=job_id))
@@ -629,6 +633,7 @@ class Dispatcher:
 
     def _clear_release(self, eid: str) -> None:
         self._needs_release.discard(eid)
+        self._release_cause.pop(eid, None)
         self._alarm_since.pop((AlarmKind.NEEDS_RELEASE, eid), None)
 
     def _replan(self, rec: OrderRecord, eid: str, reason: str) -> None:

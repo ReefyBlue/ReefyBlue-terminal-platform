@@ -96,3 +96,10 @@ def test_alarm_since_is_creation_time():
 def test_status_keeps_existing_keys_first():
     d = Dispatcher(make_port(), FakeSlots())
     assert list(d.status())[-4:] == ["equipment", "offline", "needs_release", "unknown_outcomes"]
+
+
+def test_needs_release_detail_for_fault():
+    port = make_port()
+    d = Dispatcher(port, FakeSlots())
+    port.set_state("AGV-01", State.FAULT)
+    assert [a.detail for a in d.alarms()] == ["fault: release required"]

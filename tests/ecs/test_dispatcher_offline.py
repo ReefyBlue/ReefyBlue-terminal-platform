@@ -80,7 +80,7 @@ def test_offline_idle_return_with_job_is_unknown_outcome():
     s = d.status()
     assert (s["offline"], s["unknown_outcomes"], s["needs_release"], s["replans"]) == (0, 1, 1, 0)
     assert d.alarms() == [
-        Alarm(AlarmKind.NEEDS_RELEASE, "AGV-01", None, 15.0, "fault: release required"),
+        Alarm(AlarmKind.NEEDS_RELEASE, "AGV-01", None, 15.0, "unknown outcome: release required"),
         Alarm(AlarmKind.UNKNOWN_OUTCOME, "AGV-01", "C1-TRANSPORT-1", 15.0,
               "outcome of C1-TRANSPORT-1 unknown after link loss"),
     ]
@@ -206,3 +206,31 @@ def test_auto_release_resolves_unknown_as_failed():
     assert (s["replans"], s["unknown_outcomes"], s["needs_release"], s["offline"]) == (1, 0, 0, 0)
     assert d.alarms() == []
     assert jobs_of(port, "AGV-01") == ["C1-TRANSPORT-1", "C1-TRANSPORT-2"]  # re-admitted at once
+
+
+def test_fault_after_unknown_outcome_keeps_job_for_operator():
+    port = make_port()
+    d = Dispatcher(port, FakeSlots())
+    _unknown_discharge(port, d)
+    port.set_state("STS-01", State.FAULT)  # the unknown job is not replanned behind the operator's back
+    assert d.status()["replans"] == 0 and "C1-DISCHARGE-1" in d.jobs
+    port.set_state("STS-01", State.IDLE)
+    d.resolve_job("C1-DISCHARGE-1", "completed")
+    assert jobs_of(port, "AGV-01") == ["C1-TRANSPORT-1", "C1-TRANSPORT-2"]  # order advanced to TO_YARD
+    s = d.status()
+    assert (s["replans"], s["unknown_outcomes"], s["needs_release"]) == (0, 0, 1)
+    assert [a.detail for a in d.alarms()] == ["unknown outcome: release required"]
+
+
+def test_bound_counts_offline_agv_with_box():
+    port = make_port()
+    d = Dispatcher(port, FakeSlots())
+    d.submit([order("C1")])
+    port.complete("AGV-01")  # AGV in the lane; crane discharges onto it
+    assert jobs_of(port, "STS-01") == ["C1-DISCHARGE-1"]
+    port.set_state("AGV-01", State.OFFLINE, LOST)
+    port.complete("STS-01")  # box now on the offline AGV: TO_YARD waits for it
+    assert d.status()["bound"] == 1
+    port.set_state("AGV-01", State.IDLE, RESTORED)
+    assert d.status()["bound"] == 0
+    assert jobs_of(port, "AGV-01") == ["C1-TRANSPORT-1", "C1-TRANSPORT-2"]
