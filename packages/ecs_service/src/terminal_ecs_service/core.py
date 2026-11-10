@@ -97,7 +97,7 @@ class EcsCore:
             self.port.bind(link)
         except ConnectionError as e:
             log.warning("equipment link lost while binding: %s", e)
-            self._drop_link()
+            self._drop_link(blocking=False)
             return False
         now = self.port.now()
         if self.dispatcher is None:
@@ -189,20 +189,34 @@ class EcsCore:
 
     # -- commands and queries -------------------------------------------------------------
     def submit(self, orders: list[WorkOrder]) -> None:
+        """Hand ``orders`` to the Dispatcher and tick. Raises ``RuntimeError`` when not
+        connected and ``WorkOrderError`` when rejected, both before any order is taken.
+        Once the Dispatcher has taken the orders they count as accepted: a
+        ``ConnectionError`` in its ticks is handled as a lost link (``on_link_lost()``)
+        and ``submit`` returns normally."""
         if not self.connected or self.dispatcher is None:
             raise RuntimeError("not connected")
         for o in orders:
             self.allocator.occupy(o.yard_slot)
         try:
-            self.dispatcher.submit(orders)
+            self.dispatcher.submit(orders)  # validates (no port access), takes, ticks
         except WorkOrderError:
             raise  # rejected before any order was taken
-        except BaseException:
-            # failed in the tick after the orders were taken (e.g. ConnectionError)
+        except ConnectionError as e:
             self.known_containers.update(o.container_id for o in orders)
+            log.warning("equipment link failed after the work orders were taken: %s", e)
+            self.on_link_lost()
+            self.publish_new_jobs()
+            return
+        except BaseException:
+            self.known_containers.update(o.container_id for o in orders)  # taken before the tick failed
             raise
         self.known_containers.update(o.container_id for o in orders)
-        self.dispatcher.tick()
+        try:
+            self.dispatcher.tick()
+        except ConnectionError as e:
+            log.warning("equipment link failed after the work orders were taken: %s", e)
+            self.on_link_lost()
         self.publish_new_jobs()
 
     def status(self) -> dict:

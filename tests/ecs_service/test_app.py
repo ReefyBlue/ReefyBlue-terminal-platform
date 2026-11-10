@@ -262,3 +262,26 @@ def test_serve_load_layout_and_factory(monkeypatch):
     with pytest.raises(ConnectionError):
         factory()
     assert made[0].endpoint == "opc.tcp://gw:4840"
+
+
+class TickLosingPort(FakePort):
+    lost = False
+
+    def assign_job(self, equipment_id, job):
+        if self.lost:
+            raise ConnectionError("link lost")
+        return super().assign_job(equipment_id, job)
+
+
+async def test_workorders_202_when_link_drops_after_take():
+    fake, core, client = _setup(_fake(TickLosingPort))
+    async with client:
+        await core.connect_once()
+        fake.lost = True  # validation reads snapshots fine; the tick's assign_job fails
+        r = await client.post("/workorders", json=[_order("C1"), _order("C2", "A/1/1/2")])
+        assert r.status_code == 202 and r.json() == {"accepted": 2}
+        assert core.known_containers == {"C1", "C2"}
+        assert core.dispatcher.status()["open"] == 2
+        assert (await client.get("/health")).status_code == 503
+        r = await client.post("/workorders", json=[_order("C1")])
+        assert r.status_code == 503  # not connected; after reconnect it would be a duplicate

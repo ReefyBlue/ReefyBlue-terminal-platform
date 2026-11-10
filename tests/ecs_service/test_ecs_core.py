@@ -357,6 +357,34 @@ async def test_submit_connection_error_after_take_still_records_containers():
     core, _ = _core(fake)
     await core.connect_once()
     fake.lost = True
-    with pytest.raises(ConnectionError):
-        core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")])
+    core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")])  # no raise: taken
     assert core.known_containers == {"C1"}  # the Dispatcher took it: a retry is a duplicate
+    assert core.connected is False and core.dispatcher.status()["open"] == 1
+
+
+class BindFailPort(FakePort):
+    closed = False
+
+    def equipment_ids(self):
+        raise ConnectionError("lost while binding")
+
+    def close(self) -> None:
+        import time as _t
+
+        _t.sleep(0.3)
+        self.closed = True
+
+
+async def test_connect_once_bind_failure_closes_off_loop():
+    import time as _t
+
+    fake = _fake(BindFailPort)
+    core, _ = _core(fake)
+    t0 = _t.monotonic()
+    assert await core.connect_once() is False
+    assert _t.monotonic() - t0 < 0.2 and fake.closed is False  # not blocking the loop
+    for _ in range(100):
+        if fake.closed:
+            break
+        await asyncio.sleep(0.01)
+    assert fake.closed is True and core.connected is False
