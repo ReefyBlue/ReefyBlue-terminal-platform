@@ -212,16 +212,12 @@ name = "terminal-tos-stub"
 version = "0.1.0"
 source = { editable = "packages/tos_stub" }
 dependencies = [
-    { name = "pyyaml" },
     { name = "terminal-ecs" },
     { name = "terminal-model" },
-    { name = "terminal-sim" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "pyyaml", specifier = ">=6" },
     { name = "terminal-ecs", editable = "packages/ecs" },
     { name = "terminal-model", editable = "packages/model" },
-    { name = "terminal-sim", editable = "packages/sim" },
 ]

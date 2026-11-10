@@ -15,17 +15,45 @@ from dataclasses import replace
 from pathlib import Path
 
 from terminal_ecs.dispatcher import Dispatcher
+from terminal_ecs.workorders import WorkOrder
+from terminal_model.locations import parse_location
 from terminal_model.logging import configure_json_logging
+from terminal_model.types import JobType
 from terminal_sim.equipment.agv import AGV
 from terminal_sim.layout import Layout, load_layout
 from terminal_sim.scenario import Scenario, load_scenario
 from terminal_sim.world import World
+from terminal_sim.yard import Yard
 from terminal_tos_stub.allocator import SimpleSlotAllocator
-from terminal_tos_stub.generator import generate_workorders, prefill
+from terminal_tos_stub.generator import generate_workorders
 
 from terminal_runner.kpi import SAMPLE_INTERVAL_S, KpiCollector
 
 log = logging.getLogger("terminal_runner.run")
+
+
+def make_allocator(layout: Layout) -> SimpleSlotAllocator:
+    """TOS-stub slot allocator for the layout's blocks (layout order)."""
+    return SimpleSlotAllocator({b.block: (b.bays, b.rows, b.tiers) for b in layout.blocks})
+
+
+def make_workorders(scenario: Scenario, layout: Layout, allocator: SimpleSlotAllocator, rng: random.Random) -> list[WorkOrder]:
+    """Adapt Layout/Scenario to the TOS stub's plain arguments."""
+    return generate_workorders(
+        n_containers=scenario.n_containers,
+        discharge_share=scenario.discharge_share,
+        sts_ids=[s.equipment_id for s in layout.sts[: scenario.n_sts]],
+        blocks=[b.block for b in layout.blocks],
+        allocator=allocator,
+        rng=rng,
+    )
+
+
+def prefill(yard: Yard, orders: list[WorkOrder]) -> None:
+    """Place the containers of all LOAD orders in the yard before the run."""
+    for order in orders:
+        if order.type is JobType.LOAD:
+            yard.occupy(parse_location(order.yard_slot), order.container_id)
 
 
 def _transfer_hook(world: World):
@@ -60,8 +88,8 @@ def run_once(scenario: Scenario, layout: Layout, seed: int) -> dict[str, float]:
     ``duration_s`` (hard cap). Rates are per simulated hour actually run."""
     scenario = replace(scenario, seed=seed)
     world = World(layout, scenario)
-    allocator = SimpleSlotAllocator(layout.blocks)
-    orders = generate_workorders(scenario, layout, allocator, rng=random.Random(seed))
+    allocator = make_allocator(layout)
+    orders = make_workorders(scenario, layout, allocator, random.Random(seed))
     dispatcher = Dispatcher(world.port, allocator)
     kpi = KpiCollector(world.port, dispatcher, faults_total=world.faults_total)
     move_box = _transfer_hook(world)

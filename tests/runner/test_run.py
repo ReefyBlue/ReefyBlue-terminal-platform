@@ -7,10 +7,14 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from terminal_runner.run import _transfer_hook, main, run_once
+from terminal_ecs.workorders import WorkOrder
+from terminal_model.locations import parse_location
+from terminal_model.types import JobType
+from terminal_runner.run import _transfer_hook, main, prefill, run_once
 from terminal_sim.layout import load_layout
 from terminal_sim.scenario import load_scenario
 from terminal_sim.world import World
+from terminal_sim.yard import Yard
 
 LAYOUT = Path(__file__).resolve().parents[2] / "terminal.yaml"
 
@@ -124,3 +128,16 @@ def test_mixed_load_discharge_with_many_agvs_completes(tmp_path: Path):
     assert k["containers_done"] == 40.0
     assert k["containers_failed"] == 0.0
     assert k["timed_out"] == 0.0
+
+
+def test_prefill_puts_load_containers_in_yard():
+    yard = Yard(load_layout(LAYOUT).blocks)
+    orders = [
+        WorkOrder("C0001", JobType.DISCHARGE, "STS-01", "A/1/1/1"),
+        WorkOrder("C0002", JobType.LOAD, "STS-01", "A/1/1/2"),
+        WorkOrder("C0003", JobType.LOAD, "STS-02", "B/2/3/1"),
+    ]
+    prefill(yard, orders)
+    assert yard.locate("C0001") is None
+    assert yard.locate("C0002") == parse_location("A/1/1/2")
+    assert yard.locate("C0003") == parse_location("B/2/3/1")

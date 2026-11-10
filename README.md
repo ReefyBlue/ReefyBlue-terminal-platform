@@ -65,10 +65,10 @@ Workspace-packages in `packages/`:
 - `model` (`terminal_model`): gedeelde types, locaties, JSON-logging en de `EquipmentPort`-interface.
 - `sim` (`terminal_sim`): layout, scenario, `World` met STS, AGV, ASC, stack en storingen.
 - `ecs` (`terminal_ecs`): `Dispatcher` en werkorders; praat alleen met `EquipmentPort`.
-- `tos_stub` (`terminal_tos_stub`): slottoewijzing en werkordergenerator.
-- `runner` (`terminal_runner`): koppelt sim, ecs en tos_stub; KPI-collector en CLI.
+- `tos_stub` (`terminal_tos_stub`): slottoewijzing en werkordergenerator; krijgt kale argumenten (blokmaten, STS-id's), geen sim-objecten.
+- `runner` (`terminal_runner`): koppelt sim, ecs en tos_stub (vertaalt Layout/Scenario naar de tos_stub-argumenten, vult de stack voor LOAD-orders); KPI-collector en CLI.
 
-Importregel (bewaakt door `tests/test_architecture.py`): `model` importeert geen ander `terminal_*`-package; `sim` importeert nooit `ecs`, `tos_stub` of `runner`; `ecs` importeert nooit `sim`. Alleen `runner` kent alle packages.
+Importregel (bewaakt door `tests/test_architecture.py`): `model` importeert geen ander `terminal_*`-package; `sim` importeert nooit `ecs`, `tos_stub` of `runner`; `ecs` importeert alleen `model`; `tos_stub` importeert alleen `model` en `ecs`. Alleen `runner` kent alle packages.
 
 ## Verder
 
