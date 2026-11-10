@@ -4,13 +4,15 @@ Usage: python -m terminal_ecs_service.serve --gateway opc.tcp://localhost:4840 -
     --host 0.0.0.0 --port 8000
 
 SIGTERM/SIGINT stop uvicorn; the app's lifespan then cancels ``EcsCore.run()``,
-which closes the gateway connection.
+which closes the gateway connection. uvicorn re-raises the signal afterwards: SIGTERM hits
+a handler installed in ``main`` (exit 0), SIGINT keeps the default (KeyboardInterrupt, exit 130).
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -60,15 +62,6 @@ def port_factory(gateway: str) -> Callable[[], OpcUaEquipmentPort]:
     return connect
 
 
-class _Server(uvicorn.Server):
-    """uvicorn re-raises a captured SIGTERM/SIGINT after a graceful shutdown, which would
-    make the process exit with -15; drop it so a clean stop exits 0."""
-
-    def handle_exit(self, sig, frame) -> None:
-        super().handle_exit(sig, frame)
-        self._captured_signals.clear()
-
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="terminal-ecs-service", description="ECS as a service (HTTP + WS).")
     ap.add_argument("--gateway", default="opc.tcp://localhost:4840")
@@ -80,9 +73,10 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_json_logging(getattr(logging, args.log_level.upper()))
     core = EcsCore(load_layout(args.layout), connect=port_factory(args.gateway))
-    config = uvicorn.Config(create_app(core), host=args.host, port=args.port, log_config=None,
-                            log_level=args.log_level)
-    _Server(config).run()
+    # uvicorn restores the pre-run() handler and re-raises the captured signal into it after its
+    # graceful shutdown; with the default SIGTERM handler that would exit -15, so exit 0 instead.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    uvicorn.run(create_app(core), host=args.host, port=args.port, log_config=None, log_level=args.log_level)
     return 0
 
 

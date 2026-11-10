@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import signal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -230,19 +231,19 @@ def test_lifespan_runs_and_cancels_core_loop():
 
 def test_serve_main_builds_app(monkeypatch):
     calls = []
-
-    class StubServer:
-        def __init__(self, config):
-            calls.append((config.app, {"host": config.host, "port": config.port,
-                                       "log_config": config.log_config, "log_level": config.log_level}))
-
-        def run(self):
-            pass
-
-    monkeypatch.setattr(serve, "_Server", StubServer)
+    monkeypatch.setattr(serve.uvicorn, "run", lambda app, **kw: calls.append((app, kw)))
+    previous = signal.getsignal(signal.SIGTERM)
+    monkeypatch.setattr(signal, "signal", lambda sig, h: installed.append((sig, h)))
+    installed = []
     monkeypatch.setattr(serve, "configure_json_logging", lambda level: calls.append(("log", level)))
     rc = serve.main(["--gateway", "opc.tcp://x", "--layout", str(ROOT / "terminal.yaml"), "--port", "1"])
     assert rc == 0
+    assert signal.getsignal(signal.SIGTERM) is previous
+    (sig, handler), = installed
+    assert sig == signal.SIGTERM
+    with pytest.raises(SystemExit) as ei:
+        handler(signal.SIGTERM, None)
+    assert ei.value.code == 0
     assert calls[0] == ("log", 20)
     app, kw = calls[1]
     assert kw["host"] == "0.0.0.0" and kw["port"] == 1 and kw["log_config"] is None
