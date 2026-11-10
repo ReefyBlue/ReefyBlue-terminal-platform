@@ -6,10 +6,11 @@ build-backend = "hatchling.build"
 name = "terminal-sim"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["salabim>=25", "pyyaml>=6", "terminal-model"]
+dependencies = ["salabim>=25", "pyyaml>=6", "terminal-model", "terminal-opcua"]
 
 [tool.uv.sources]
 terminal-model = { workspace = true }
+terminal-opcua = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terminal_sim"]

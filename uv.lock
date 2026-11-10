@@ -467,6 +467,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "salabim" },
     { name = "terminal-model" },
+    { name = "terminal-opcua" },
 ]
 
 [package.metadata]
@@ -474,6 +475,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6" },
     { name = "salabim", specifier = ">=25" },
     { name = "terminal-model", editable = "packages/model" },
+    { name = "terminal-opcua", editable = "packages/opcua" },
 ]
 
 [[package]]
