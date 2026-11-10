@@ -1,4 +1,5 @@
 from dataclasses import replace
+from itertools import pairwise
 from pathlib import Path
 
 from terminal_model.port import EventKind
@@ -34,7 +35,7 @@ def test_fault_cycle():
         if e.kind == EventKind.STATE_CHANGED and e.equipment_id == "AGV-01"
     ]
     assert states[0] == State.FAULT
-    assert all(a != b for a, b in zip(states, states[1:]))
+    assert all(a != b for a, b in pairwise(states))
     assert all(s in (State.FAULT, State.IDLE) for s in states)
     assert world.faults_total() == sum(i.count for i in world.fault_injectors)
 
