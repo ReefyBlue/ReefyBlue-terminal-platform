@@ -30,11 +30,12 @@ Standaardvelden bij uitzenden: `SourceNode` = het equipment-object, `SourceName`
 
 ## 3. Namespace-code (`terminal_opcua`)
 
-- `nodeset.register_types` maakt naast de ObjectTypes ook de vier EventTypes (`create_custom_event_type`) en geeft hun NodeIds terug in `Types` (`event_base`, `event_state_changed`, `event_job_completed`, `event_job_failed`).
-- `EQUIPMENT_VARS`/`VAR_TYPES` verliezen `LastEvent` en `EventSeq`. Equipment-objecten krijgen `EventNotifier = SubscribeToEvents`.
-- `EventEmitter(server, types, node, equipment_id)` houdt één `EventGenerator` per EventType (`emitting_node` = het equipment-object, zodat de `HasNotifier`-keten naar `Server` bestaat) en de `Seq`-teller achter een `asyncio.Lock`. `emit(ev)` zet de velden en roept `trigger()` aan.
-- `codec`: `event_to_json`/`event_from_json` verdwijnen; nieuw `event_fields(ev) -> dict[str, object]` en `event_from_fields(event_type: ua.NodeId, fields, types) -> EquipmentEvent`. Job-codec blijft.
-- `nodeset.subscribe_terminal_events(client, handler, types)` als gedeelde hulpfunctie: abonnement op `client.nodes.server` met `evtypes=[TerminalEventType]` (dekt subtypes), `queuesize` 100.
+- Nieuwe module `terminal_opcua/events.py` met `EventTypes` (NodeIds `base`, `state_changed`, `job_completed`, `job_failed`), `register_event_types(server, idx) -> EventTypes` (server-kant, `create_custom_event_type`) en `resolve_event_types(client) -> EventTypes` (client-kant, via browse-namen onder `BaseEventType`, zodat NodeIds niet hoeven overeen te komen). `nodeset.register_types` roept `register_event_types` aan en neemt het resultaat op als `Types.events`.
+- `EQUIPMENT_VARS`/`VAR_TYPES` verliezen `LastEvent` en `EventSeq`.
+- Emitting node is het `Server`-object (asyncua levert events alleen aan abonnees op de emitting node; de `HasNotifier`-keten wordt niet gevolgd). `SourceNode` = het equipment-object, `SourceName` = equipment-id.
+- `EventEmitter.create(server, types: EventTypes, node, equipment_id)` houdt één `EventGenerator` per EventType en de `Seq`-teller achter een `asyncio.Lock`. `emit(ev)` zet de velden en roept `trigger()` aan.
+- `codec`: `event_to_json`/`event_from_json` verdwijnen; nieuw `event_fields(ev) -> dict[str, object]` (pure) en `event_from_fields(kind, fields) -> EquipmentEvent` (pure; `ValueError` bij ontbrekend veld of onbekende state). `events.event_from_ua(event, types) -> tuple[int, EquipmentEvent]` (`Seq` plus event) beeldt `event.EventType` af op `EventKind` (`ValueError` bij onbekend type) en roept `event_from_fields` aan. Job-codec blijft.
+- Abonneren (gateway en port): `sub.subscribe_events(client.nodes.server, evtypes=[types.base], queuesize=100)`; de where-clause die asyncua genereert dekt de subtypes.
 
 ## 4. Sim-servers (`terminal_sim.opcua_servers`)
 
