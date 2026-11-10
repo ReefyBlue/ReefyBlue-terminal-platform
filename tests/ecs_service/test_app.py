@@ -211,10 +211,17 @@ def test_ws_link_messages_on_reconnect():
         client.portal.call(core.connect_once)
         with client.websocket_connect("/events") as ws:
             assert ws.receive_json()["type"] == "status"
+
+            def next_link() -> dict:
+                # LINK_LOST/LINK_RESTORED equipment events (one per device) precede/follow it
+                while (msg := ws.receive_json())["type"] != "link":
+                    assert msg["type"] == "equipment" and msg["kind"] == "STATE_CHANGED"
+                return msg
+
             client.portal.call(core.on_link_lost)
-            assert ws.receive_json() == {"type": "link", "connected": False, "sim_time": 0.0}
+            assert next_link() == {"type": "link", "connected": False, "sim_time": 0.0}
             client.portal.call(core.connect_once)
-            assert ws.receive_json() == {"type": "link", "connected": True, "sim_time": 0.0}
+            assert next_link() == {"type": "link", "connected": True, "sim_time": 0.0}
 
 
 def test_lifespan_runs_and_cancels_core_loop():

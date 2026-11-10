@@ -135,7 +135,11 @@ async def test_step_on_connection_error_unbinds_and_publishes_link(caplog):
             break
         await asyncio.sleep(0.01)
     assert fake.closed == 1
-    assert _drain(q) == [{"type": "link", "connected": False, "sim_time": 30.0}]
+    msgs = _drain(q)
+    assert [m for m in msgs if m["type"] == "link"] == [{"type": "link", "connected": False, "sim_time": 30.0}]
+    lost = [m for m in msgs if m["type"] == "equipment"]
+    assert {m["equipment_id"] for m in lost} == {"AGV-01", "ASC-A", "STS-01"}
+    assert all(m["reason"] == "LINK_LOST" and m["new_state"] == "OFFLINE" for m in lost)
     core.step()  # unbound: no-op
     assert _drain(q) == []
 
@@ -282,7 +286,7 @@ async def test_on_link_lost_closes_port_off_loop():
     core.on_link_lost()
     assert _t.monotonic() - t0 < 0.1  # close does not block the loop
     assert core.connected is False and fake.closed is False
-    assert _drain(q) == [{"type": "link", "connected": False, "sim_time": 0.0}]
+    assert [m for m in _drain(q) if m["type"] == "link"] == [{"type": "link", "connected": False, "sim_time": 0.0}]
     for _ in range(100):
         if fake.closed:
             break
@@ -390,29 +394,32 @@ async def test_connect_once_bind_failure_closes_off_loop():
     assert fake.closed is True and core.connected is False
 
 
-async def test_reconnect_readmits_device_that_recovered_during_the_outage():
+async def test_reconnect_faulted_device_needs_release_then_gets_jobs_again():
     first = _fake(LosingPort)
-    second = _fake()  # AGV-01 IDLE again on the new link
+    second = _fake()  # AGV-01 reports IDLE again on the new link
     ports = [first, second]
     b = Broadcaster()
     q = b.register()
     core = EcsCore(LAYOUT, connect=lambda: ports.pop(0), broadcaster=b)
     await core.connect_once()
-    first.set_state("AGV-01", State.FAULT)  # the Dispatcher excludes AGV-01
+    first.set_state("AGV-01", State.FAULT)
     first.lost = True
     core.step()
     assert core.connected is False
-    # FAULT -> IDLE happened while unbound: that STATE_CHANGED never arrives
     second.advance(90.0)
     _drain(q)
     assert await core.connect_once() is True
-    msgs = _drain(q)
-    restored = [m for m in msgs if m["type"] == "equipment"]
-    assert restored == [{"type": "equipment", "kind": "STATE_CHANGED", "equipment_id": "AGV-01",
-                         "sim_time": 90.0, "job_id": None, "reason": "LINK_RESTORED",
-                         "new_state": "IDLE"}]
+    restored = [m for m in _drain(q) if m["type"] == "equipment"]
+    assert {m["equipment_id"] for m in restored} == {"AGV-01", "ASC-A", "STS-01"}  # every device
+    assert all(m["reason"] == "LINK_RESTORED" and m["sim_time"] == 90.0 for m in restored)
+    assert next(m for m in restored if m["equipment_id"] == "AGV-01")["new_state"] == "IDLE"
+    # B2d: a device that FAULTed needs an explicit operator release, even though it reports IDLE
+    assert core.status()["needs_release"] == 1
     core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")])
-    assert "AGV-01" in [eid for eid, _ in second.calls]  # dispatched again: no longer excluded
+    assert "AGV-01" not in [eid for eid, _ in second.calls]
+    core.dispatcher.release("AGV-01")
+    core.submit([WorkOrder("C2", JobType.DISCHARGE, "STS-01", "A/1/1/2")])
+    assert "AGV-01" in [eid for eid, _ in second.calls]
 
 
 async def test_sim_time_going_backwards_flags_and_health_503(caplog):
