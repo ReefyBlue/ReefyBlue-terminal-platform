@@ -137,6 +137,7 @@ class World:
         raise ValueError(f"unknown location {loc!r}")
 
     def transfer_sts_to_agv(self, sts_id: str, container_id: str) -> str | None:
+        """Put ``container_id`` on the empty lane AGV that was sent for it (None if absent)."""
         spec = next((s for s in self.layout.sts if s.equipment_id == sts_id), None)
         if spec is None:
             raise KeyError(sts_id)
@@ -145,6 +146,7 @@ class World:
                 isinstance(eq, AGV)
                 and eq.cell in spec.lane_cells
                 and eq.loaded_container_id is None
+                and eq.job_container_id == container_id
             ):
                 eq.load(container_id)
                 return eq.equipment_id

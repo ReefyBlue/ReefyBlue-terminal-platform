@@ -47,6 +47,7 @@ class AGV(Equipment):
         self.position = grid.center(start_cell)
         self.battery_pct = 100.0
         self.loaded_container_id: str | None = None
+        self.job_container_id: str | None = None  # container of the last accepted job
         self.route: list[Cell] = []
         self._pending: Cell | None = None  # cell reserved ahead during a move
 
@@ -56,6 +57,12 @@ class AGV(Equipment):
 
     def accepts(self, job: Job) -> bool:
         return job.type == JobType.TRANSPORT
+
+    def assign_job(self, job: Job) -> bool:
+        ok = super().assign_job(job)
+        if ok:
+            self.job_container_id = job.container_id
+        return ok
 
     def load(self, container_id: str) -> None:
         if self.loaded_container_id is not None:

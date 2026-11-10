@@ -69,3 +69,17 @@ def test_transfer_sts_to_agv_and_agv_to_tp(world):
     assert world.port.snapshot("AGV-01").extra["loaded_container_id"] == "C1"
     assert world.transfer_sts_to_agv("STS-01", "C2") is None  # already loaded
     assert world.transfer_agv_to_tp("AGV-01") == "C1"
+
+
+def test_transfer_sts_to_agv_picks_the_agv_sent_for_the_container(world):
+    # Both lane cells hold an empty AGV; the box goes to the one sent for it,
+    # not to whichever AGV comes first in equipment order.
+    world.port.assign_job("AGV-01", Job("J1", JobType.TRANSPORT, "C2", "AGV-01", "STS-01"))
+    world.port.assign_job("AGV-02", Job("J2", JobType.TRANSPORT, "C1", "AGV-02", "STS-01"))
+    world.run(300)
+    lane = world.layout.sts[0].lane_cells
+    assert world.equipment["AGV-01"].cell in lane
+    assert world.equipment["AGV-02"].cell in lane
+    assert world.transfer_sts_to_agv("STS-01", "C1") == "AGV-02"
+    assert world.transfer_sts_to_agv("STS-01", "C2") == "AGV-01"
+    assert world.transfer_sts_to_agv("STS-01", "C3") is None  # no AGV was sent for C3
