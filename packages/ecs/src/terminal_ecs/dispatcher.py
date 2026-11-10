@@ -22,7 +22,8 @@ RECOVERY (any other JOB_FAILED, STATE_CHANGED->FAULT with a running job, watchdo
     any stage --on_transfer raises--> FAILED (TRANSFER_ERROR), AGV quarantined for good.
 
 Each STS serves its orders (DISCHARGE and LOAD together) in submit order: only the
-FIFO head may use the crane; the head is also exempt from the lane lookahead.
+FIFO head may use the crane; the head is also exempt from the lane lookahead, which
+counts every order whose AGV is bound to the crane area (``LOOKAHEAD_STAGES``).
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from terminal_model.types import Job, JobType, Kind, Position, State
 
 from terminal_ecs.orders import (
     HEAD_NEEDS_AGV_LATER,
-    LANE_STAGES,
+    LOOKAHEAD_STAGES,
     NEEDS_AGV,
     PENDING,
     PRE_CRANE,
@@ -232,7 +233,7 @@ class Dispatcher:
 
     def _dispatch_agvs(self, sts: str) -> None:
         mine = [r for r in self._open.values() if r.order.sts_id == sts]
-        in_lane = sum(r.stage in LANE_STAGES for r in mine)
+        in_lane = sum(r.stage in LOOKAHEAD_STAGES for r in mine)
         head = self._fifo_head(sts)
         for rec in mine:  # submit order
             if rec.stage not in NEEDS_AGV or rec.current_job_id is not None:

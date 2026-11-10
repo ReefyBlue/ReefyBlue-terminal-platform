@@ -117,14 +117,15 @@ def test_lookahead_limits_agvs_per_sts():
     assert [j.container_id for _, j in transports] == ["C1", "C2"]
     assert d.status()["pending"] == 3
 
-    # AGV-01 arrives → C1 AT_STS → DISCHARGING (no longer counted) → C3 gets an AGV
+    # AGV-01 arrives → C1 AT_STS → DISCHARGING: its AGV is still under the crane,
+    # so C1 still counts against the lookahead → no third AGV yet
     port.complete("AGV-01")
-    assert port.calls[-2][1].job_id == "C1-DISCHARGE-1"
-    assert (port.calls[-1][0], port.calls[-1][1].job_id) == ("AGV-03", "C3-TRANSPORT-1")
-    assert d.status()["pending"] == 2
-    # C1 moves to the yard: C2 and C3 still en route → no extra AGV
+    assert port.calls[-1][1].job_id == "C1-DISCHARGE-1"
+    assert d.status()["pending"] == 3
+    # C1 reaches TO_YARD (AGV leaves the crane area) → C3 gets an AGV
     port.complete("STS-01")
-    assert [j.job_id for _, j in port.calls if j.type is JobType.TRANSPORT][-1] == "C1-TRANSPORT-2"
+    transports = [(eid, j.job_id) for eid, j in port.calls if j.type is JobType.TRANSPORT]
+    assert transports[-2:] == [("AGV-01", "C1-TRANSPORT-2"), ("AGV-03", "C3-TRANSPORT-1")]
     assert d.status()["pending"] == 2
 
 
