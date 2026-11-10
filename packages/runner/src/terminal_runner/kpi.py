@@ -101,6 +101,7 @@ class KpiCollector:
         kpis["energy_kwh_per_move"] = energy / total_moves if total_moves else 0.0
         kpis["containers_done"] = float(len(self.dispatcher.completed))
         kpis["containers_failed"] = float(status["failed"])
+        kpis["containers_stuck"] = float(status["stuck"])
         return kpis
 
     @staticmethod

@@ -211,9 +211,17 @@ class AGV(Equipment):
         return self._auto_clear() if self._clearable() else None
 
     def _staging_route(self) -> list[Cell]:
-        return self.grid.path_to_nearest(
-            self.cell, self.staging_cells, avoid=self.grid.reserved_by_others(self.equipment_id)
-        )
+        others = self.grid.reserved_by_others(self.equipment_id)
+        route = self.grid.path_to_nearest(self.cell, self.staging_cells, avoid=others)
+        if route:
+            return route
+        # Boxed in: also route through cells of AGVs that wait for *our* cell. They
+        # give way (``_give_way``) once this AGV waits for theirs; otherwise an AGV
+        # arriving for the lane cell and the one leaving it block each other forever.
+        yielding = {c for c in others if self.grid.waiting_for(self.grid.owner_of(c)) == self.cell}
+        if not yielding:
+            return []
+        return self.grid.path_to_nearest(self.cell, self.staging_cells, avoid=others - yielding)
 
     def _auto_clear(self):
         """Idle on a handover cell for AUTO_CLEAR_AFTER_S: drive (BUSY, no job events)

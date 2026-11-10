@@ -314,3 +314,22 @@ def test_auto_clear_waits_when_no_staging_cell_is_reachable():
     rig.env.run(till=100)
     assert a.cell == (2, 0) and a.state == State.IDLE  # (1, 0) is behind a one-way lane
     assert states(rig) == [State.BUSY, State.IDLE]
+
+
+def test_boxed_in_agv_clears_through_an_agv_waiting_for_its_cell():
+    # The empty AGV-01 on lane cell (4, 0) can only leave via (5, 0) (held by a loaded
+    # AGV waiting for its LOAD) or (4, 1), where AGV-02 waits for (4, 0). AGV-01 must
+    # claim (4, 1) so that AGV-02 gives way; then AGV-02 reaches the lane cell.
+    rig = Rig(locs={"STS-01": (4, 0)})
+    a = rig.agv(1, (4, 0), handover=HANDOVER, staging=STAGING)
+    rig.grid.try_reserve((5, 0), "AGV-09")  # parked loaded AGV in the other lane cell
+    b = rig.agv(2, (4, 1), handover=HANDOVER, staging=STAGING)
+    b.load("C2")
+    assert b.assign_job(transport("STS-01", "J2"))
+    a.load("C1")
+    a.unload()  # the crane took AGV-01's box: it starts clearing the lane cell
+    rig.env.run(till=600)
+    assert [e.job_id for e in of_kind(rig, EventKind.JOB_COMPLETED)] == ["J2"]
+    assert b.cell == (4, 0)
+    assert a.cell in STAGING and a.state == State.IDLE
+    assert rig.owned_by("AGV-01") == [a.cell] and rig.owned_by("AGV-02") == [(4, 0)]

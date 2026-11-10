@@ -24,6 +24,13 @@ RECOVERY (any other JOB_FAILED, STATE_CHANGED->FAULT with a running job, watchdo
 Each STS serves its orders (DISCHARGE and LOAD together) in submit order: only the
 FIFO head may use the crane; the head is also exempt from the lane lookahead, which
 counts every order whose AGV is bound to the crane area (``LOOKAHEAD_STAGES``).
+While the head's AGV is not in the lane yet, non-head orders keep one lane slot free
+for it (at most ``lookahead_per_sts - 1`` of them lane-bound), and while a head LOAD
+still needs an AGV they also leave one AGV free.
+
+The watchdog cancels an AGV job that makes no progress for ``watchdog_s``; after
+``WATCHDOG_MAX_CANCELS`` cancels of the same order it logs an ERROR, marks the order
+``stuck`` (``status()["stuck"]``) and leaves it alone (the order is not failed).
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ from terminal_model.types import Job, JobType, Kind, Position, State
 
 from terminal_ecs.orders import (
     HEAD_NEEDS_AGV_LATER,
+    IN_LANE,
     LOOKAHEAD_STAGES,
     NEEDS_AGV,
     PENDING,
@@ -52,6 +60,8 @@ from terminal_ecs.orders import (
 from terminal_ecs.workorders import SlotProvider, WorkOrder, WorkOrderError
 
 log = logging.getLogger("terminal_ecs")
+
+WATCHDOG_MAX_CANCELS = 5
 
 _CRANE_JOB = {Stage.AT_STS: (JobType.DISCHARGE, Stage.DISCHARGING), Stage.AT_STS_LOAD: (JobType.LOAD, Stage.LOADING)}
 
@@ -134,6 +144,7 @@ class Dispatcher:
             "done": len(self.completed),
             "failed": self._failed,
             "replans": self._replans,
+            "stuck": sum(r.stuck for r in self._open.values()),
             # orders stuck with their box on an excluded/quarantined AGV
             "bound": sum(
                 r.stage in (Stage.TO_YARD, Stage.TO_STS)
@@ -236,11 +247,17 @@ class Dispatcher:
         mine = [r for r in self._open.values() if r.order.sts_id == sts]
         in_lane = sum(r.stage in LOOKAHEAD_STAGES for r in mine)
         head = self._fifo_head(sts)
+        non_head_in_lane = sum(r.stage in LOOKAHEAD_STAGES for r in mine if r is not head)
+        # Until the head's AGV stands in the lane, keep a lane slot free for it: the
+        # crane serves only the head, so a lane full of non-head AGVs would deadlock.
+        head_outside = head is not None and head.stage not in IN_LANE
         for rec in mine:  # submit order
             if rec.stage not in NEEDS_AGV or rec.current_job_id is not None:
                 continue
             if rec is not head:
                 if in_lane >= self.lookahead_per_sts:
+                    return
+                if head_outside and non_head_in_lane >= self.lookahead_per_sts - 1:
                     return
                 # A head LOAD will need an AGV later: keep one free for it, or the
                 # non-head AGVs park behind it in the lane and it starves.
@@ -250,6 +267,7 @@ class Dispatcher:
             if not self._send_agv(rec):
                 return  # no AGV available
             in_lane += 1
+            non_head_in_lane += rec is not head
 
     def _send_agv(self, rec: OrderRecord) -> bool:
         if rec.stage is Stage.AWAIT_AGV:
@@ -318,6 +336,7 @@ class Dispatcher:
         if rec is None:
             return
         self._detach(rec)
+        rec.watchdog_cancels, rec.stuck = 0, False  # the order made progress
         log.debug("completed %s on %s", ev.job_id, ev.equipment_id)
         agv = rec.agv_id or ev.equipment_id
         match rec.stage:
@@ -407,9 +426,19 @@ class Dispatcher:
         for job_id, eid in list(self._job_eq.items()):
             if eid not in self._agvs or now - self._last_progress.get(eid, now) <= self.watchdog_s:
                 continue
+            rec = self._by_job[job_id]
+            if rec.watchdog_cancels >= WATCHDOG_MAX_CANCELS:
+                if not rec.stuck:
+                    rec.stuck = True
+                    log.error(
+                        "watchdog: %s stuck on %s after %d cancels; no longer cancelling it",
+                        rec.cid, eid, rec.watchdog_cancels,
+                    )
+                continue
             log.error("watchdog: %s made no progress on %s for %.0f s", eid, job_id, now - self._last_progress[eid])
+            rec.watchdog_cancels += 1
             # Roll back first so the CANCELLED event the port may emit is ignored.
-            self._replan(self._by_job[job_id], eid, "WATCHDOG")
+            self._replan(rec, eid, "WATCHDOG")
             self.port.cancel_job(eid)
             self.port.reset(eid)
 

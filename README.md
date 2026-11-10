@@ -52,6 +52,7 @@ Tests: `uv run pytest -q` (inclusief de e2e-runs met 200 containers, marker `e2e
 | `energy_kwh_per_move` | energieverbruik per STS-move (kWh) |
 | `containers_done` | aantal afgeronde containers |
 | `containers_failed` | aantal mislukte containers |
+| `containers_stuck` | open orders die de watchdog na 5 annuleringen als vastgelopen markeerde (bij een geslaagde run 0) |
 | `sim_elapsed_s` | werkelijk gesimuleerde tijd van de run (s) |
 | `timed_out` | 1.0 als `duration_s` bereikt werd voordat alle orders klaar waren, anders 0.0 |
 

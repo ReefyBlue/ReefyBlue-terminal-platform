@@ -115,18 +115,16 @@ def test_mixed_fifo_per_sts():
     assert sts_jobs == ["C1-DISCHARGE-1", "C2-LOAD-1"]
 
 
-def test_fifo_head_bypasses_full_lane():
-    # Lookahead 1: a later DISCHARGE fills the lane while the head LOAD is still
-    # being unstacked. The head must still get an AGV, or the STS deadlocks.
+def test_lookahead_one_keeps_the_lane_for_the_head():
+    # Lookahead 1: the single lane slot is kept for the head LOAD that is still being
+    # unstacked; a later DISCHARGE filling it would leave the head no place (deadlock).
     port = make_port(n_agv=3)
     d = Dispatcher(port, FakeSlots(), lookahead_per_sts=1)
     d.submit([load("C1", slot="A/5/1/1"), discharge("C2")])
-    assert [(e, j.job_id) for e, j in port.calls if j.type is JobType.TRANSPORT] == [
-        ("AGV-01", "C2-TRANSPORT-1"),
-    ]
-    port.complete("AGV-01")  # C2 waits in the lane behind head C1
-    port.complete("ASC-A")  # C1 at the TP
+    assert [j.job_id for _, j in port.calls if j.type is JobType.TRANSPORT] == []
+    port.complete("ASC-A")  # C1 at the TP: the head gets an AGV
     assert port.calls[-1][1].job_id == "C1-TRANSPORT-1"
+    assert "C2-TRANSPORT-1" not in d.jobs
 
 
 def test_loaded_agv_gets_next_leg_once_idle_without_rejections(caplog):
@@ -176,3 +174,22 @@ def test_non_head_load_with_agv_to_tp_counts_against_lookahead():
     assert "C4" not in sent()  # C2 (en route) + C3 (AGV_TO_TP) fill the lookahead
     port.complete(sent()["C3"])  # C3 picked up -> TO_STS, still counted
     assert "C4" not in sent()
+
+
+def test_non_head_orders_keep_a_lane_slot_free_for_the_head():
+    """Head LOAD waits for a faulted ASC: at most lookahead-1 non-head orders may be
+    lane-bound, so the head's AGV still finds a free lane cell when it arrives."""
+    port = make_port(n_agv=4)
+    d = Dispatcher(port, FakeSlots())  # lookahead_per_sts = 2
+    port.set_state("ASC-A", State.FAULT)
+    d.submit([load("L1", slot="A/3/1/1"), discharge("D2", slot="A/1/1/1"), discharge("D3", slot="A/1/1/2")])
+    sent = [j.container_id for e, j in port.calls if e.startswith("AGV-")]
+    assert sent == ["D2"]  # D3 would fill the lane before the head's AGV is there
+
+    port.set_state("ASC-A", State.IDLE)  # head unstacks, its AGV is sent to the TP
+    port.complete("ASC-A")
+    assert last(port)[1] == "L1-TRANSPORT-1"
+    port.complete(last(port)[0])  # box on the AGV, heading for the STS
+    port.complete(last(port)[0])  # head AGV in the lane: the slot rule no longer applies
+    assert last(port)[1:3] == ("L1-LOAD-1", JobType.LOAD)
+    assert "D3" not in [j.container_id for e, j in port.calls if e.startswith("AGV-")]  # lookahead full

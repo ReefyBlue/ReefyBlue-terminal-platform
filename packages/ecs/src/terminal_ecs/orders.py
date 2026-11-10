@@ -41,6 +41,8 @@ LOOKAHEAD_STAGES = frozenset(
         Stage.AGV_TO_TP, Stage.TO_STS, Stage.AT_STS_LOAD, Stage.LOADING,  # load
     }
 )
+# Stages in which the order's AGV stands in the STS lane (under or next to the crane).
+IN_LANE = frozenset({Stage.AT_STS, Stage.AT_STS_LOAD})
 # Orders that have not been served by their STS yet; the per-STS FIFO runs over these.
 PRE_CRANE = frozenset(
     {
@@ -79,6 +81,8 @@ class OrderRecord:
     seq: int = 0  # set on every stage entry; FIFO key for waiting orders
     submit_seq: int = 0  # position in the TOS sequence; restored as ``seq`` on rollback
     fail_reason: str | None = None
+    watchdog_cancels: int = 0  # reset when one of the order's jobs completes
+    stuck: bool = False  # watchdog gave up re-cancelling (see Dispatcher._watchdog)
     job_counts: dict[JobType, int] = field(default_factory=dict)
 
     @property

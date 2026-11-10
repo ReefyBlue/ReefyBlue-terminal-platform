@@ -273,3 +273,29 @@ def test_open_counts_orders_parked_behind_a_faulted_crane():
     port.set_state("STS-01", State.FAULT)  # crane job rolled back, STS excluded
     st = d.status()
     assert (st["pending"], st["active_jobs"], st["open"]) == (0, 0, 1)
+
+
+def test_watchdog_gives_up_after_max_cancels_and_marks_order_stuck(caplog):
+    from terminal_ecs.dispatcher import WATCHDOG_MAX_CANCELS
+
+    port = make_port()
+    d = Dispatcher(port, FakeSlots(), watchdog_s=600.0)
+    port.set_state("AGV-02", State.FAULT)  # only AGV-01 is usable
+    d.submit([discharge("C1")])
+    for _ in range(WATCHDOG_MAX_CANCELS):
+        port.advance(601)
+        d.tick()  # no progress: cancel + reset, order rolled back
+        port.set_state("AGV-01", State.IDLE)  # the AGV is reset; C1 is re-sent on it
+    assert len(port.calls_cancel) == WATCHDOG_MAX_CANCELS
+    assert d.status()["stuck"] == 0
+    caplog.clear()
+    for _ in range(3):
+        port.advance(601)
+        d.tick()
+    assert len(port.calls_cancel) == WATCHDOG_MAX_CANCELS  # left alone
+    st = d.status()
+    assert (st["stuck"], st["failed"], st["open"]) == (1, 0, 1)
+    assert sum("stuck" in r.getMessage() for r in caplog.records if r.levelname == "ERROR") == 1
+
+    port.complete("AGV-01")  # it moves again after all: no longer stuck
+    assert d.status()["stuck"] == 0
