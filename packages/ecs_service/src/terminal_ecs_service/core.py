@@ -172,6 +172,7 @@ class EcsCore:
         try:
             self.port.drain_events()
             self._check_time(self.port.now())
+            self.publish_alarms()  # events from drain_events() may have changed the alarm list
             while self.port.now() >= self.next_tick:
                 self.dispatcher.tick()
                 self.kpi.sample()

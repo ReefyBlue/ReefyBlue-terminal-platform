@@ -499,8 +499,11 @@ async def test_core_link_blip_keeps_orders_and_resumes():
     assert core.status()["offline"] == 0 and core.alarms() == []
     cleared = _alarm_msgs(q, "cleared")
     assert len(cleared) == 3 and all(m["kind"] == "LINK_LOST" and m["sim_time"] == 5.0 for m in cleared)
+    n_calls = len(second.calls)
     second.complete("AGV-01")
-    assert core.dispatcher.status()["open"] == 1  # order advanced, not replanned
+    core.step()
+    assert len(second.calls) > n_calls  # the order moved on to its next stage on the new link
+    assert second.calls[n_calls][1].job_id != job.job_id
     assert core.status()["replans"] == 0
 
 
@@ -576,3 +579,15 @@ async def test_core_release_and_resolve_require_connection():
     with pytest.raises(RuntimeError, match="not connected"):
         core.resolve_job("J1", "completed")
     assert core.alarms() == []
+
+
+async def test_core_step_publishes_alarms_from_drained_events():
+    fake = _fake()
+    core, q = _core(fake)
+    await core.connect_once()
+    _drain(q)
+    fake.set_state("AGV-01", State.FAULT)
+    core.step()  # no 60 s boundary crossed
+    assert core.tick_count == 0
+    raised = _alarm_msgs(q, "raised")
+    assert [(m["kind"], m["equipment_id"]) for m in raised] == [("NEEDS_RELEASE", "AGV-01")]
