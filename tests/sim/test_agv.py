@@ -359,3 +359,14 @@ def test_fault_during_auto_clear_releases_the_cell_reserved_ahead():
     assert a.state == State.IDLE and a.cell in STAGING
     assert rig.owned_by("AGV-01") == [a.cell]
     assert rig.grid.waiting_for("AGV-01") is None
+
+
+def test_battery_is_clamped_at_zero_but_drain_keeps_counting(rig):
+    rig.locs["FAR"] = (19, 0)
+    a = rig.agv(1, (0, 0))
+    a.battery_pct = 0.1
+    assert a.assign_job(transport("FAR"))
+    rig.env.run(till=300)
+    assert a.cell == (19, 0)
+    assert a.battery_pct == 0.0
+    assert a.extra()["battery_used_pct"] == pytest.approx(19 * 20.0 * 0.02)

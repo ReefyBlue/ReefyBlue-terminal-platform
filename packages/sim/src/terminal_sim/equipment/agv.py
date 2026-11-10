@@ -61,7 +61,8 @@ class AGV(Equipment):
         self.staging_cells = staging_cells  # where an idle AGV parks
         self.cell: Cell = start_cell
         self.position = grid.center(start_cell)
-        self.battery_pct = 100.0
+        self.battery_pct = 100.0  # clamped at 0; no charging in Plan A
+        self.battery_used_pct = 0.0  # cumulative drain, not clamped
         self.loaded_container_id: str | None = None
         # container the AGV was last sent for, until it hands that box over (or the job ends early)
         self.job_container_id: str | None = None
@@ -193,7 +194,9 @@ class AGV(Equipment):
         self.cell = nxt
         self._pending = None
         self.position = self.grid.center(nxt)
-        self.battery_pct -= BATTERY_PCT_PER_M * self.grid.cell_m
+        drain = BATTERY_PCT_PER_M * self.grid.cell_m
+        self.battery_used_pct += drain
+        self.battery_pct = max(0.0, self.battery_pct - drain)
         self.energy_kwh += ENERGY_KWH_PER_KM * self.grid.cell_m / 1000
 
     # --- auto-clear of handover cells ----------------------------------------
@@ -271,6 +274,7 @@ class AGV(Equipment):
     def extra(self) -> dict:
         return {
             "battery_pct": self.battery_pct,
+            "battery_used_pct": self.battery_used_pct,
             "loaded_container_id": self.loaded_container_id,
             "route": [[c[0], c[1]] for c in self.route],
             "speed_mps": self.speed_mps,

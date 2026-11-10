@@ -107,7 +107,8 @@ class Dispatcher:
             elif kind is Kind.AGV:
                 self._agvs.append(eid)
             elif kind is Kind.ASC:
-                self._asc_by_block[eid.split("-", 1)[1]] = eid
+                block = port.snapshot(eid).extra.get("block_id")
+                self._asc_by_block[str(block) if block else eid.split("-", 1)[1]] = eid
 
         self._known: set[str] = set()
         self._open: dict[str, OrderRecord] = {}  # submit order = per-STS FIFO

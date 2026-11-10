@@ -31,6 +31,13 @@ class Scenario:
 def load_scenario(path: Path) -> Scenario:
     raw = yaml.safe_load(Path(path).read_text())
     fault_raw = raw.get("faults") or {}
+    kinds = {kind.value.lower() for kind in Kind}
+    for key, params in fault_raw.items():
+        if key not in kinds:
+            raise ValueError(f"unknown fault key faults.{key} (expected one of {sorted(kinds)})")
+        for field in params or {}:
+            if field not in ("mtbf_s", "mttr_s"):
+                raise ValueError(f"unknown fault key faults.{key}.{field} (expected mtbf_s, mttr_s)")
     faults = {
         kind: FaultParams(
             mtbf_s=float((fault_raw.get(kind.value.lower()) or {}).get("mtbf_s", 0)),

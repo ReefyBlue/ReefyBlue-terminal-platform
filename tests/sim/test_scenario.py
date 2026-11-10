@@ -56,3 +56,17 @@ def test_scenario_rejects_bad_faults(tmp_path, kind, mtbf, mttr, field):
     )
     with pytest.raises(ValueError, match=field):
         load_scenario(p)
+
+
+@pytest.mark.parametrize(
+    "faults,key",
+    [
+        ({"agvs": {"mtbf_s": 100, "mttr_s": 10}}, "faults.agvs"),
+        ({"agv": {"mtbf": 100, "mttr_s": 10}}, "faults.agv.mtbf"),
+    ],
+)
+def test_scenario_rejects_unknown_fault_keys(tmp_path, faults, key):
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump({**BASE, "faults": faults}))
+    with pytest.raises(ValueError, match=key.replace(".", r"\.")):
+        load_scenario(p)

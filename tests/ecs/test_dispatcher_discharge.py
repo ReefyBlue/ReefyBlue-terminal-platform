@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from fake_port import FakePort, FakeSlots, make_port
 from terminal_ecs.dispatcher import Dispatcher
@@ -389,3 +391,23 @@ def test_box_waiting_at_a_tp_moves_on_when_its_asc_faults():
     port.set_state("ASC-A", State.FAULT)
     eid, job = port.calls[-1]
     assert (eid, job.job_id, job.from_loc, job.to_loc) == ("AGV-02", "C2-TRANSPORT-3", "TP/A/WS", "TP/B/WS")
+
+
+def test_asc_block_comes_from_snapshot_extra():
+    class BlockIdPort(FakePort):
+        def snapshot(self, equipment_id):
+            snap = super().snapshot(equipment_id)
+            if equipment_id == "CRANE-7":
+                return dataclasses.replace(snap, extra={"block_id": "A"})
+            return snap
+
+    port = BlockIdPort({
+        "STS-01": (Kind.STS, Position(100, 0)),
+        "CRANE-7": (Kind.ASC, Position(50, 120)),  # id says nothing about the block
+        "AGV-01": (Kind.AGV, Position(10, 50)),
+    })
+    d = Dispatcher(port, FakeSlots())
+    d.submit([order("C1", slot="A/1/1/1")])  # accepted: block A has an ASC
+    for eid in ("AGV-01", "STS-01", "AGV-01"):
+        port.complete(eid)
+    assert port.calls[-1][0] == "CRANE-7"

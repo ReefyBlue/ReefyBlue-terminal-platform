@@ -6,7 +6,10 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
+PACKAGES = ["model", "sim", "ecs", "tos_stub", "runner"]
 
 
 def _sources(package_dir: str) -> list[Path]:
@@ -20,6 +23,12 @@ def _imports(package_dir: str, forbidden: list[str]) -> list[str]:
         for m in pattern.finditer(path.read_text()):
             hits.append(f"{path.relative_to(ROOT)}: {m.group().strip()}")
     return hits
+
+
+@pytest.mark.parametrize("package_dir", PACKAGES)
+def test_every_scanned_package_has_sources(package_dir):
+    # Guards against the rules below passing vacuously on a moved/empty package.
+    assert len(_sources(package_dir)) >= 1
 
 
 def test_ecs_never_imports_sim():
