@@ -42,21 +42,27 @@ def job_from_json(s: str) -> Job:
         raise ValueError(f"missing field: {e.args[0]}") from e
 
 
-def event_to_json(ev: EquipmentEvent) -> str:
-    return json.dumps(asdict(ev))
+def event_fields(ev: EquipmentEvent) -> dict[str, object]:
+    """OPC UA event field values for an equipment event (Seq/kind are set by the emitter)."""
+    return {
+        "EquipmentId": ev.equipment_id,
+        "SimTime": ev.sim_time,
+        "JobId": ev.job_id or "",
+        "Reason": ev.reason or "",
+        "NewState": ev.new_state.value if ev.new_state is not None else "",
+    }
 
 
-def event_from_json(s: str) -> EquipmentEvent:
-    d = _loads(s)
+def event_from_fields(kind: EventKind, fields: Mapping[str, object]) -> EquipmentEvent:
     try:
-        ns = d["new_state"]
+        new_state = str(fields["NewState"])
         return EquipmentEvent(
-            kind=EventKind(d["kind"]),
-            equipment_id=d["equipment_id"],
-            sim_time=d["sim_time"],
-            job_id=d["job_id"],
-            reason=d["reason"],
-            new_state=None if ns is None else State(ns),
+            kind=kind,
+            equipment_id=str(fields["EquipmentId"]),
+            sim_time=float(fields["SimTime"]),  # type: ignore[arg-type]
+            job_id=str(fields["JobId"]) or None,
+            reason=str(fields["Reason"]) or None,
+            new_state=State(new_state) if new_state else None,
         )
     except KeyError as e:
         raise ValueError(f"missing field: {e.args[0]}") from e

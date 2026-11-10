@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-import collections
 import logging
 from collections.abc import Callable
 
 from asyncua import Client, Node, Server, ua
 from terminal_model.port import EquipmentEvent, EquipmentSnapshot, EventKind
 from terminal_model.types import Kind, Position, State
-from terminal_opcua.codec import event_from_json, event_to_json
+from terminal_opcua.events import (
+    EventEmitter,
+    EventTypes,
+    event_from_ua,
+    resolve_event_types,
+    subscribe_terminal_events,
+)
 from terminal_opcua.nodeset import (
     EQUIPMENT_VARS,
     KIND_VARS,
@@ -30,20 +35,8 @@ METHOD_TIMEOUT_S = 2.0
 RECONNECT_S = 5.0
 CONNECT_TIMEOUT_S = 2.0
 WATCHDOG_S = 1.0
-EVENT_QUEUE = 100  # server-side FIFO per monitored item: no coalescing between publishes
 FAULT_REASON = "UPSTREAM_DISCONNECTED"
 RECOVERY_REASON = "UPSTREAM_RECONNECTED"
-
-
-def _is_event(payload: object) -> bool:
-    """True if ``payload`` is a decodable event (a fresh upstream has LastEvent "")."""
-    if not isinstance(payload, str) or not payload:
-        return False
-    try:
-        event_from_json(payload)
-    except (ValueError, TypeError):
-        return False
-    return True
 
 
 async def _safe_disconnect(client: Client) -> None:
@@ -140,16 +133,27 @@ class _UpstreamLink:
 class EquipmentMirror(_UpstreamLink):
     """Gateway-side copy of one equipment object, kept in sync with its upstream server.
 
-    Invariant: LastEvent is never written without bumping EventSeq, so a consumer
-    pairing LastEvent/EventSeq notifications FIFO never shifts. Gateway seq is
-    ``upstream seq + offset``; the offset is 0 until a Fault event (upstream lost)
-    has been synthesized with ``last + 1``, and is re-derived on every resync so the
-    next upstream event maps strictly above everything delivered so far.
+    Upstream OPC UA events for this equipment are re-emitted by the mirror's own
+    ``EventEmitter``: the gateway Seq is the mirror's, strictly increasing and never
+    derived from the upstream Seq. Events the upstream emitted while the link was
+    down are lost; that shows up as an upstream Seq gap in the log (the ECS already
+    treats the device as FAULT during the outage and replans from the snapshot).
 
-    A lost link is reported as STATE_CHANGED -> FAULT (``UPSTREAM_DISCONNECTED``); on
-    reconnect, after any delivery of the upstream's latest event, a STATE_CHANGED to
-    the upstream's current state (``UPSTREAM_RECONNECTED``) follows, so the ECS stops
-    excluding the device.
+    A lost link is reported as STATE_CHANGED -> FAULT (``UPSTREAM_DISCONNECTED``), once
+    per outage; on reconnect a STATE_CHANGED to the upstream's current state
+    (``UPSTREAM_RECONNECTED``) follows, so the ECS stops excluding the device.
+
+    Subscribe-before-read invariant: on (re)connect the data-change and event
+    subscriptions are in place *before* the snapshot is read. OPC UA events have no
+    initial value, so anything the upstream emits after subscribing is delivered, and
+    anything before is covered by the snapshot read that follows. ``_write_lock`` is
+    held from the snapshot read through the recovery event, and forwarded events take
+    the same lock, so events arriving meanwhile queue behind the recovery event (FIFO)
+    and the last STATE_CHANGED the ECS sees matches the upstream's latest state.
+    Data changes take the lock too, so a newer value is never overwritten by the
+    snapshot.
+    Duplicates this can cause are harmless (a repeated STATE_CHANGED is idempotent for
+    the ECS; JOB_COMPLETED for an unknown job is ignored).
     """
 
     def __init__(
@@ -167,18 +171,19 @@ class EquipmentMirror(_UpstreamLink):
         self.var_names = (*EQUIPMENT_VARS, *KIND_VARS[kind])
         self.obj: Node | None = None
         self._sim_time = 0.0
-        self._seq = 0          # last EventSeq written on the gateway
-        self._offset = 0       # gateway seq = upstream seq + offset
+        self._emitter: EventEmitter | None = None
+        self._up_types: EventTypes | None = None
+        # Last upstream Seq seen (0: none yet). Deliberately kept across reconnects, so
+        # events lost during an outage show up as a Seq gap (spec section 5); a restarted
+        # upstream (Seq back to 1) stays silent, as the gap rule only fires for
+        # seq > _up_seq + 1.
+        self._up_seq = 0
         self._fault_announced = False
         self._write_lock = asyncio.Lock()
         self._path: list[str] = []
         self._uobj: Node | None = None
         self._uidx = 0
         self._names: dict[ua.NodeId, str] = {}
-        self._le_queue: collections.deque[str] = collections.deque()
-        self._last_upstream_le = ""            # pairing fallback for EventSeq notifications
-        self._delivered_up_seq: int | None = None  # upstream seq of the last delivered event
-        self._delivered_le = ""                # upstream LastEvent JSON last delivered
 
     def set_sim_time(self, t: float) -> None:
         self._sim_time = float(t)
@@ -192,6 +197,8 @@ class EquipmentMirror(_UpstreamLink):
             assign_job=self._assign, cancel_job=self._cancel, reset=self._reset)
         self.obj = await create_equipment_object(
             self.server, self.idx, self.types, self.parent, snap, handlers)
+        self._emitter = await EventEmitter.create(
+            self.server, self.types.events, self.obj, self.equipment_id)
         self._path = await self._upstream_path()
         self._launch()
 
@@ -227,62 +234,33 @@ class EquipmentMirror(_UpstreamLink):
         assert self.obj is not None
         await (await get_var(self.obj, name)).write_value(to_variant(name, value))
 
-    async def _write_event(self, last_event: str, seq: int) -> None:
-        """LastEvent first, then EventSeq; ``seq`` must exceed the last written one."""
-        assert seq > self._seq, (seq, self._seq)
-        await self._write("LastEvent", last_event)
-        self._seq = seq
-        await self._write("EventSeq", seq)
-
-    async def _deliver_upstream(self, up_seq: int, last_event: str) -> None:
-        """Deliver one upstream event (caller holds the write lock)."""
-        mapped = up_seq + self._offset
-        if mapped <= self._seq:
-            mapped = self._seq + 1
-            log.warning("%s: upstream EventSeq %d not ahead of gateway %d; offset now %d",
-                        self.equipment_id, up_seq, self._seq, mapped - up_seq)
-        self._offset = mapped - up_seq
-        await self._write_event(last_event, mapped)
-        self._delivered_up_seq, self._delivered_le = up_seq, last_event
+    async def _emit(self, ev: EquipmentEvent) -> None:
+        assert self._emitter is not None
+        await self._emitter.emit(ev)
 
     async def _on_connected(self, client: Client) -> None:
         uidx = await client.get_namespace_index(NAMESPACE_URI)
         uobj = await client.nodes.objects.get_child([f"{uidx}:{n}" for n in self._path])
+        up_types = await resolve_event_types(client)
         nodes = [await uobj.get_child(f"{uidx}:{n}") for n in self.var_names]
-        values = await client.read_values(nodes)
-        current = dict(zip(self.var_names, values, strict=True))
-        async with self._write_lock:
-            for name, value in current.items():
-                if name not in ("LastEvent", "EventSeq"):
-                    await self._write(name, value)
-            up_seq, up_le = int(current["EventSeq"]), current["LastEvent"]
-            self._le_queue.clear()
-            self._last_upstream_le = up_le
-            if (up_seq != self._delivered_up_seq and up_le != self._delivered_le
-                    and _is_event(up_le)):
-                # new events (or an upstream restart) while away: deliver the latest
-                # one above everything delivered; adopt the upstream seq verbatim
-                # when it is already ahead (first connect, no Fault in between)
-                new_seq = max(self._seq + 1, up_seq)
-                self._offset = new_seq - up_seq
-                await self._write_event(up_le, new_seq)
-            else:
-                # nothing new: write no event, but map the next upstream seq above ours
-                self._offset = self._seq - up_seq
-            if self._fault_announced:
-                await self._announce_recovery(current["State"], up_seq)
-            if self._offset:
-                log.warning("%s: upstream EventSeq %d mapped with offset %d after resync",
-                            self.equipment_id, up_seq, self._offset)
-            self._delivered_up_seq, self._delivered_le = up_seq, up_le
-            self._fault_announced = False
         self._names = {n.nodeid: name for n, name in zip(nodes, self.var_names, strict=True)}
-        self._uobj, self._uidx = uobj, uidx
+        self._up_types = up_types
+        # Subscribe before reading the snapshot (see class docstring): an event emitted
+        # upstream in between would otherwise be lost for good.
         sub = await client.create_subscription(SUBSCRIPTION_PERIOD_MS, self)
-        await sub.subscribe_data_change(
-            nodes, queuesize=EVENT_QUEUE, sampling_interval=0.0)
+        await sub.subscribe_data_change(nodes, sampling_interval=0.0)
+        await subscribe_terminal_events(client, sub, up_types)
+        async with self._write_lock:  # forwarded events queue behind the recovery
+            values = await client.read_values(nodes)
+            current = dict(zip(self.var_names, values, strict=True))
+            for name, value in current.items():
+                await self._write(name, value)
+            if self._fault_announced:
+                await self._announce_recovery(current["State"])
+            self._fault_announced = False
+        self._uobj, self._uidx = uobj, uidx
 
-    async def _announce_recovery(self, upstream_state: object, up_seq: int) -> None:
+    async def _announce_recovery(self, upstream_state: object) -> None:
         """After a synthesized Fault: report the upstream's actual state (caller holds the
         write lock). The ECS excludes a device until STATE_CHANGED -> IDLE, which the
         upstream never sends when only the link was down. Skipped when the upstream is
@@ -295,39 +273,42 @@ class EquipmentMirror(_UpstreamLink):
             return
         if state is State.FAULT:
             return
-        ev = EquipmentEvent(
+        await self._emit(EquipmentEvent(
             EventKind.STATE_CHANGED, self.equipment_id, self._sim_time,
-            reason=RECOVERY_REASON, new_state=state)
-        await self._write_event(event_to_json(ev), self._seq + 1)
-        self._offset = self._seq - up_seq  # next upstream event maps above the recovery
+            reason=RECOVERY_REASON, new_state=state))
+
+    async def event_notification(self, event) -> None:
+        if self._up_types is None or self.obj is None:
+            return
+        try:
+            seq, ev = event_from_ua(event, self._up_types)
+        except ValueError as e:
+            log.warning("%s: undecodable upstream event skipped: %s", self.equipment_id, e)
+            return
+        if ev.equipment_id != self.equipment_id:
+            return
+        # Each notification runs in its own asyncua task; no await before the lock, so
+        # tasks reach it in delivery order and asyncio.Lock (FIFO) keeps that order.
+        async with self._write_lock:
+            if self._up_seq and seq > self._up_seq + 1:
+                log.warning("%s: upstream Seq gap %d -> %d", self.equipment_id, self._up_seq, seq)
+            self._up_seq = seq
+            try:
+                await self._emit(ev)
+            except Exception:
+                log.exception("%s: re-emitting upstream event failed", self.equipment_id)
 
     async def datachange_notification(self, node: Node, val, data) -> None:
         name = self._names.get(node.nodeid)
         if name is None or self.obj is None:
             return
-        try:
-            if name == "LastEvent":
-                # paired with the EventSeq notification that follows it (upstream
-                # always writes LastEvent before EventSeq)
-                self._le_queue.append(val)
-                return
-            if name == "EventSeq":
-                async with self._write_lock:
-                    if self._le_queue:
-                        self._last_upstream_le = self._le_queue.popleft()
-                    le, up_seq = self._last_upstream_le, int(val)
-                    if not _is_event(le):
-                        log.warning("%s: EventSeq %d without a decodable LastEvent; skipped",
-                                    self.equipment_id, up_seq)
-                        return
-                    if (le == self._delivered_le and self._delivered_up_seq is not None
-                            and up_seq <= self._delivered_up_seq):
-                        return  # already delivered (e.g. initial notification after resync)
-                    await self._deliver_upstream(up_seq, le)
-                return
-            await self._write(name, val)
-        except Exception:
-            log.exception("%s: mirroring %s failed", self.equipment_id, name)
+        # Same lock as the snapshot write: a newer value that arrives during the
+        # snapshot read is written after it, not overwritten by it.
+        async with self._write_lock:
+            try:
+                await self._write(name, val)
+            except Exception:
+                log.exception("%s: mirroring %s failed", self.equipment_id, name)
 
     async def status_change_notification(self, status) -> None:
         """Subscription status changes are handled by the connection-loss path."""
@@ -343,7 +324,7 @@ class EquipmentMirror(_UpstreamLink):
         try:
             async with self._write_lock:
                 await self._write("State", State.FAULT.value)
-                await self._write_event(event_to_json(ev), self._seq + 1)
+                await self._emit(ev)
         except Exception:
             log.exception("%s: writing synthesized Fault failed", self.equipment_id)
 
