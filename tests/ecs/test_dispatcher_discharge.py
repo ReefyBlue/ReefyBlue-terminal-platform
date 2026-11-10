@@ -1,32 +1,10 @@
 from __future__ import annotations
 
 import pytest
-from fake_port import FakePort
+from fake_port import FakePort, FakeSlots, make_port
 from terminal_ecs.dispatcher import Dispatcher
 from terminal_ecs.workorders import WorkOrder, WorkOrderError
 from terminal_model.types import Job, JobType, Kind, Position, State
-
-
-class FakeSlots:
-    def __init__(self, slots: list[str] | None = None) -> None:
-        self._slots = list(slots or [])
-        self.calls: list[tuple[str, str | None]] = []
-
-    def next_slot(self, block: str, exclude: str | None = None) -> str | None:
-        self.calls.append((block, exclude))
-        return self._slots.pop(0) if self._slots else None
-
-
-def make_port(n_agv: int = 2) -> FakePort:
-    eq: dict[str, tuple[Kind, Position]] = {
-        "STS-01": (Kind.STS, Position(100, 0)),
-        "ASC-A": (Kind.ASC, Position(50, 120)),
-        "AGV-01": (Kind.AGV, Position(10, 50)),
-        "AGV-02": (Kind.AGV, Position(300, 50)),
-    }
-    for i in range(3, n_agv + 1):
-        eq[f"AGV-{i:02d}"] = (Kind.AGV, Position(400 + 10 * i, 50))
-    return FakePort(eq)
 
 
 def order(cid: str, slot: str = "A/1/1/1", sts: str = "STS-01") -> WorkOrder:

@@ -91,3 +91,25 @@ class FakePort:
     def _emit(self, ev: EquipmentEvent) -> None:
         for cb in list(self._subs):
             cb(ev)
+
+
+class FakeSlots:
+    def __init__(self, slots: list[str] | None = None) -> None:
+        self._slots = list(slots or [])
+        self.calls: list[tuple[str, str | None]] = []
+
+    def next_slot(self, block: str, exclude: str | None = None) -> str | None:
+        self.calls.append((block, exclude))
+        return self._slots.pop(0) if self._slots else None
+
+
+def make_port(n_agv: int = 2) -> FakePort:
+    eq: dict[str, tuple[Kind, Position]] = {
+        "STS-01": (Kind.STS, Position(100, 0)),
+        "ASC-A": (Kind.ASC, Position(50, 120)),
+        "AGV-01": (Kind.AGV, Position(10, 50)),
+        "AGV-02": (Kind.AGV, Position(300, 50)),
+    }
+    for i in range(3, n_agv + 1):
+        eq[f"AGV-{i:02d}"] = (Kind.AGV, Position(400 + 10 * i, 50))
+    return FakePort(eq)
