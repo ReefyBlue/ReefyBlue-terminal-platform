@@ -37,3 +37,6 @@ blocks:
     rows: 6
     tiers: 4
 agv_start_cells: [[0, 2], [1, 2], [2, 2], [3, 2], [4, 2], [5, 2]]
+opcua:
+  base_port: 48400
+  host: localhost

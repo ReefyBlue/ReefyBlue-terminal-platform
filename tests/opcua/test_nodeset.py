@@ -170,3 +170,39 @@ async def test_create_control_object(server):
         await o.call_method(f"{idx}:Stop")
         assert await o.call_method(f"{idx}:PrefillYard", "[]") is False
     assert stopped == [1] and prefilled == ["[]"]
+
+
+async def test_async_handlers_are_awaited(server):
+    idx, types = await nodeset.register_types(server)
+    folders = await nodeset.ensure_folders(server, idx, server.nodes.objects)
+    calls = []
+
+    async def assign(s):
+        await asyncio.sleep(0)
+        calls.append(s)
+        return True
+
+    async def nope():
+        return False
+
+    h = nodeset.EquipmentHandlers(assign, nope, nope)
+    await nodeset.create_equipment_object(
+        server, idx, types, folders["Fleet"], _agv_snap(), h)
+
+    async def stop():
+        calls.append("stop")
+
+    async def prefill(s):
+        return True
+
+    await nodeset.create_control_object(
+        server, idx, types, folders["Terminal"], stop=stop, prefill=prefill)
+    async with Client(server.url) as c:
+        o = await c.nodes.objects.get_child(
+            [f"{idx}:Terminal", f"{idx}:Fleet", f"{idx}:AGV-01"])
+        assert await o.call_method(f"{idx}:AssignJob", "{}") is True
+        assert await o.call_method(f"{idx}:Reset") is False
+        clk = await c.nodes.objects.get_child([f"{idx}:Terminal", f"{idx}:Clock"])
+        await clk.call_method(f"{idx}:Stop")
+        assert await clk.call_method(f"{idx}:PrefillYard", "[]") is True
+    assert calls == ["{}", "stop"]

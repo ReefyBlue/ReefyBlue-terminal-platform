@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGES = ["model", "sim", "ecs", "tos_stub", "runner"]
+PACKAGES = ["model", "sim", "ecs", "tos_stub", "runner", "gateway"]
 
 
 def _sources(package_dir: str) -> list[Path]:
@@ -53,6 +53,15 @@ def test_tos_stub_imports_neither_sim_nor_runner():
 
 def test_runner_may_import_all_packages():
     assert _imports("runner", ["terminal_model", "terminal_sim", "terminal_ecs", "terminal_tos_stub"])
+
+
+def test_gateway_imports_only_model_and_opcua():
+    assert _imports("gateway", ["terminal_sim", "terminal_ecs", "terminal_tos_stub", "terminal_runner"]) == []
+    allowed = {"terminal_model", "terminal_opcua", "terminal_gateway", "asyncua", "yaml", "__future__"}
+    top = re.compile(r"^\s*(?:from|import)\s+([A-Za-z_]\w*)", re.MULTILINE)
+    found = {m.group(1) for p in _sources("gateway") for m in top.finditer(p.read_text())}
+    assert found - allowed - set(sys.stdlib_module_names) == set()
+    assert "terminal_opcua" in found
 
 
 def test_guard_detects_a_real_import_but_not_a_docstring(tmp_path, monkeypatch):

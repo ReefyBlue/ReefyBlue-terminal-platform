@@ -13,6 +13,7 @@ dev = [
     "terminal-tos-stub",
     "terminal-runner",
     "terminal-opcua",
+    "terminal-gateway",
     "pytest-asyncio>=1.4.1.post1",
 ]
 
@@ -23,6 +24,7 @@ terminal-ecs = { workspace = true }
 terminal-tos-stub = { workspace = true }
 terminal-runner = { workspace = true }
 terminal-opcua = { workspace = true }
+terminal-gateway = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -39,4 +41,5 @@ pythonpath = [
     "packages/tos_stub/src",
     "packages/runner/src",
     "packages/opcua/src",
+    "packages/gateway/src",
 ]

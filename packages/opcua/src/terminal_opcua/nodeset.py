@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import weakref
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from asyncua import Node, Server, ua
@@ -74,9 +75,17 @@ class Types:
 
 @dataclass
 class EquipmentHandlers:
-    assign_job: Callable[[str], bool]
-    cancel_job: Callable[[], bool]
-    reset: Callable[[], bool]
+    """Method handlers; each may be a plain function or a coroutine function."""
+
+    assign_job: Callable[[str], bool | Awaitable[bool]]
+    cancel_job: Callable[[], bool | Awaitable[bool]]
+    reset: Callable[[], bool | Awaitable[bool]]
+
+
+async def _resolve(result):
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def to_variant(name: str, value: object) -> ua.Variant:
@@ -152,7 +161,8 @@ def _string_arg(name: str) -> ua.Argument:
 
 # Method wrappers are coroutines: asyncua awaits them on the event loop, so the
 # synchronous handlers run on the loop thread (sync wrappers would run in a
-# ThreadPoolExecutor and race with the sim/runner loop).
+# ThreadPoolExecutor and race with the sim/runner loop). A handler that returns
+# an awaitable (coroutine function, e.g. the gateway forwarding upstream) is awaited.
 async def create_equipment_object(
     server: Server, idx: int, types: Types, parent: Node,
     snap: EquipmentSnapshot, handlers: EquipmentHandlers,
@@ -164,15 +174,15 @@ async def create_equipment_object(
 
     @uamethod
     async def assign(_parent, job_json):
-        return bool(handlers.assign_job(job_json))
+        return bool(await _resolve(handlers.assign_job(job_json)))
 
     @uamethod
     async def cancel(_parent):
-        return bool(handlers.cancel_job())
+        return bool(await _resolve(handlers.cancel_job()))
 
     @uamethod
     async def reset(_parent):
-        return bool(handlers.reset())
+        return bool(await _resolve(handlers.reset()))
 
     await obj.add_method(idx, "AssignJob", assign, [_string_arg("jobJson")], [_B])
     await obj.add_method(idx, "CancelJob", cancel, [], [_B])
@@ -183,7 +193,8 @@ async def create_equipment_object(
 
 async def create_control_object(
     server: Server, idx: int, types: Types, parent: Node, *,
-    stop: Callable[[], None], prefill: Callable[[str], bool],
+    stop: Callable[[], None | Awaitable[None]],
+    prefill: Callable[[str], bool | Awaitable[bool]],
 ) -> Node:
     nodes = await instantiate(
         parent, server.get_node(types.control), bname=f"{idx}:Clock", idx=idx)
@@ -193,11 +204,11 @@ async def create_control_object(
 
     @uamethod
     async def _stop(_parent):
-        stop()
+        await _resolve(stop())
 
     @uamethod
     async def _prefill(_parent, json_str):
-        return bool(prefill(json_str))
+        return bool(await _resolve(prefill(json_str)))
 
     await obj.add_method(idx, "Stop", _stop, [], [])
     await obj.add_method(idx, "PrefillYard", _prefill, [_string_arg("json")], [_B])

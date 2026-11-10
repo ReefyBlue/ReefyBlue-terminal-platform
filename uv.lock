@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "terminal-ecs",
+    "terminal-gateway",
     "terminal-model",
     "terminal-opcua",
     "terminal-platform",
@@ -390,6 +391,23 @@ dependencies = [
 requires-dist = [{ name = "terminal-model", editable = "packages/model" }]
 
 [[package]]
+name = "terminal-gateway"
+version = "0.1.0"
+source = { editable = "packages/gateway" }
+dependencies = [
+    { name = "pyyaml" },
+    { name = "terminal-model" },
+    { name = "terminal-opcua" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pyyaml", specifier = ">=6" },
+    { name = "terminal-model", editable = "packages/model" },
+    { name = "terminal-opcua", editable = "packages/opcua" },
+]
+
+[[package]]
 name = "terminal-model"
 version = "0.1.0"
 source = { editable = "packages/model" }
@@ -419,6 +437,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "terminal-ecs" },
+    { name = "terminal-gateway" },
     { name = "terminal-model" },
     { name = "terminal-opcua" },
     { name = "terminal-runner" },
@@ -433,6 +452,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio", specifier = ">=1.4.1.post1" },
     { name = "terminal-ecs", editable = "packages/ecs" },
+    { name = "terminal-gateway", editable = "packages/gateway" },
     { name = "terminal-model", editable = "packages/model" },
     { name = "terminal-opcua", editable = "packages/opcua" },
     { name = "terminal-runner", editable = "packages/runner" },
