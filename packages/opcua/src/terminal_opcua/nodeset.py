@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -77,7 +79,7 @@ class EquipmentHandlers:
     reset: Callable[[], bool]
 
 
-def _variant(name: str, value: object) -> ua.Variant:
+def to_variant(name: str, value: object) -> ua.Variant:
     vt = VAR_TYPES[name]
     if vt is _S:
         value = "" if value is None else str(value)
@@ -108,7 +110,15 @@ async def register_types(server: Server) -> tuple[int, Types]:
         kind_nodes[kind] = t
     # Method declarations on the types carry no modelling rule, so instantiate()
     # skips them; per-instance methods are added in create_*_object.
-    noop_b = uamethod(lambda parent, *a: True)
+    
+    @uamethod
+    async def noop_b(parent, *a):
+        return True
+
+    @uamethod
+    async def noop_stop(parent):
+        return None
+
     in_s = ua.Argument()
     in_s.Name = "jobJson"
     in_s.DataType = ua.NodeId(ua.ObjectIds.String)
@@ -117,7 +127,7 @@ async def register_types(server: Server) -> tuple[int, Types]:
     await equipment.add_method(idx, "CancelJob", noop_b, [], [_B])
     await equipment.add_method(idx, "Reset", noop_b, [], [_B])
     control = await base.add_object_type(idx, "ControlType")
-    await control.add_method(idx, "Stop", uamethod(lambda parent: None), [], [])
+    await control.add_method(idx, "Stop", noop_stop, [], [])
     in_j = ua.Argument()
     in_j.Name = "json"
     in_j.DataType = ua.NodeId(ua.ObjectIds.String)
@@ -140,6 +150,9 @@ def _string_arg(name: str) -> ua.Argument:
     return a
 
 
+# Method wrappers are coroutines: asyncua awaits them on the event loop, so the
+# synchronous handlers run on the loop thread (sync wrappers would run in a
+# ThreadPoolExecutor and race with the sim/runner loop).
 async def create_equipment_object(
     server: Server, idx: int, types: Types, parent: Node,
     snap: EquipmentSnapshot, handlers: EquipmentHandlers,
@@ -150,15 +163,15 @@ async def create_equipment_object(
     obj = nodes[0]
 
     @uamethod
-    def assign(_parent, job_json):
+    async def assign(_parent, job_json):
         return bool(handlers.assign_job(job_json))
 
     @uamethod
-    def cancel(_parent):
+    async def cancel(_parent):
         return bool(handlers.cancel_job())
 
     @uamethod
-    def reset(_parent):
+    async def reset(_parent):
         return bool(handlers.reset())
 
     await obj.add_method(idx, "AssignJob", assign, [_string_arg("jobJson")], [_B])
@@ -177,11 +190,11 @@ async def create_control_object(
     obj = nodes[0]
 
     @uamethod
-    def _stop(_parent):
+    async def _stop(_parent):
         stop()
 
     @uamethod
-    def _prefill(_parent, json_str):
+    async def _prefill(_parent, json_str):
         return bool(prefill(json_str))
 
     await obj.add_method(idx, "Stop", _stop, [], [])
@@ -210,15 +223,27 @@ async def block_folder(server: Server, idx: int, yard: Node, block: str) -> Node
     return await _child_or_create(yard, idx, f"Block-{block}")
 
 
-async def _var(node: Node, name: str) -> Node:
+# NodeIds repeat across servers (numeric ids per namespace), so per-node state
+# is scoped by the node's session (one per server) as well as by NodeId.
+_VAR_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_EMITTERS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+async def get_var(node: Node, name: str) -> Node:
+    """Child variable of an equipment object by browse name (cached per object)."""
+    cache = _VAR_CACHE.setdefault(node.session, {}).setdefault(node.nodeid, {})
+    found = cache.get(name)
+    if found is not None:
+        return found
     for c in await node.get_children():
         if (await c.read_browse_name()).Name == name:
+            cache[name] = c
             return c
     raise KeyError(name)
 
 
 async def _write(node: Node, name: str, value: object) -> None:
-    await (await _var(node, name)).write_value(_variant(name, value))
+    await (await get_var(node, name)).write_value(to_variant(name, value))
 
 
 async def write_snapshot(node: Node, snap: EquipmentSnapshot) -> None:
@@ -241,8 +266,28 @@ async def write_snapshot(node: Node, snap: EquipmentSnapshot) -> None:
         await _write(node, var, value)
 
 
+class EventEmitter:
+    """Emits events on one equipment node; owns the in-memory EventSeq counter."""
+
+    def __init__(self, node: Node) -> None:
+        self.node = node
+        self.seq = 0
+        self._lock = asyncio.Lock()
+
+    async def emit(self, ev: EquipmentEvent) -> None:
+        # Lock keeps LastEvent/EventSeq in order; the counter is never re-read
+        # from the node, so concurrent emits cannot lose increments.
+        async with self._lock:
+            self.seq += 1
+            await _write(self.node, "LastEvent", event_to_json(ev))
+            seq = await get_var(self.node, "EventSeq")
+            await seq.write_value(ua.Variant(self.seq, ua.VariantType.UInt64))
+
+
 async def emit_event(node: Node, ev: EquipmentEvent) -> None:
-    await _write(node, "LastEvent", event_to_json(ev))
-    seq = await _var(node, "EventSeq")
-    cur = await seq.read_value()
-    await seq.write_value(ua.Variant(int(cur) + 1, ua.VariantType.UInt64))
+    """Compatibility wrapper: one EventEmitter per node, kept in a registry."""
+    scope = _EMITTERS.setdefault(node.session, {})
+    em = scope.get(node.nodeid)
+    if em is None:
+        em = scope[node.nodeid] = EventEmitter(node)
+    await em.emit(ev)
