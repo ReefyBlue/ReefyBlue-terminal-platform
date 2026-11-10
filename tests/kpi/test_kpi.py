@@ -7,7 +7,7 @@ from terminal_ecs.dispatcher import Dispatcher
 from terminal_ecs.orders import LoggedJob
 from terminal_ecs.workorders import WorkOrder
 from terminal_model.types import Job, JobType, State
-from terminal_runner.kpi import KpiCollector
+from terminal_kpi.kpi import KpiCollector
 
 
 def setup(faults=None):
@@ -171,6 +171,7 @@ def test_kpi_key_order_is_stable():
         "containers_done",
         "containers_failed",
         "containers_stuck",
+        "sim_elapsed_s",
     ]
 
 
@@ -228,3 +229,18 @@ def test_csv_header_once(tmp_path: Path):
     assert lines[0].split(",")[1:] == list(kpis)
     assert lines[1].split(",")[0] == "1"
     assert lines[2].split(",")[0] == "2"
+
+
+def test_snapshot_is_non_destructive_and_matches_finish():
+    port, disp, kpi = setup()
+    for i in range(10):
+        port.advance(300)
+        run_job(port, "STS-01", JobType.DISCHARGE, cid=f"C{i:04d}")
+    kpi.sample()
+    a = kpi.snapshot(3600.0)
+    b = kpi.snapshot(3600.0)
+    assert a == b and kpi.finish(3600.0) == a
+    assert list(a) == list(b)
+    assert a["moves_per_hour_total"] == 10.0
+    assert a["sim_elapsed_s"] == 3600.0
+    assert list(a)[-1] == "sim_elapsed_s"

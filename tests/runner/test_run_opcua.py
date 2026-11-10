@@ -169,3 +169,22 @@ def test_matching_fleet_passes_check(monkeypatch):
     scenario = load_scenario(ROOT / "scenarios/baseline.yaml")
     fake, layout = _fake(monkeypatch, scenario)
     run._check_fleet(fake, scenario, layout)  # no SystemExit
+
+
+class _DrainFailsAfterReachingTime:
+    """``wait_for_sim_time`` reaches ``t`` at once; the final drain finds the link dead."""
+
+    def wait_for_sim_time(self, t, timeout_s):
+        return True
+
+    def drain_events(self):
+        raise ConnectionError("link lost")
+
+    def now(self):
+        return 60.0
+
+
+def test_advance_wraps_connection_error_of_the_final_drain():
+    with pytest.raises(RuntimeError, match="sim time stalled: link lost") as exc:
+        run._advance(_DrainFailsAfterReachingTime(), 60.0, 1.0)
+    assert isinstance(exc.value.__cause__, ConnectionError)

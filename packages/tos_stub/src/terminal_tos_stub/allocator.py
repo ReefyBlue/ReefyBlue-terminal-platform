@@ -16,6 +16,10 @@ class SimpleSlotAllocator:
         self._dims: dict[str, tuple[int, int, int]] = dict(blocks)  # layout order
         self._issued: dict[str, set[str]] = {b: set() for b in self._dims}
 
+    def blocks(self) -> list[str]:
+        """Block names, in layout order."""
+        return list(self._dims)
+
     def _first_free(self, block: str, exclude: str | None) -> str | None:
         # Same fill order as the sim Yard.find_slot: bays asc, rows asc, lowest tier.
         bays, rows, tiers = self._dims[block]
@@ -42,3 +46,7 @@ class SimpleSlotAllocator:
 
     def release(self, slot: str) -> None:
         self._issued[slot.split("/", 1)[0]].discard(slot)
+
+    def occupy(self, slot: str) -> None:
+        """Mark ``slot`` as used (idempotent). Raises KeyError for an unknown block."""
+        self._issued[slot.split("/", 1)[0]].add(slot)
