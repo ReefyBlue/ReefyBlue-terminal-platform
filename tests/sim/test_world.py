@@ -83,3 +83,18 @@ def test_transfer_sts_to_agv_picks_the_agv_sent_for_the_container(world):
     assert world.transfer_sts_to_agv("STS-01", "C1") == "AGV-02"
     assert world.transfer_sts_to_agv("STS-01", "C2") == "AGV-01"
     assert world.transfer_sts_to_agv("STS-01", "C3") is None  # no AGV was sent for C3
+
+
+def test_idle_agv_parks_off_the_tp(world):
+    assert world.handover_cells == {(4, 0), (5, 0), (12, 0), (13, 0), (2, 5), (7, 5), (12, 5), (17, 5)}
+    assert all(y in (2, 3) for _, y in world.staging_cells)
+    assert not world.staging_cells & world.handover_cells
+    agv = world.equipment["AGV-01"]
+    agv.load("C1")
+    assert world.port.assign_job("AGV-01", _transport("TP/A/WS"))
+    world.run(100)
+    assert agv.cell == (2, 5) and agv.state == State.IDLE  # waits: box still on board
+    assert world.transfer_agv_to_tp("AGV-01") == "C1"
+    world.run(300)
+    assert agv.state == State.IDLE and agv.cell in world.staging_cells
+    assert world.grid.owner_of((2, 5)) is None

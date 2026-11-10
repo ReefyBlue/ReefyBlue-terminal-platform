@@ -14,7 +14,8 @@ class Equipment(salabim.Component):
     Salabim generator that runs ``self.current_job``.
 
     The component is created as data (no process); ``assign_job`` activates the
-    ``_run`` driver, which runs ``process`` once per job. A job assigned from
+    ``_run`` driver, which runs ``process`` once per job and then the optional
+    ``_idle_behaviour``. A job assigned from
     inside the running process (a listener reacting synchronously to the
     JOB_COMPLETED / IDLE events) is picked up by the driver loop instead of
     re-activating the current component.
@@ -128,11 +129,23 @@ class Equipment(salabim.Component):
         )
 
     def _run(self):
-        while self.current_job is not None:
-            job = self.current_job
-            yield from self.process()
-            if self.current_job is job:  # process returned without finishing its job
+        while True:
+            if self.current_job is not None:
+                job = self.current_job
+                yield from self.process()
+                if self.current_job is job:  # process returned without finishing its job
+                    return
+                continue
+            idle = self._idle_behaviour()
+            if idle is None:
                 return
+            yield from idle
+            if self.current_job is None:
+                return
+
+    def _idle_behaviour(self):
+        """Optional generator to run when the equipment has gone idle (None = nothing)."""
+        return None
 
     def process(self):  # pragma: no cover - abstract
         raise NotImplementedError

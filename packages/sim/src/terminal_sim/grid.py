@@ -59,6 +59,30 @@ class Grid:
                 queue.append(n)
         return []
 
+    def path_to_nearest(
+        self, start: Cell, goals: frozenset[Cell] | set[Cell], *, avoid: frozenset[Cell] | set[Cell] = frozenset()
+    ) -> list[Cell]:
+        """Shortest path from ``start`` to the closest cell of ``goals`` not in ``avoid`` ([] if none)."""
+        self._check(start)
+        prev: dict[Cell, Cell] = {}
+        seen = {start}
+        queue = deque([start])
+        while queue:
+            cur = queue.popleft()
+            for n in self.neighbors(cur):
+                if n in seen or n in avoid:
+                    continue
+                seen.add(n)
+                prev[n] = cur
+                if n in goals:
+                    path = [n]
+                    while path[-1] != start:
+                        path.append(prev[path[-1]])
+                    path.reverse()
+                    return path
+                queue.append(n)
+        return []
+
     def try_reserve(self, c: Cell, owner: str) -> bool:
         self._check(c)
         current = self._owners.get(c)

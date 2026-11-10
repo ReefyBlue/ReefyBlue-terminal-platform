@@ -4,7 +4,7 @@ import pytest
 import salabim
 from terminal_model.port import EventKind
 from terminal_model.types import Job, JobType, Position, State
-from terminal_sim.equipment.agv import AGV
+from terminal_sim.equipment.agv import AGV, AUTO_CLEAR_AFTER_S
 from terminal_sim.grid import Grid
 
 LOCS = {"STS-01": (4, 0), "TP/A/WS": (2, 5)}
@@ -17,7 +17,7 @@ class Rig:
         self.events = []
         self.locs = locs or LOCS
 
-    def agv(self, n, start):
+    def agv(self, n, start, *, handover=frozenset(), staging=frozenset()):
         return AGV(
             equipment_id=f"AGV-{n:02d}",
             position=Position(0.0, 0.0),
@@ -27,6 +27,8 @@ class Rig:
             start_cell=start,
             grid=self.grid,
             resolve_cell=self.locs.__getitem__,
+            handover_cells=handover,
+            staging_cells=staging,
         )
 
     def owned_by(self, owner):
@@ -201,3 +203,114 @@ def test_head_on_deadlock_is_broken_by_giving_way():
     assert len(of_kind(rig, EventKind.JOB_COMPLETED)) == 2
     assert (a.cell, b.cell) == ((2, 5), (4, 0))
     assert rig.owned_by("AGV-01") == [(2, 5)] and rig.owned_by("AGV-02") == [(4, 0)]
+
+
+HANDOVER = frozenset({(4, 0), (5, 0), (2, 5)})
+STAGING = frozenset((x, y) for x in range(20) for y in (2, 3)) - HANDOVER
+
+
+def parking_rig():
+    rig = Rig()
+    return rig, rig.agv(1, (0, 2), handover=HANDOVER, staging=STAGING)
+
+
+def run_until_completed(rig, n=1):
+    while len(of_kind(rig, EventKind.JOB_COMPLETED)) < n:
+        assert rig.env.now() < 1000, "job did not complete"
+        rig.env.run(till=rig.env.now() + 0.5)
+    return of_kind(rig, EventKind.JOB_COMPLETED)[n - 1].sim_time
+
+
+def states(rig):
+    return [e.new_state for e in of_kind(rig, EventKind.STATE_CHANGED)]
+
+
+def test_idle_agv_clears_handover_cell():
+    rig, a = parking_rig()
+    a.load("C1")
+    assert a.assign_job(transport("TP/A/WS"))
+    arrived = run_until_completed(rig)
+    assert a.cell == (2, 5) and a.state == State.IDLE  # arrived at the TP
+    assert a.unload() == "C1"  # box handed to the TP (the on_transfer hook does this)
+    rig.env.run(till=arrived + AUTO_CLEAR_AFTER_S - 0.5)
+    assert a.cell == (2, 5) and a.state == State.IDLE  # grace period
+    rig.env.run(till=arrived + AUTO_CLEAR_AFTER_S + 0.5)
+    assert a.state == State.BUSY and a.current_job is None  # clearing, no job
+    assert a.route
+    battery = a.battery_pct
+    rig.env.run(till=arrived + 200)
+    assert a.state == State.IDLE
+    assert a.cell in STAGING and a.cell[1] in (2, 3)
+    assert rig.grid.owner_of((2, 5)) is None
+    assert rig.owned_by("AGV-01") == [a.cell]
+    assert a.battery_pct < battery  # the clearing move is accounted
+    assert states(rig) == [State.BUSY, State.IDLE, State.BUSY, State.IDLE]
+    assert len(of_kind(rig, EventKind.JOB_COMPLETED)) == 1  # no job events for the move
+    assert of_kind(rig, EventKind.JOB_FAILED) == []
+
+
+def test_agv_with_new_job_within_grace_does_not_clear():
+    rig, a = parking_rig()
+    rig.locs["E"] = (8, 4)
+    a.load("C1")
+    assert a.assign_job(transport("TP/A/WS"))
+    arrived = run_until_completed(rig)
+    a.unload()
+    rig.env.run(till=arrived + AUTO_CLEAR_AFTER_S - 1)
+    assert a.cell == (2, 5) and a.state == State.IDLE
+    assert a.assign_job(transport("E", "J2"))
+    rig.env.run(till=arrived + 200)
+    assert a.cell == (8, 4) and a.state == State.IDLE
+    assert [e.job_id for e in of_kind(rig, EventKind.JOB_COMPLETED)] == ["J1", "J2"]
+    assert states(rig) == [State.BUSY, State.IDLE, State.BUSY, State.IDLE]
+
+
+def test_idle_agv_off_handover_cells_never_moves():
+    rig, a = parking_rig()
+    rig.locs["E"] = (8, 4)
+    assert a.assign_job(transport("E"))
+    rig.env.run(till=1000)
+    assert a.cell == (8, 4) and a.state == State.IDLE
+    assert states(rig) == [State.BUSY, State.IDLE]
+
+
+def test_agv_waiting_for_a_handover_keeps_the_lane_cell():
+    # Empty AGV sent for a discharge waits under the crane; a loaded one waits for
+    # the crane to take its box. Neither may leave the lane.
+    rig, a = parking_rig()
+    assert a.assign_job(transport("STS-01"))  # sent for C1, nothing on board
+    run_until_completed(rig)
+    rig.env.run(till=500)
+    assert a.cell == (4, 0) and a.state == State.IDLE
+    a.load("C1")  # loaded and idle in the lane, as while waiting for a LOAD
+    rig.env.run(till=1000)
+    assert a.cell == (4, 0)
+    assert a.unload() == "C1"  # LOAD done: the crane took the box
+    rig.env.run(till=1000 + AUTO_CLEAR_AFTER_S + 100)
+    assert a.cell in STAGING and a.state == State.IDLE
+    assert rig.grid.owner_of((4, 0)) is None
+
+
+def test_released_agv_clears_after_cancel_and_reset():
+    # Watchdog path: the job is cancelled and the AGV reset while it stands in the lane.
+    rig = Rig(locs={"FAR": (19, 0)})
+    a = rig.agv(1, (4, 0), handover=HANDOVER, staging=STAGING)
+    assert a.assign_job(transport("FAR"))
+    rig.env.run(till=1)  # still on (4, 0), driving towards (5, 0)
+    assert a.cancel_job() and a.job_container_id is None
+    assert a.reset()
+    assert a.cell == (4, 0)
+    rig.env.run(till=200)
+    assert a.cell in STAGING and a.state == State.IDLE
+
+
+def test_auto_clear_waits_when_no_staging_cell_is_reachable():
+    rig = Rig(grid=Grid(3, 1, 20.0), locs={"T": (2, 0)})
+    a = rig.agv(1, (0, 0), handover=frozenset({(2, 0)}), staging=frozenset({(1, 0)}))
+    a.load("C1")
+    assert a.assign_job(transport("T"))
+    run_until_completed(rig)
+    a.unload()
+    rig.env.run(till=100)
+    assert a.cell == (2, 0) and a.state == State.IDLE  # (1, 0) is behind a one-way lane
+    assert states(rig) == [State.BUSY, State.IDLE]

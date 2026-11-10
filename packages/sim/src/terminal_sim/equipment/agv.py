@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 import salabim
 from terminal_model.port import EquipmentEvent
-from terminal_model.types import Job, JobType, Kind, Position
+from terminal_model.types import Job, JobType, Kind, Position, State
 
 from terminal_sim.equipment.base import Equipment
 from terminal_sim.grid import Cell, Grid
@@ -16,6 +16,7 @@ BATTERY_PCT_PER_M = 0.02
 ENERGY_KWH_PER_KM = 1.2
 RESERVE_RETRY_S = 1.0
 REPLAN_AFTER_S = 30.0
+AUTO_CLEAR_AFTER_S = 5.0  # idle time on a handover cell before the AGV clears it
 
 
 class AGV(Equipment):
@@ -30,6 +31,8 @@ class AGV(Equipment):
         start_cell: Cell,
         grid: Grid,
         resolve_cell: Callable[[str], Cell],
+        handover_cells: frozenset[Cell] = frozenset(),
+        staging_cells: frozenset[Cell] = frozenset(),
     ) -> None:
         super().__init__(
             equipment_id=equipment_id,
@@ -43,11 +46,14 @@ class AGV(Equipment):
             raise ValueError("START_CELL_OCCUPIED")
         self.grid = grid
         self.resolve_cell = resolve_cell
+        self.handover_cells = handover_cells  # STS lane / TP cells, cleared when idle
+        self.staging_cells = staging_cells  # where an idle AGV parks
         self.cell: Cell = start_cell
         self.position = grid.center(start_cell)
         self.battery_pct = 100.0
         self.loaded_container_id: str | None = None
-        self.job_container_id: str | None = None  # container of the last accepted job
+        # container the AGV was last sent for, until it hands that box over (or the job ends early)
+        self.job_container_id: str | None = None
         self.route: list[Cell] = []
         self._pending: Cell | None = None  # cell reserved ahead during a move
 
@@ -73,6 +79,8 @@ class AGV(Equipment):
         if self.loaded_container_id is None:
             raise ValueError("AGV not loaded")
         cid, self.loaded_container_id = self.loaded_container_id, None
+        self.job_container_id = None  # handover done
+        self._wake_for_clear()
         return cid
 
     def _release_pending(self) -> None:
@@ -81,13 +89,19 @@ class AGV(Equipment):
             self.grid.release(self._pending, self.equipment_id)
             self._pending = None
 
+    def set_state(self, s: State) -> None:
+        super().set_state(s)
+        self._wake_for_clear()
+
     def cancel_job(self) -> bool:
+        self.job_container_id = None
         ok = super().cancel_job()
         self._release_pending()
         self.route = []
         return ok
 
     def fail_job(self, reason: str) -> None:
+        self.job_container_id = None
         super().fail_job(reason)
         self._release_pending()
         self.route = []
@@ -145,20 +159,87 @@ class AGV(Equipment):
                 yield self.hold(RESERVE_RETRY_S)
                 waited += RESERVE_RETRY_S
             self.grid.set_waiting(self.equipment_id, None)
-            self._pending = nxt
-            yield self.hold(self.grid.cell_m / self.speed_mps)
-            prev = self.cell
-            self.grid.release(prev, self.equipment_id)
-            self.cell = nxt
-            self._pending = None
-            self.position = self.grid.center(nxt)
-            self.battery_pct -= BATTERY_PCT_PER_M * self.grid.cell_m
-            self.energy_kwh += ENERGY_KWH_PER_KM * self.grid.cell_m / 1000
+            yield from self._step(nxt)
             if self.current_job is None:  # failed/cancelled meanwhile
                 return
             i += 1
         self.route = []
         self.complete_job()
+
+    def _step(self, nxt: Cell):
+        """Drive into the reserved neighbour cell ``nxt``."""
+        self._pending = nxt
+        yield self.hold(self.grid.cell_m / self.speed_mps)
+        self.grid.release(self.cell, self.equipment_id)
+        self.cell = nxt
+        self._pending = None
+        self.position = self.grid.center(nxt)
+        self.battery_pct -= BATTERY_PCT_PER_M * self.grid.cell_m
+        self.energy_kwh += ENERGY_KWH_PER_KM * self.grid.cell_m / 1000
+
+    # --- auto-clear of handover cells ----------------------------------------
+    def _clearable(self) -> bool:
+        """Idle and empty on a handover cell with no handover pending: an AGV waiting
+        empty for a discharge (or loaded for a load) keeps its lane cell."""
+        return (
+            self.state is State.IDLE
+            and self.current_job is None
+            and self.cell in self.handover_cells
+            and self.loaded_container_id is None
+            and self.job_container_id is None
+            and bool(self.staging_cells)
+        )
+
+    def _wake_for_clear(self) -> None:
+        # Became clearable from outside (reset, end of a fault, box taken by the crane):
+        # start the driver. Inside the own process the _run loop handles it.
+        if self._clearable() and self.env.current_component() is not self:
+            self.activate(process="_run")
+
+    def _idle_behaviour(self):
+        return self._auto_clear() if self._clearable() else None
+
+    def _staging_route(self) -> list[Cell]:
+        return self.grid.path_to_nearest(
+            self.cell, self.staging_cells, avoid=self.grid.reserved_by_others(self.equipment_id)
+        )
+
+    def _auto_clear(self):
+        """Idle on a handover cell for AUTO_CLEAR_AFTER_S: drive (BUSY, no job events)
+        to the nearest free staging cell, then go IDLE. A job assigned meanwhile
+        re-activates the driver and ends this."""
+        while True:
+            yield self.hold(AUTO_CLEAR_AFTER_S)
+            if not self._clearable():
+                return
+            route = self._staging_route()
+            if route:
+                break
+        self.set_state(State.BUSY)
+        self.route = route
+        i = 1
+        while i < len(route):
+            nxt = route[i]
+            waited = 0.0
+            while not self.grid.try_reserve(nxt, self.equipment_id):
+                self.grid.set_waiting(self.equipment_id, nxt)
+                if waited >= REPLAN_AFTER_S:
+                    waited = 0.0
+                    new = self._staging_route()
+                    if new:
+                        route, i, nxt = new, 1, new[1]
+                        self.route = route
+                        continue
+                yield self.hold(RESERVE_RETRY_S)
+                waited += RESERVE_RETRY_S
+            self.grid.set_waiting(self.equipment_id, None)
+            yield from self._step(nxt)
+            if self.state is not State.BUSY:  # FAULT during the move: stop here
+                self.route = []
+                return
+            i += 1
+        self.route = []
+        self.set_state(State.IDLE)
 
     def extra(self) -> dict:
         return {

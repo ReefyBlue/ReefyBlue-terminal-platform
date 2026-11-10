@@ -17,6 +17,8 @@ from terminal_sim.layout import Layout
 from terminal_sim.scenario import Scenario
 from terminal_sim.yard import Yard
 
+STAGING_ROWS = (2, 3)  # AGV-area interior between quay lanes and yard TPs
+
 
 class SimEquipmentPort:
     """Thin EquipmentPort adapter over ``World.equipment``."""
@@ -67,6 +69,13 @@ class World:
         self.port = SimEquipmentPort(self)
         self.equipment: dict[str, Equipment] = {}
         emit = self.port._dispatch
+        # AGVs clear handover cells (STS lanes, TPs) when idle and park in rows 2-3.
+        self.handover_cells = frozenset(
+            [c for s in layout.sts for c in s.lane_cells] + [b.tp_ws_cell for b in layout.blocks]
+        )
+        self.staging_cells = frozenset(
+            (x, y) for x in range(layout.grid_cols) for y in STAGING_ROWS if y < layout.grid_rows
+        ) - self.handover_cells
 
         for spec in layout.sts[: scenario.n_sts]:
             self.equipment[spec.equipment_id] = STS(
@@ -90,6 +99,8 @@ class World:
                 start_cell=cell,
                 grid=self.grid,
                 resolve_cell=self.resolve_cell,
+                handover_cells=self.handover_cells,
+                staging_cells=self.staging_cells,
             )
         for block in layout.blocks:
             self.equipment[block.asc_id] = ASC(
