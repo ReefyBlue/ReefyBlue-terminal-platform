@@ -11,7 +11,8 @@ decoded synchronously and queued, so delivery order is notification order. The
 ``Seq`` field is per equipment; a jump of more than one is logged as a gap.
 
 Connection loss (detected by asyncua's watchdog) sets ``_lost``; from then on
-``snapshot``, ``wait_for_sim_time`` and every server call raise ``ConnectionError``
+``snapshot``, ``wait_for_sim_time``, ``drain_events`` (after delivering what was
+buffered) and every server call raise ``ConnectionError``
 at once instead of waiting out a call timeout. The port does not reconnect.
 """
 
@@ -305,12 +306,14 @@ class OpcUaEquipmentPort:
 
     # -- beyond the protocol -----------------------------------------------------------
     def drain_events(self) -> int:
-        """Deliver every buffered event, in arrival order, to all callbacks; return the count."""
+        """Deliver every buffered event, in arrival order, to all callbacks; return the count.
+        ``ConnectionError`` after the delivery if the connection is (or has been) lost."""
         n = 0
         while True:
             try:
                 ev = self._events.get_nowait()
             except queue.Empty:
+                self._check_lost()
                 return n
             n += 1
             for cb in list(self._callbacks):

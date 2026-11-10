@@ -23,7 +23,7 @@ from collections.abc import Callable, Sequence
 from typing import Protocol
 
 from terminal_ecs.dispatcher import Dispatcher
-from terminal_ecs.workorders import WorkOrder
+from terminal_ecs.workorders import WorkOrder, WorkOrderError
 from terminal_kpi.kpi import SAMPLE_INTERVAL_S, KpiCollector
 from terminal_model.port import EquipmentEvent, EquipmentPort
 from terminal_tos_stub.allocator import SimpleSlotAllocator
@@ -76,6 +76,8 @@ class EcsCore:
         self.started_at = time.monotonic()
         self._link: EquipmentPort | None = None  # the bound connection, closed on loss
         self._seen_jobs: set[str] = set()
+        self.known_containers: set[str] = set()  # every container accepted by submit()
+        self._closing: set[asyncio.Future[None]] = set()  # off-loop closes in flight
         self.port.subscribe(self._on_equipment_event)
 
     @property
@@ -112,19 +114,37 @@ class EcsCore:
         return True
 
     def on_link_lost(self) -> None:
+        """Unbind at once and publish ``link``; the old connection is closed off the
+        loop (``OpcUaEquipmentPort.close`` blocks for up to a few seconds)."""
         log.warning("equipment link lost at sim time %.1f", self.port.now())
-        self._drop_link()
+        self._drop_link(blocking=False)
         self._publish_link()
 
-    def _drop_link(self) -> None:
+    def _drop_link(self, *, blocking: bool = True) -> None:
         self.port.unbind()
         link, self._link = self._link, None
         close = getattr(link, "close", None)
-        if close is not None:
+        if close is None:
+            return
+        if not blocking:
             try:
-                close()
-            except Exception:
-                log.exception("closing the lost equipment link failed")
+                loop = asyncio.get_running_loop()
+            except RuntimeError:  # no loop in this thread: close inline
+                pass
+            else:
+                fut = loop.run_in_executor(None, close)
+                self._closing.add(fut)
+                fut.add_done_callback(self._closed)
+                return
+        try:
+            close()
+        except Exception:
+            log.exception("closing the lost equipment link failed")
+
+    def _closed(self, fut: asyncio.Future[None]) -> None:
+        self._closing.discard(fut)
+        if not fut.cancelled() and (exc := fut.exception()) is not None:
+            log.error("closing the lost equipment link failed", exc_info=exc)
 
     # -- loop --------------------------------------------------------------------------
     def step(self) -> None:
@@ -144,14 +164,24 @@ class EcsCore:
             self.on_link_lost()
 
     async def run(self) -> None:
+        """Connect, then ``step()`` forever. An unexpected exception is logged and
+        treated like a lost link (drop, retry after ``CONNECT_RETRY_S``) so the loop
+        never dies silently; cancellation ends it and closes the connection."""
         try:
             while True:
-                if not self.connected:
-                    if not await self.connect_once():
-                        await asyncio.sleep(CONNECT_RETRY_S)
-                        continue
-                else:
-                    self.step()
+                try:
+                    if not self.connected:
+                        if not await self.connect_once():
+                            await asyncio.sleep(CONNECT_RETRY_S)
+                            continue
+                    else:
+                        self.step()
+                except Exception:
+                    log.exception("ECS loop iteration failed; dropping the equipment link")
+                    if self.connected:
+                        self.on_link_lost()
+                    await asyncio.sleep(CONNECT_RETRY_S)
+                    continue
                 await asyncio.sleep(DRAIN_POLL_S)
         finally:
             if self._link is not None:
@@ -159,11 +189,19 @@ class EcsCore:
 
     # -- commands and queries -------------------------------------------------------------
     def submit(self, orders: list[WorkOrder]) -> None:
-        if self.dispatcher is None:
-            raise RuntimeError("ECS not connected to the equipment yet")
+        if not self.connected or self.dispatcher is None:
+            raise RuntimeError("not connected")
         for o in orders:
             self.allocator.occupy(o.yard_slot)
-        self.dispatcher.submit(orders)
+        try:
+            self.dispatcher.submit(orders)
+        except WorkOrderError:
+            raise  # rejected before any order was taken
+        except BaseException:
+            # failed in the tick after the orders were taken (e.g. ConnectionError)
+            self.known_containers.update(o.container_id for o in orders)
+            raise
+        self.known_containers.update(o.container_id for o in orders)
         self.dispatcher.tick()
         self.publish_new_jobs()
 
@@ -199,9 +237,14 @@ class EcsCore:
         return out
 
     # -- event stream (spec §5) --------------------------------------------------------
+    def status_message(self) -> dict:
+        """The ``status`` event-stream message (spec §5); zeros before the first connection."""
+        base = self.dispatcher.status() if self.dispatcher is not None else {**_EMPTY_STATUS, "equipment": {}}
+        return {"type": "status", "sim_time": self.port.now(), **base}
+
     def publish_status(self) -> None:
         if self.dispatcher is not None:
-            self.broadcaster.publish({"type": "status", "sim_time": self.port.now(), **self.dispatcher.status()})
+            self.broadcaster.publish(self.status_message())
 
     def publish_new_jobs(self) -> None:
         if self.dispatcher is None:

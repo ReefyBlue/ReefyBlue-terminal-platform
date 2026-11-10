@@ -14,6 +14,8 @@ dependencies = [
     "terminal-tos-stub",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    "pyyaml>=6",
+    "anyio>=4",
 ]
 
 [tool.uv.sources]

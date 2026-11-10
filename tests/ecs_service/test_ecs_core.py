@@ -129,7 +129,12 @@ async def test_step_on_connection_error_unbinds_and_publishes_link(caplog):
     fake.lost = True
     with caplog.at_level(logging.WARNING):
         core.step()
-    assert core.connected is False and fake.closed == 1
+    assert core.connected is False
+    for _ in range(100):  # closed off-loop
+        if fake.closed:
+            break
+        await asyncio.sleep(0.01)
+    assert fake.closed == 1
     assert _drain(q) == [{"type": "link", "connected": False, "sim_time": 30.0}]
     core.step()  # unbound: no-op
     assert _drain(q) == []
@@ -234,3 +239,124 @@ async def test_run_retries_connect_then_steps(monkeypatch):
     assert len(attempts) == 2
     assert sleeps[0] == CONNECT_RETRY_S and set(sleeps[1:]) == {DRAIN_POLL_S}
     assert core.tick_count == 1
+
+
+async def test_submit_while_link_lost_raises_not_connected():
+    fake = _fake(LosingPort)
+    core, _ = _core(fake)
+    await core.connect_once()
+    fake.lost = True
+    core.step()
+    assert core.dispatcher is not None and core.connected is False
+    with pytest.raises(RuntimeError, match="not connected"):
+        core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")])
+
+
+async def test_submit_records_known_containers():
+    core, _ = _core(_fake())
+    await core.connect_once()
+    assert core.known_containers == set()
+    core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1"),
+                 WorkOrder("C2", JobType.LOAD, "STS-01", "A/1/1/2")])
+    assert core.known_containers == {"C1", "C2"}
+
+
+class SlowClosePort(FakePort):
+    closed = False
+
+    def close(self) -> None:
+        import time as _t
+
+        _t.sleep(0.3)
+        self.closed = True
+
+
+async def test_on_link_lost_closes_port_off_loop():
+    import time as _t
+
+    fake = _fake(SlowClosePort)
+    core, q = _core(fake)
+    await core.connect_once()
+    _drain(q)
+    t0 = _t.monotonic()
+    core.on_link_lost()
+    assert _t.monotonic() - t0 < 0.1  # close does not block the loop
+    assert core.connected is False and fake.closed is False
+    assert _drain(q) == [{"type": "link", "connected": False, "sim_time": 0.0}]
+    for _ in range(100):
+        if fake.closed:
+            break
+        await asyncio.sleep(0.01)
+    assert fake.closed is True
+
+
+class FailingClosePort(FakePort):
+    def close(self) -> None:
+        raise OSError("boom")
+
+
+async def test_on_link_lost_logs_close_failure(caplog):
+    core, _ = _core(_fake(FailingClosePort))
+    await core.connect_once()
+    with caplog.at_level(logging.ERROR):
+        core.on_link_lost()
+        for _ in range(100):
+            if any("closing the lost equipment link failed" in r.message for r in caplog.records):
+                break
+            await asyncio.sleep(0.01)
+    assert any("closing the lost equipment link failed" in r.message for r in caplog.records)
+
+
+async def test_run_logs_unexpected_error_and_keeps_looping(monkeypatch, caplog):
+    fake = _fake()
+    connects = []
+
+    def connect():
+        connects.append(1)
+        return fake
+
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+        if len(sleeps) > 6:
+            raise asyncio.CancelledError
+        await real_sleep(0)
+
+    monkeypatch.setattr(core_mod.asyncio, "sleep", fake_sleep)
+    core = EcsCore(LAYOUT, connect=connect)
+    real_step = core.step
+    steps = []
+
+    def bad_step():
+        steps.append(1)
+        if len(steps) == 1:
+            raise RuntimeError("bug in step")
+        real_step()
+
+    monkeypatch.setattr(core, "step", bad_step)
+    with caplog.at_level(logging.ERROR), pytest.raises(asyncio.CancelledError):
+        await core.run()
+    assert any(r.levelno == logging.ERROR and r.exc_info for r in caplog.records)
+    assert len(connects) == 2  # treated like link loss: reconnected
+    assert CONNECT_RETRY_S in sleeps and len(steps) >= 2
+
+
+class FailingTickPort(FakePort):
+    lost = False
+
+    def assign_job(self, equipment_id, job):
+        if self.lost:
+            raise ConnectionError("link lost")
+        return super().assign_job(equipment_id, job)
+
+
+async def test_submit_connection_error_after_take_still_records_containers():
+    fake = _fake(FailingTickPort)
+    core, _ = _core(fake)
+    await core.connect_once()
+    fake.lost = True
+    with pytest.raises(ConnectionError):
+        core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")])
+    assert core.known_containers == {"C1"}  # the Dispatcher took it: a retry is a duplicate

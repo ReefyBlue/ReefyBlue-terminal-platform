@@ -85,3 +85,8 @@ def test_occupy_unknown_block_raises():
     a = SimpleSlotAllocator({"A": (2, 1, 1)})
     with pytest.raises(KeyError):
         a.occupy("Z/1/1/1")
+
+
+def test_blocks_in_layout_order():
+    a = SimpleSlotAllocator({"B": (1, 1, 1), "A": (1, 1, 1)})
+    assert a.blocks() == ["B", "A"]

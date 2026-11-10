@@ -276,6 +276,20 @@ async def test_connection_lost_fails_fast():
         await asyncio.gather(*(s.stop() for s in [*r.servers.values(), r.control]))
 
 
+async def test_drain_events_raises_after_connection_lost():
+    port = OpcUaEquipmentPort("opc.tcp://127.0.0.1:1/none")
+    got = []
+    port.subscribe(got.append)
+    ev = EquipmentEvent(EventKind.STATE_CHANGED, "STS-01", 0.0, new_state=State.IDLE)
+    port._events.put(ev)
+    assert port.drain_events() == 1  # not lost: delivers and returns
+    port._events.put(ev)
+    port._lost = True
+    with pytest.raises(ConnectionError):
+        port.drain_events()
+    assert got == [ev, ev]  # buffered events delivered before the error
+
+
 async def test_close_discards_buffered_events():
     port = OpcUaEquipmentPort("opc.tcp://127.0.0.1:1/none")
     got = []
