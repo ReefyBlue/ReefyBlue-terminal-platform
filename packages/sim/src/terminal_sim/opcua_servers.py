@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections.abc import Callable
 
-from asyncua import Server
-
+from asyncua import Server, ua
+from terminal_model.locations import SlotLoc, parse_location
 from terminal_model.port import EquipmentEvent
 from terminal_model.types import Kind
 from terminal_opcua.codec import job_from_json
@@ -14,11 +16,14 @@ from terminal_opcua.nodeset import (
     EquipmentHandlers,
     EventEmitter,
     block_folder,
+    create_control_object,
     create_equipment_object,
     ensure_folders,
+    get_var,
     register_types,
     write_snapshot,
 )
+
 from terminal_sim.equipment.base import Equipment
 
 log = logging.getLogger(__name__)
@@ -82,3 +87,65 @@ class EquipmentServer:
         for ev in pending:
             await self._emitter.emit(ev)
             await asyncio.sleep(0)
+
+
+class ControlServer:
+    """Clock + control server: ``Terminal/Clock`` with SimTime, SpeedFactor, Stop, PrefillYard."""
+
+    def __init__(self, world, *, port: int, on_stop: Callable[[], None], host: str = "0.0.0.0") -> None:
+        self.world = world
+        self.port = port
+        self.host = host
+        self.endpoint = f"opc.tcp://{host}:{port}/terminal/control"
+        self._on_stop = on_stop
+        self._server: Server | None = None
+        self._obj = None
+
+    def _prefill(self, json_str: str) -> bool:
+        if self.world.now() > 0:
+            log.warning("PrefillYard rejected: simulation already running")
+            return False
+        try:
+            items = json.loads(json_str)
+            parsed = []
+            for item in items:
+                loc = parse_location(item["slot"])
+                if not isinstance(loc, SlotLoc):
+                    raise TypeError(f"not a slot: {item['slot']!r}")
+                parsed.append((loc, str(item["container_id"])))
+        except (ValueError, KeyError, TypeError) as e:
+            log.warning("PrefillYard rejected: %s", e)
+            return False
+        try:
+            for loc, cid in parsed:
+                self.world.yard.occupy(loc, cid)
+        except ValueError as e:
+            log.warning("PrefillYard rejected: %s", e)
+            return False
+        return True
+
+    async def start(self) -> None:
+        server = Server()
+        await server.init()
+        server.set_endpoint(self.endpoint)
+        idx, types = await register_types(server)
+        folders = await ensure_folders(server, idx, server.nodes.objects)
+        self._obj = await create_control_object(
+            server, idx, types, folders["Terminal"], stop=self._on_stop, prefill=self._prefill
+        )
+        await server.start()
+        self._server = server
+
+    async def stop(self) -> None:
+        if self._server is not None:
+            await self._server.stop()
+            self._server = None
+
+    async def sync(self) -> None:
+        assert self._obj is not None, "server not started"
+        await (await get_var(self._obj, "SimTime")).write_value(
+            ua.Variant(float(self.world.now()), ua.VariantType.Double)
+        )
+        await (await get_var(self._obj, "SpeedFactor")).write_value(
+            ua.Variant(float(self.world.scenario.speed_factor), ua.VariantType.Double)
+        )

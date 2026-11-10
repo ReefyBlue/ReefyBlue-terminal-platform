@@ -188,6 +188,8 @@ async def create_control_object(
     nodes = await instantiate(
         parent, server.get_node(types.control), bname=f"{idx}:Clock", idx=idx)
     obj = nodes[0]
+    for var in ("SimTime", "SpeedFactor"):
+        await obj.add_variable(idx, var, 0.0, datatype=ua.NodeId(ua.ObjectIds.Double))
 
     @uamethod
     async def _stop(_parent):
