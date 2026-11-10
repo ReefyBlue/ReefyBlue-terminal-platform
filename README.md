@@ -97,6 +97,35 @@ Volgorde: sim, gateway, runner (de gateway herstelt vanzelf als hij vóór de si
 
 **Architectuur.** `terminal_sim.serve` draait de salabim-wereld en publiceert elk apparaat als eigen OPC UA-server, plus een klokserver met `SimTime`, `SpeedFactor`, `Start`, `Stop` en `PrefillYard`. `terminal_gateway` spiegelt al die servers onder één namespace (`Terminal/Quay|Fleet|Yard|Clock`), stuurt methodes door en meldt een weggevallen server als `Fault`. De runner praat alleen met de gateway via `OpcUaEquipmentPort`, dat het `EquipmentPort`-protocol implementeert; events worden in de runner-thread afgeleverd (`drain_events`, elke ≥ 10 ms wandklok). De ECS (`terminal_ecs`) is daarvoor niet gewijzigd: `test_ecs_unchanged_since_plan_a` vergelijkt een sha256 over de ECS-bronnen met de waarde van `master` in `tests/fixtures/ecs_sources.sha256`.
 
+### Equipment-events (OPC UA Events, Plan B3)
+
+Equipment-events (`STATE_CHANGED`, `JOB_COMPLETED`, `JOB_FAILED`) zijn echte OPC UA Events met eigen EventTypes (namespace `urn:terminal:model`); ze vervangen de JSON-variabelen `LastEvent`/`EventSeq` uit B1. De sim-servers zenden ze uit op het equipment-object, de gateway stuurt ze door met een eigen `Seq`, en `OpcUaEquipmentPort` abonneert zich erop.
+
+| Type | Supertype | Eigen velden |
+|---|---|---|
+| `TerminalEventType` | `BaseEventType` | `EquipmentId` String, `Seq` UInt64, `SimTime` Double, `JobId` String, `Reason` String, `NewState` String |
+| `StateChangedEventType` | `TerminalEventType` | n.v.t. |
+| `JobCompletedEventType` | `TerminalEventType` | n.v.t. |
+| `JobFailedEventType` | `TerminalEventType` | n.v.t. |
+
+Een lege string in `JobId`/`Reason`/`NewState` betekent `None`. `Seq` is een teller per apparaat, begint bij 1 na start van de uitzendende server en is strikt oplopend; hij dient alleen voor gapdetectie (een gat wordt als WARNING gelogd). Events die upstream worden uitgezonden terwijl de verbinding gateway-sim weg is, gaan verloren en verschijnen na herstel als `Seq`-gat in het log; de snapshot blijft leidend voor de toestand.
+
+Voorbeeld met een eigen asyncua-client (abonneren op alle events van een server):
+
+```python
+from asyncua import Client
+from terminal_opcua.events import resolve_event_types, subscribe_terminal_events, event_from_ua
+
+class Handler:
+    def __init__(self, types): self.types = types
+    def event_notification(self, event): print(event_from_ua(event, self.types))  # (seq, EquipmentEvent)
+
+async with Client("opc.tcp://localhost:4840") as client:
+    types = await resolve_event_types(client)
+    sub = await client.create_subscription(100, Handler(types))
+    await subscribe_terminal_events(client, sub, types)
+```
+
 ## Verder
 
 Ontwerp: `docs/superpowers/specs/2026-11-10-terminal-platform-fase1-design.md` en `docs/superpowers/specs/2026-11-10-plan-b1-opcua-design.md`. Plan B2 (ECS-service, viewer, Docker) en B3 (eigen DataTypes, beveiliging, vendor-adapters) volgen.
