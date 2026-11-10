@@ -230,7 +230,16 @@ def test_lifespan_runs_and_cancels_core_loop():
 
 def test_serve_main_builds_app(monkeypatch):
     calls = []
-    monkeypatch.setattr(serve.uvicorn, "run", lambda app, **kw: calls.append((app, kw)))
+
+    class StubServer:
+        def __init__(self, config):
+            calls.append((config.app, {"host": config.host, "port": config.port,
+                                       "log_config": config.log_config, "log_level": config.log_level}))
+
+        def run(self):
+            pass
+
+    monkeypatch.setattr(serve, "_Server", StubServer)
     monkeypatch.setattr(serve, "configure_json_logging", lambda level: calls.append(("log", level)))
     rc = serve.main(["--gateway", "opc.tcp://x", "--layout", str(ROOT / "terminal.yaml"), "--port", "1"])
     assert rc == 0

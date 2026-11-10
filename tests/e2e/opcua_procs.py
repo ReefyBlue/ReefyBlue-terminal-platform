@@ -12,6 +12,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 from asyncua import Client
 from terminal_model.types import State
 from terminal_sim.layout import load_layout
@@ -119,3 +120,36 @@ def sim_and_gateway(scenario: Path, *, n_sts: int, n_agv: int, log_dir: Path) ->
         info["returncodes"] = (_stop(sim), _stop(gw))
         sim_log.close()
         gw_log.close()
+
+
+@contextlib.contextmanager
+def ecs_service(gateway_endpoint: str, *, log_dir: Path) -> Iterator[dict]:
+    """Start ``terminal_ecs_service.serve`` on a free port; yield ``{"url", "returncode", "log"}``.
+
+    Waits for ``GET /health`` 200; on exit SIGTERM and the exit code lands in ``returncode``.
+    """
+    port = free_port()
+    log = (log_dir / "ecs.log").open("w")
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "terminal_ecs_service.serve", "--gateway", gateway_endpoint,
+         "--layout", str(ROOT / "terminal.yaml"), "--host", "127.0.0.1", "--port", str(port)],
+        cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+    url = f"http://127.0.0.1:{port}"
+    info = {"url": url, "returncode": None, "log": log.name}
+    try:
+        deadline = time.monotonic() + READY_TIMEOUT_S
+        while True:
+            if proc.poll() is not None:
+                raise RuntimeError(f"ECS service died during startup; see {log.name}")
+            try:
+                if httpx.get(f"{url}/health", timeout=2.0).status_code == 200:
+                    break
+            except httpx.HTTPError:
+                pass
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"ECS service {url} not healthy within {READY_TIMEOUT_S} s")
+            time.sleep(0.5)
+        yield info
+    finally:
+        info["returncode"] = _stop(proc)
+        log.close()

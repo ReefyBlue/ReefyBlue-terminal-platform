@@ -32,11 +32,11 @@ FastAPI, Pydantic-schema's in `terminal_ecs_service.schemas`. Alle tijden in sim
 
 | Endpoint | Antwoord |
 |---|---|
-| `POST /workorders` body `[{"container_id","type":"DISCHARGE"\|"LOAD","sts_id","yard_slot"}]` | 202 `{"accepted": n}`; 422 `{"errors":[{"container_id","code","message"}]}` — batch wordt in zijn geheel afgewezen als één order faalt (`WorkOrderError`-codes `DUPLICATE_CONTAINER`, `UNKNOWN_STS`, `INVALID_SLOT`); 503 als niet verbonden |
+| `POST /workorders` body `[{"container_id","type":"DISCHARGE"\|"LOAD","sts_id","yard_slot"}]` | 202 `{"accepted": n}`; 422 `{"errors":[{"container_id","code","message"}]}` — batch wordt in zijn geheel afgewezen als één order faalt (`WorkOrderError`-codes `DUPLICATE_CONTAINER`, `UNKNOWN_STS`, `INVALID_SLOT`, en `INVALID_ORDER` voor een misvormde body); 503 als niet verbonden |
 | `GET /status` | `Dispatcher.status()` + `sim_time`, `connected`, `uptime_s`, `tick_count` |
 | `GET /kpis` | `KpiCollector.snapshot(elapsed)`: zelfde sleutels als `finish` (incl. `sim_elapsed_s`), niet-destructief |
 | `GET /equipment` | `[{"equipment_id","kind","vendor","state","position":{"x","y"},"current_job_id","energy_kwh","extra"}]` |
-| `GET /health` | 200 `{"connected": true, "sim_time": t}` of 503 `{"connected": false}` |
+| `GET /health` | 200 `{"connected": true, "sim_time": t}` of 503 `{"connected": false, "sim_time": null}` |
 | `WS /events` | JSON-berichten, §5 |
 
 Validatie: `type` moet `DISCHARGE` of `LOAD` zijn, `yard_slot` moet parsen als slot-locatie (`parse_location`), anders 422 vóór de Dispatcher. Elke geaccepteerde order registreert zijn `yard_slot` in de ECS-eigen allocator (`occupy`), zodat herslotten bij ASC-storing geen slot kiest dat de TOS al heeft uitgegeven.

@@ -126,6 +126,42 @@ async with Client("opc.tcp://localhost:4840") as client:
     await subscribe_terminal_events(client, sub, types)
 ```
 
+## ECS als service (Plan B2a)
+
+De ECS draait als eigen proces dat via de gateway met de sim praat en een HTTP/WebSocket-API biedt.
+
+| Proces | CLI | Rol |
+|---|---|---|
+| ecs-service | `python -m terminal_ecs_service.serve --gateway opc.tcp://localhost:4840 --layout terminal.yaml --host 0.0.0.0 --port 8000` | Dispatcher + KPI + API |
+| tos-stub | `python -m terminal_tos_stub.submit scenario.yaml --layout terminal.yaml --ecs http://localhost:8000` | genereert orders uit het scenario (seed) en POST ze naar de service |
+| runner | `python -m terminal_runner.run scenario.yaml --port http --ecs http://localhost:8000 --gateway opc.tcp://localhost:4840 --out out/` | orkestreert één run (health, `PrefillYard`, orders, `Start`, pollen, KPI's, `Stop`) |
+
+Alle tijden in sim-seconden.
+
+| Endpoint | Antwoord |
+|---|---|
+| `POST /workorders` body `[{"container_id","type":"DISCHARGE"\|"LOAD","sts_id","yard_slot"}]` | 202 `{"accepted": n}`; 422 `{"errors":[{"container_id","code","message"}]}` (hele batch afgewezen; codes `DUPLICATE_CONTAINER`, `UNKNOWN_STS`, `INVALID_SLOT` en `INVALID_ORDER` voor een misvormde body); 503 als niet verbonden |
+| `GET /status` | `Dispatcher.status()` + `sim_time`, `connected`, `uptime_s`, `tick_count` |
+| `GET /kpis` | KPI-snapshot (zelfde sleutels als `finish`, incl. `sim_elapsed_s`), niet-destructief |
+| `GET /equipment` | `[{"equipment_id","kind","vendor","state","position":{"x","y"},"current_job_id","energy_kwh","extra"}]` |
+| `GET /health` | 200 `{"connected": true, "sim_time": t}` of 503 `{"connected": false, "sim_time": null}` |
+| `WS /events` | JSON-berichten, zie hieronder |
+
+Berichten op `WS /events` (veld `type`, geen replay):
+
+| `type` | Wanneer |
+|---|---|
+| `status` | direct na verbinding en na elke tick (`sim_time` + `Dispatcher.status()`) |
+| `equipment` | elk equipment-event (`kind`, `equipment_id`, `sim_time`, `job_id`, `reason`, `new_state`) |
+| `job` | elke nieuwe afgeronde job (`job_id`, `equipment_id`, `sim_time`) |
+| `link` | bij verlies en herstel van de gatewayverbinding (`connected`, `sim_time`) |
+
+Per client geldt een wachtrij van 1000 berichten; bij vol worden berichten gedropt.
+
+Simulatiebesturing (`PrefillYard`, `Start`, `Stop`) blijft bij de runner, via OPC UA op de gateway; de service heeft er geen endpoints voor.
+
+Verbindingsverlies: de service houdt zijn Dispatcher en orders vast, verbindt elke 2 s opnieuw met de gateway, stuurt `link`-berichten bij verlies en herstel, en antwoordt 503 (`/health`, `POST /workorders`) zolang hij niet verbonden is.
+
 ## Verder
 
 Ontwerp: `docs/superpowers/specs/2026-11-10-terminal-platform-fase1-design.md` en `docs/superpowers/specs/2026-11-10-plan-b1-opcua-design.md`. Plan B2 (ECS-service, viewer, Docker) en B3 (eigen DataTypes, beveiliging, vendor-adapters) volgen.

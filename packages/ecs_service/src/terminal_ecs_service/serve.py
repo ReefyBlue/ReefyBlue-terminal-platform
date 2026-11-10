@@ -60,6 +60,15 @@ def port_factory(gateway: str) -> Callable[[], OpcUaEquipmentPort]:
     return connect
 
 
+class _Server(uvicorn.Server):
+    """uvicorn re-raises a captured SIGTERM/SIGINT after a graceful shutdown, which would
+    make the process exit with -15; drop it so a clean stop exits 0."""
+
+    def handle_exit(self, sig, frame) -> None:
+        super().handle_exit(sig, frame)
+        self._captured_signals.clear()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="terminal-ecs-service", description="ECS as a service (HTTP + WS).")
     ap.add_argument("--gateway", default="opc.tcp://localhost:4840")
@@ -71,7 +80,9 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_json_logging(getattr(logging, args.log_level.upper()))
     core = EcsCore(load_layout(args.layout), connect=port_factory(args.gateway))
-    uvicorn.run(create_app(core), host=args.host, port=args.port, log_config=None, log_level=args.log_level)
+    config = uvicorn.Config(create_app(core), host=args.host, port=args.port, log_config=None,
+                            log_level=args.log_level)
+    _Server(config).run()
     return 0
 
 
