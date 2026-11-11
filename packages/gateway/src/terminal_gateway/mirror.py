@@ -233,18 +233,47 @@ class EquipmentMirror(_UpstreamLink):
     async def _assign(self, job_json: str) -> bool:
         """Forward ``AssignJob``, except for a job the upstream already runs or ran.
 
-        The ECS re-issues a job id when a forwarded call timed out (e.g. during a link
-        cut) although the upstream executed it; running it again would repeat the job.
-        A job id equal to the mirrored ``CurrentJobId`` or ``LastJobId`` is answered
-        True without forwarding. Unparseable JSON is forwarded (the upstream rejects it).
+        The ECS re-issues a job id (the same id: its job counter only advances on an
+        accepted assign) when a forwarded call timed out although the upstream executed
+        it; running it again would repeat the job. A job id equal to the mirrored
+        ``CurrentJobId`` is answered True without forwarding: its outcome event will
+        follow. One equal to ``LastJobId`` already ended; the ECS ignored its outcome
+        event (it had rejected the job), so it is answered True and the recorded
+        ``LastJobOutcome`` is re-emitted: JOB_COMPLETED, otherwise JOB_FAILED
+        (``FAULT_DURING_OUTAGE``), as the ECS reconciles a job that ended unseen.
+        The ids are read under ``_write_lock`` (no torn read between the two writes of
+        a data change). Unparseable JSON is forwarded (the upstream rejects it).
         """
         job_id = _job_id(job_json)
-        if job_id:
-            for name in ("CurrentJobId", "LastJobId"):
-                if await self._mirrored(name) == job_id:
-                    log.info("assign %s: already %s upstream, idempotent True", job_id, name)
+        if job_id and self.obj is not None:
+            async with self._write_lock:
+                current = await self._mirrored("CurrentJobId")
+                last = await self._mirrored("LastJobId")
+                if current == job_id:
+                    log.info("assign %s: already %s upstream, idempotent True", job_id, "CurrentJobId")
+                    return True
+                if last == job_id:
+                    outcome = await self._mirrored("LastJobOutcome")
+                    log.info("assign %s: already %s upstream, idempotent True (outcome %s re-emitted)",
+                             job_id, "LastJobId", outcome)
+                    await self._emit_outcome(job_id, outcome)
                     return True
         return await self._forward_bool("AssignJob", job_json)
+
+    async def _emit_outcome(self, job_id: str, outcome: object) -> None:
+        """Re-emit the recorded outcome of an ended job (caller holds the write lock)."""
+        if outcome == "COMPLETED":
+            ev = EquipmentEvent(EventKind.JOB_COMPLETED, self.equipment_id, self._sim_time, job_id=job_id)
+        else:
+            if outcome != "FAILED":
+                log.warning("%s: LastJobOutcome %r for %s unknown; reported as failed",
+                            self.equipment_id, outcome, job_id)
+            ev = EquipmentEvent(EventKind.JOB_FAILED, self.equipment_id, self._sim_time, job_id=job_id,
+                                reason="FAULT_DURING_OUTAGE")
+        try:
+            await self._emit(ev)
+        except Exception:
+            log.exception("%s: re-emitting the outcome of %s failed", self.equipment_id, job_id)
 
     async def _mirrored(self, name: str) -> object:
         """The mirrored value of ``name`` (``None`` if it cannot be read)."""

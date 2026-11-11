@@ -92,3 +92,34 @@ async def test_reconnect_log_counter_resets_on_success(monkeypatch, caplog):
         clock.t += CONNECT_RETRY_S
         await _fail(core, clock, 6)
     assert len(_infos(caplog)) == 4
+
+
+class _BindFails(FakePort):
+    def equipment_ids(self):
+        raise ConnectionError("lost while binding")
+
+
+async def test_reconnect_log_counter_not_reset_by_failed_bind(monkeypatch, caplog):
+    """``connect`` returning a port whose bind fails is not a success: the outage goes
+    on and its attempts stay quiet."""
+    clock = Clock()
+    monkeypatch.setattr(core_mod, "_monotonic", clock)
+    state = {"bind_fails": False}
+    bad = _BindFails({"STS-01": (Kind.STS, Position(0, 0))})
+
+    def connect():
+        if state["bind_fails"]:
+            return bad
+        raise ConnectionError("gateway down")
+
+    core = EcsCore(LAYOUT, connect=connect)
+    with caplog.at_level(logging.INFO, logger="terminal_ecs_service.core"):
+        await _fail(core, clock, 6)
+        state["bind_fails"] = True
+        clock.t += CONNECT_RETRY_S
+        assert await core.connect_once() is False
+        state["bind_fails"] = False
+        caplog.clear()
+        clock.t += CONNECT_RETRY_S
+        await _fail(core, clock, 3)
+    assert _infos(caplog) == []

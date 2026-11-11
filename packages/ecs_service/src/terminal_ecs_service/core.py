@@ -142,7 +142,6 @@ class EcsCore:
         except ConnectionError as e:
             self._log_unavailable(e)
             return False
-        self._failed_attempts = 0
         self._link = link
         try:
             self.port.bind(link)
@@ -150,6 +149,7 @@ class EcsCore:
             log.warning("equipment link lost while binding: %s", e)
             self._drop_link(blocking=False)
             return False
+        self._failed_attempts = 0  # bound: the outage is over
         now = self.port.now()
         self._check_time(now)
         if self.dispatcher is None:

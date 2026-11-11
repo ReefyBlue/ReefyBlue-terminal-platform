@@ -63,6 +63,15 @@ class EcsClient:
     def status(self) -> dict:
         return self._get("/status")
 
+    def status_if_connected(self) -> dict | None:
+        """``GET /status``; ``None`` on 503 (the request that first hits a lost
+        equipment link answers 503, later ones are served from cache)."""
+        resp = self._http.get("/status")
+        if resp.status_code == 503:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+
     def kpis(self) -> dict[str, float]:
         return self._get("/kpis")
 

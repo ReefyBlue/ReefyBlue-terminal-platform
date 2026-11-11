@@ -342,7 +342,8 @@ def run_once_http(
 def _poll_until_done(client: EcsClient, port: OpcUaEquipmentPort, t0: float,
                      duration_s: float) -> bool:
     """Poll ``GET /status`` until ``open == 0`` (returns ``timed_out`` False) or
-    ``duration_s`` of sim time from ``t0`` (True).
+    ``duration_s`` of sim time from ``t0`` (True). A 503 (the ECS's equipment link just
+    failed) is retried and counts as no sim-time progress for the stall timeout.
 
     The runner's port has no subscribers; its queue is drained to keep it empty. If
     only that link fails (the ECS has its own), a warning is logged and draining stops:
@@ -351,12 +352,16 @@ def _poll_until_done(client: EcsClient, port: OpcUaEquipmentPort, t0: float,
     last_change = _clock()
     draining = True
     while True:
-        status = client.status()
-        sim_time = float(status["sim_time"])
-        if status["open"] == 0:
-            return False
-        if sim_time - t0 >= duration_s:
-            return True
+        status = client.status_if_connected()
+        if status is None:  # the ECS just lost its equipment link: retry, stall-bounded
+            log.warning("GET /status: 503 (ECS equipment link down); retrying")
+            sim_time = last_sim
+        else:
+            sim_time = float(status["sim_time"])
+            if status["open"] == 0:
+                return False
+            if sim_time - t0 >= duration_s:
+                return True
         if sim_time != last_sim:
             last_sim, last_change = sim_time, _clock()
         elif _clock() - last_change >= STALL_TIMEOUT_S:
