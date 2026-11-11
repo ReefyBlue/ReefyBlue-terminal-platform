@@ -793,6 +793,270 @@ transfer_zones:
     y_m: 135.0
     size: '40'
     reefer: true
+- block: Q
+  approach_lane_id: DL4
+  racks:
+  - id: RK-Q-1
+    x_m: 704.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-Q-2
+    x_m: 708.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-Q-3
+    x_m: 711.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-Q-4
+    x_m: 715.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-Q-5
+    x_m: 718.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-Q-R
+    x_m: 725.5
+    y_m: 135.0
+    size: '40'
+    reefer: true
+- block: R
+  approach_lane_id: DL4
+  racks:
+  - id: RK-R-1
+    x_m: 746.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-R-2
+    x_m: 750.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-R-3
+    x_m: 753.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-R-4
+    x_m: 757.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-R-5
+    x_m: 760.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-R-R
+    x_m: 767.5
+    y_m: 135.0
+    size: '40'
+    reefer: true
+- block: S
+  approach_lane_id: DL4
+  racks:
+  - id: RK-S-1
+    x_m: 788.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-S-2
+    x_m: 792.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-S-3
+    x_m: 795.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-S-4
+    x_m: 799.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-S-5
+    x_m: 802.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-S-R
+    x_m: 809.5
+    y_m: 135.0
+    size: '40'
+    reefer: true
+- block: T
+  approach_lane_id: DL4
+  racks:
+  - id: RK-T-1
+    x_m: 830.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-T-2
+    x_m: 834.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-T-3
+    x_m: 837.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-T-4
+    x_m: 841.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-T-5
+    x_m: 844.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-T-R
+    x_m: 851.5
+    y_m: 135.0
+    size: '40'
+    reefer: true
+- block: U
+  approach_lane_id: DL4
+  racks:
+  - id: RK-U-1
+    x_m: 872.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-U-2
+    x_m: 876.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-U-3
+    x_m: 879.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-U-4
+    x_m: 883.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-U-5
+    x_m: 886.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-U-R
+    x_m: 893.5
+    y_m: 135.0
+    size: '40'
+    reefer: true
+- block: V
+  approach_lane_id: DL4
+  racks:
+  - id: RK-V-1
+    x_m: 914.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-V-2
+    x_m: 918.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-V-3
+    x_m: 921.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-V-4
+    x_m: 925.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-V-5
+    x_m: 928.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-V-R
+    x_m: 935.5
+    y_m: 135.0
+    size: '40'
+    reefer: true
+- block: W
+  approach_lane_id: DL4
+  racks:
+  - id: RK-W-1
+    x_m: 956.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-W-2
+    x_m: 960.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-W-3
+    x_m: 963.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-W-4
+    x_m: 967.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-W-5
+    x_m: 970.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-W-R
+    x_m: 977.5
+    y_m: 135.0
+    size: '40'
+    reefer: true
+- block: X
+  approach_lane_id: DL4
+  racks:
+  - id: RK-X-1
+    x_m: 998.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-X-2
+    x_m: 1002.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-X-3
+    x_m: 1005.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-X-4
+    x_m: 1009.0
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-X-5
+    x_m: 1012.5
+    y_m: 135.0
+    size: '40'
+    reefer: false
+  - id: RK-X-R
+    x_m: 1019.5
+    y_m: 135.0
+    size: '40'
+    reefer: true
 blocks:
 - id: A
   x0_m: 25.0
@@ -1034,70 +1298,222 @@ blocks:
   maintenance_lane_side: E
   reefer_rows:
   - 9
+- id: Q
+  x0_m: 697.0
+  y0_m: 165.0
+  bays: 40
+  rows: 10
+  tiers: 5
+  asc_ws_id: ASC-Q-WS
+  asc_ls_id: ASC-Q-LS
+  bay_pitch_m: 6.5
+  row_pitch_m: 2.9
+  tier_h_m: 2.9
+  asc_min_gap_bays: 2
+  maintenance_lane_side: E
+  reefer_rows:
+  - 9
+- id: R
+  x0_m: 739.0
+  y0_m: 165.0
+  bays: 40
+  rows: 10
+  tiers: 5
+  asc_ws_id: ASC-R-WS
+  asc_ls_id: ASC-R-LS
+  bay_pitch_m: 6.5
+  row_pitch_m: 2.9
+  tier_h_m: 2.9
+  asc_min_gap_bays: 2
+  maintenance_lane_side: E
+  reefer_rows:
+  - 9
+- id: S
+  x0_m: 781.0
+  y0_m: 165.0
+  bays: 40
+  rows: 10
+  tiers: 5
+  asc_ws_id: ASC-S-WS
+  asc_ls_id: ASC-S-LS
+  bay_pitch_m: 6.5
+  row_pitch_m: 2.9
+  tier_h_m: 2.9
+  asc_min_gap_bays: 2
+  maintenance_lane_side: E
+  reefer_rows:
+  - 9
+- id: T
+  x0_m: 823.0
+  y0_m: 165.0
+  bays: 40
+  rows: 10
+  tiers: 5
+  asc_ws_id: ASC-T-WS
+  asc_ls_id: ASC-T-LS
+  bay_pitch_m: 6.5
+  row_pitch_m: 2.9
+  tier_h_m: 2.9
+  asc_min_gap_bays: 2
+  maintenance_lane_side: E
+  reefer_rows:
+  - 9
+- id: U
+  x0_m: 865.0
+  y0_m: 165.0
+  bays: 40
+  rows: 10
+  tiers: 5
+  asc_ws_id: ASC-U-WS
+  asc_ls_id: ASC-U-LS
+  bay_pitch_m: 6.5
+  row_pitch_m: 2.9
+  tier_h_m: 2.9
+  asc_min_gap_bays: 2
+  maintenance_lane_side: E
+  reefer_rows:
+  - 9
+- id: V
+  x0_m: 907.0
+  y0_m: 165.0
+  bays: 40
+  rows: 10
+  tiers: 5
+  asc_ws_id: ASC-V-WS
+  asc_ls_id: ASC-V-LS
+  bay_pitch_m: 6.5
+  row_pitch_m: 2.9
+  tier_h_m: 2.9
+  asc_min_gap_bays: 2
+  maintenance_lane_side: E
+  reefer_rows:
+  - 9
+- id: W
+  x0_m: 949.0
+  y0_m: 165.0
+  bays: 40
+  rows: 10
+  tiers: 5
+  asc_ws_id: ASC-W-WS
+  asc_ls_id: ASC-W-LS
+  bay_pitch_m: 6.5
+  row_pitch_m: 2.9
+  tier_h_m: 2.9
+  asc_min_gap_bays: 2
+  maintenance_lane_side: E
+  reefer_rows:
+  - 9
+- id: X
+  x0_m: 991.0
+  y0_m: 165.0
+  bays: 40
+  rows: 10
+  tiers: 5
+  asc_ws_id: ASC-X-WS
+  asc_ls_id: ASC-X-LS
+  bay_pitch_m: 6.5
+  row_pitch_m: 2.9
+  tier_h_m: 2.9
+  asc_min_gap_bays: 2
+  maintenance_lane_side: E
+  reefer_rows:
+  - 9
 landside:
 - block: A
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: B
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: C
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: D
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: E
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: F
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: G
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: H
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: I
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: J
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: K
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: L
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: M
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: N
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: O
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: P
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
+  len_m: 35.0
+- block: Q
+  lanes: 4
+  y_m: 425.0
+  len_m: 35.0
+- block: R
+  lanes: 4
+  y_m: 425.0
+  len_m: 35.0
+- block: S
+  lanes: 4
+  y_m: 425.0
+  len_m: 35.0
+- block: T
+  lanes: 4
+  y_m: 425.0
+  len_m: 35.0
+- block: U
+  lanes: 4
+  y_m: 425.0
+  len_m: 35.0
+- block: V
+  lanes: 4
+  y_m: 425.0
+  len_m: 35.0
+- block: W
+  lanes: 4
+  y_m: 425.0
+  len_m: 35.0
+- block: X
+  lanes: 4
+  y_m: 425.0
   len_m: 35.0
 zones:
 - name: berth-A
@@ -1170,13 +1586,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 25.0
-    - 525.0
+    - 425.0
   - - 54.0
-    - 525.0
+    - 425.0
   - - 54.0
-    - 560.0
+    - 460.0
   - - 25.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-B
   type: transfer_ws
   polygon:
@@ -1203,13 +1619,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 67.0
-    - 525.0
+    - 425.0
   - - 96.0
-    - 525.0
+    - 425.0
   - - 96.0
-    - 560.0
+    - 460.0
   - - 67.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-C
   type: transfer_ws
   polygon:
@@ -1236,13 +1652,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 109.0
-    - 525.0
+    - 425.0
   - - 138.0
-    - 525.0
+    - 425.0
   - - 138.0
-    - 560.0
+    - 460.0
   - - 109.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-D
   type: transfer_ws
   polygon:
@@ -1269,13 +1685,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 151.0
-    - 525.0
+    - 425.0
   - - 180.0
-    - 525.0
+    - 425.0
   - - 180.0
-    - 560.0
+    - 460.0
   - - 151.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-E
   type: transfer_ws
   polygon:
@@ -1302,13 +1718,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 193.0
-    - 525.0
+    - 425.0
   - - 222.0
-    - 525.0
+    - 425.0
   - - 222.0
-    - 560.0
+    - 460.0
   - - 193.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-F
   type: transfer_ws
   polygon:
@@ -1335,13 +1751,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 235.0
-    - 525.0
+    - 425.0
   - - 264.0
-    - 525.0
+    - 425.0
   - - 264.0
-    - 560.0
+    - 460.0
   - - 235.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-G
   type: transfer_ws
   polygon:
@@ -1368,13 +1784,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 277.0
-    - 525.0
+    - 425.0
   - - 306.0
-    - 525.0
+    - 425.0
   - - 306.0
-    - 560.0
+    - 460.0
   - - 277.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-H
   type: transfer_ws
   polygon:
@@ -1401,13 +1817,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 319.0
-    - 525.0
+    - 425.0
   - - 348.0
-    - 525.0
+    - 425.0
   - - 348.0
-    - 560.0
+    - 460.0
   - - 319.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-I
   type: transfer_ws
   polygon:
@@ -1434,13 +1850,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 361.0
-    - 525.0
+    - 425.0
   - - 390.0
-    - 525.0
+    - 425.0
   - - 390.0
-    - 560.0
+    - 460.0
   - - 361.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-J
   type: transfer_ws
   polygon:
@@ -1467,13 +1883,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 403.0
-    - 525.0
+    - 425.0
   - - 432.0
-    - 525.0
+    - 425.0
   - - 432.0
-    - 560.0
+    - 460.0
   - - 403.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-K
   type: transfer_ws
   polygon:
@@ -1500,13 +1916,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 445.0
-    - 525.0
+    - 425.0
   - - 474.0
-    - 525.0
+    - 425.0
   - - 474.0
-    - 560.0
+    - 460.0
   - - 445.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-L
   type: transfer_ws
   polygon:
@@ -1533,13 +1949,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 487.0
-    - 525.0
+    - 425.0
   - - 516.0
-    - 525.0
+    - 425.0
   - - 516.0
-    - 560.0
+    - 460.0
   - - 487.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-M
   type: transfer_ws
   polygon:
@@ -1566,13 +1982,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 529.0
-    - 525.0
+    - 425.0
   - - 558.0
-    - 525.0
+    - 425.0
   - - 558.0
-    - 560.0
+    - 460.0
   - - 529.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-N
   type: transfer_ws
   polygon:
@@ -1599,13 +2015,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 571.0
-    - 525.0
+    - 425.0
   - - 600.0
-    - 525.0
+    - 425.0
   - - 600.0
-    - 560.0
+    - 460.0
   - - 571.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-O
   type: transfer_ws
   polygon:
@@ -1632,13 +2048,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 613.0
-    - 525.0
+    - 425.0
   - - 642.0
-    - 525.0
+    - 425.0
   - - 642.0
-    - 560.0
+    - 460.0
   - - 613.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-P
   type: transfer_ws
   polygon:
@@ -1665,13 +2081,277 @@ zones:
   type: truck_interchange
   polygon:
   - - 655.0
-    - 525.0
+    - 425.0
   - - 684.0
-    - 525.0
+    - 425.0
   - - 684.0
-    - 560.0
+    - 460.0
   - - 655.0
-    - 560.0
+    - 460.0
+- name: transfer-ws-Q
+  type: transfer_ws
+  polygon:
+  - - 697.0
+    - 110.0
+  - - 726.0
+    - 110.0
+  - - 726.0
+    - 160.0
+  - - 697.0
+    - 160.0
+- name: block-Q
+  type: block
+  polygon:
+  - - 697.0
+    - 165.0
+  - - 726.0
+    - 165.0
+  - - 726.0
+    - 425.0
+  - - 697.0
+    - 425.0
+- name: truck-interchange-Q
+  type: truck_interchange
+  polygon:
+  - - 697.0
+    - 425.0
+  - - 726.0
+    - 425.0
+  - - 726.0
+    - 460.0
+  - - 697.0
+    - 460.0
+- name: transfer-ws-R
+  type: transfer_ws
+  polygon:
+  - - 739.0
+    - 110.0
+  - - 768.0
+    - 110.0
+  - - 768.0
+    - 160.0
+  - - 739.0
+    - 160.0
+- name: block-R
+  type: block
+  polygon:
+  - - 739.0
+    - 165.0
+  - - 768.0
+    - 165.0
+  - - 768.0
+    - 425.0
+  - - 739.0
+    - 425.0
+- name: truck-interchange-R
+  type: truck_interchange
+  polygon:
+  - - 739.0
+    - 425.0
+  - - 768.0
+    - 425.0
+  - - 768.0
+    - 460.0
+  - - 739.0
+    - 460.0
+- name: transfer-ws-S
+  type: transfer_ws
+  polygon:
+  - - 781.0
+    - 110.0
+  - - 810.0
+    - 110.0
+  - - 810.0
+    - 160.0
+  - - 781.0
+    - 160.0
+- name: block-S
+  type: block
+  polygon:
+  - - 781.0
+    - 165.0
+  - - 810.0
+    - 165.0
+  - - 810.0
+    - 425.0
+  - - 781.0
+    - 425.0
+- name: truck-interchange-S
+  type: truck_interchange
+  polygon:
+  - - 781.0
+    - 425.0
+  - - 810.0
+    - 425.0
+  - - 810.0
+    - 460.0
+  - - 781.0
+    - 460.0
+- name: transfer-ws-T
+  type: transfer_ws
+  polygon:
+  - - 823.0
+    - 110.0
+  - - 852.0
+    - 110.0
+  - - 852.0
+    - 160.0
+  - - 823.0
+    - 160.0
+- name: block-T
+  type: block
+  polygon:
+  - - 823.0
+    - 165.0
+  - - 852.0
+    - 165.0
+  - - 852.0
+    - 425.0
+  - - 823.0
+    - 425.0
+- name: truck-interchange-T
+  type: truck_interchange
+  polygon:
+  - - 823.0
+    - 425.0
+  - - 852.0
+    - 425.0
+  - - 852.0
+    - 460.0
+  - - 823.0
+    - 460.0
+- name: transfer-ws-U
+  type: transfer_ws
+  polygon:
+  - - 865.0
+    - 110.0
+  - - 894.0
+    - 110.0
+  - - 894.0
+    - 160.0
+  - - 865.0
+    - 160.0
+- name: block-U
+  type: block
+  polygon:
+  - - 865.0
+    - 165.0
+  - - 894.0
+    - 165.0
+  - - 894.0
+    - 425.0
+  - - 865.0
+    - 425.0
+- name: truck-interchange-U
+  type: truck_interchange
+  polygon:
+  - - 865.0
+    - 425.0
+  - - 894.0
+    - 425.0
+  - - 894.0
+    - 460.0
+  - - 865.0
+    - 460.0
+- name: transfer-ws-V
+  type: transfer_ws
+  polygon:
+  - - 907.0
+    - 110.0
+  - - 936.0
+    - 110.0
+  - - 936.0
+    - 160.0
+  - - 907.0
+    - 160.0
+- name: block-V
+  type: block
+  polygon:
+  - - 907.0
+    - 165.0
+  - - 936.0
+    - 165.0
+  - - 936.0
+    - 425.0
+  - - 907.0
+    - 425.0
+- name: truck-interchange-V
+  type: truck_interchange
+  polygon:
+  - - 907.0
+    - 425.0
+  - - 936.0
+    - 425.0
+  - - 936.0
+    - 460.0
+  - - 907.0
+    - 460.0
+- name: transfer-ws-W
+  type: transfer_ws
+  polygon:
+  - - 949.0
+    - 110.0
+  - - 978.0
+    - 110.0
+  - - 978.0
+    - 160.0
+  - - 949.0
+    - 160.0
+- name: block-W
+  type: block
+  polygon:
+  - - 949.0
+    - 165.0
+  - - 978.0
+    - 165.0
+  - - 978.0
+    - 425.0
+  - - 949.0
+    - 425.0
+- name: truck-interchange-W
+  type: truck_interchange
+  polygon:
+  - - 949.0
+    - 425.0
+  - - 978.0
+    - 425.0
+  - - 978.0
+    - 460.0
+  - - 949.0
+    - 460.0
+- name: transfer-ws-X
+  type: transfer_ws
+  polygon:
+  - - 991.0
+    - 110.0
+  - - 1020.0
+    - 110.0
+  - - 1020.0
+    - 160.0
+  - - 991.0
+    - 160.0
+- name: block-X
+  type: block
+  polygon:
+  - - 991.0
+    - 165.0
+  - - 1020.0
+    - 165.0
+  - - 1020.0
+    - 425.0
+  - - 991.0
+    - 425.0
+- name: truck-interchange-X
+  type: truck_interchange
+  polygon:
+  - - 991.0
+    - 425.0
+  - - 1020.0
+    - 425.0
+  - - 1020.0
+    - 460.0
+  - - 991.0
+    - 460.0
 - name: maintenance-lane-A-B
   type: maintenance_lane
   polygon:
@@ -1837,116 +2517,204 @@ zones:
     - 425.0
   - - 642.0
     - 425.0
+- name: maintenance-lane-P-Q
+  type: maintenance_lane
+  polygon:
+  - - 684.0
+    - 165.0
+  - - 697.0
+    - 165.0
+  - - 697.0
+    - 425.0
+  - - 684.0
+    - 425.0
+- name: maintenance-lane-Q-R
+  type: maintenance_lane
+  polygon:
+  - - 726.0
+    - 165.0
+  - - 739.0
+    - 165.0
+  - - 739.0
+    - 425.0
+  - - 726.0
+    - 425.0
+- name: maintenance-lane-R-S
+  type: maintenance_lane
+  polygon:
+  - - 768.0
+    - 165.0
+  - - 781.0
+    - 165.0
+  - - 781.0
+    - 425.0
+  - - 768.0
+    - 425.0
+- name: maintenance-lane-S-T
+  type: maintenance_lane
+  polygon:
+  - - 810.0
+    - 165.0
+  - - 823.0
+    - 165.0
+  - - 823.0
+    - 425.0
+  - - 810.0
+    - 425.0
+- name: maintenance-lane-T-U
+  type: maintenance_lane
+  polygon:
+  - - 852.0
+    - 165.0
+  - - 865.0
+    - 165.0
+  - - 865.0
+    - 425.0
+  - - 852.0
+    - 425.0
+- name: maintenance-lane-U-V
+  type: maintenance_lane
+  polygon:
+  - - 894.0
+    - 165.0
+  - - 907.0
+    - 165.0
+  - - 907.0
+    - 425.0
+  - - 894.0
+    - 425.0
+- name: maintenance-lane-V-W
+  type: maintenance_lane
+  polygon:
+  - - 936.0
+    - 165.0
+  - - 949.0
+    - 165.0
+  - - 949.0
+    - 425.0
+  - - 936.0
+    - 425.0
+- name: maintenance-lane-W-X
+  type: maintenance_lane
+  polygon:
+  - - 978.0
+    - 165.0
+  - - 991.0
+    - 165.0
+  - - 991.0
+    - 425.0
+  - - 978.0
+    - 425.0
 - name: rail-interchange
   type: rail_interchange
   polygon:
   - - 25.0
-    - 580.0
-  - - 684.0
-    - 580.0
-  - - 684.0
-    - 610.0
+    - 480.0
+  - - 1020.0
+    - 480.0
+  - - 1020.0
+    - 510.0
   - - 25.0
-    - 610.0
+    - 510.0
 - name: rail-terminal
   type: rail_terminal
   polygon:
   - - 25.0
-    - 610.0
-  - - 684.0
-    - 610.0
-  - - 684.0
-    - 680.0
+    - 510.0
+  - - 1020.0
+    - 510.0
+  - - 1020.0
+    - 580.0
   - - 25.0
-    - 680.0
+    - 580.0
 - name: gate
   type: gate
   polygon:
-  - - 724.0
+  - - 1040.0
+    - 480.0
+  - - 1072.0
+    - 480.0
+  - - 1072.0
     - 580.0
-  - - 819.2
+  - - 1040.0
     - 580.0
-  - - 819.2
-    - 680.0
-  - - 724.0
-    - 680.0
 - name: ocr-gate
   type: ocr_gate
   polygon:
-  - - 819.2
+  - - 1072.0
+    - 480.0
+  - - 1104.0
+    - 480.0
+  - - 1104.0
     - 580.0
-  - - 914.4
+  - - 1072.0
     - 580.0
-  - - 914.4
-    - 680.0
-  - - 819.2
-    - 680.0
 - name: tech-gate
   type: tech_gate
   polygon:
-  - - 914.4
+  - - 1104.0
+    - 480.0
+  - - 1136.0
+    - 480.0
+  - - 1136.0
     - 580.0
-  - - 1009.6
+  - - 1104.0
     - 580.0
-  - - 1009.6
-    - 680.0
-  - - 914.4
-    - 680.0
 - name: customs
   type: customs
   polygon:
-  - - 1009.6
+  - - 1136.0
+    - 480.0
+  - - 1168.0
+    - 480.0
+  - - 1168.0
     - 580.0
-  - - 1104.8
+  - - 1136.0
     - 580.0
-  - - 1104.8
-    - 680.0
-  - - 1009.6
-    - 680.0
 - name: problem-parking
   type: problem_parking
   polygon:
-  - - 1104.8
-    - 580.0
+  - - 1168.0
+    - 480.0
+  - - 1200.0
+    - 480.0
   - - 1200.0
     - 580.0
-  - - 1200.0
-    - 680.0
-  - - 1104.8
-    - 680.0
+  - - 1168.0
+    - 580.0
 - name: oog
   type: oog
   polygon:
-  - - 724.0
+  - - 1040.0
     - 165.0
   - - 1200.0
     - 165.0
   - - 1200.0
-    - 296.667
-  - - 724.0
-    - 296.667
+    - 263.333
+  - - 1040.0
+    - 263.333
 - name: building-tob
   type: building
   polygon:
-  - - 724.0
-    - 296.667
+  - - 1040.0
+    - 263.333
   - - 1200.0
-    - 296.667
+    - 263.333
   - - 1200.0
-    - 428.333
-  - - 724.0
-    - 428.333
+    - 361.667
+  - - 1040.0
+    - 361.667
 - name: building-workshop
   type: building
   polygon:
-  - - 724.0
-    - 428.333
+  - - 1040.0
+    - 361.667
   - - 1200.0
-    - 428.333
+    - 361.667
   - - 1200.0
-    - 560.0
-  - - 724.0
-    - 560.0
+    - 460.0
+  - - 1040.0
+    - 460.0
 opcua:
   base_port: 48400
   host: localhost

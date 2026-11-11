@@ -15,7 +15,7 @@ def _small():
 
 
 def _demo():
-    return standard_terminal(name="mv", quay_length_m=1200, n_berths=2, n_sts=8, n_blocks=16)
+    return standard_terminal(name="mv", quay_length_m=1200, n_berths=2, n_sts=8, n_blocks=24)
 
 
 def test_small_counts():
@@ -26,16 +26,18 @@ def test_small_counts():
     assert len(t.transfer_zones) == 4
     assert all(len(z.racks) == 6 for z in t.transfer_zones)
     assert len(t.apron.buffers) == 12
-    assert t.depth_m == 560.0
+    assert t.depth_m == 460.0
 
 
 def test_demo_counts():
     t = _demo()
     validate(t)
     assert len(t.sts) == 8
-    assert len(t.blocks) == 16
-    assert sum(len(z.racks) for z in t.transfer_zones) == 96
-    assert t.depth_m == 560.0
+    assert len(t.blocks) == 24
+    assert sum(len(z.racks) for z in t.transfer_zones) == 144
+    assert len({i for b in t.blocks for i in (b.asc_ws_id, b.asc_ls_id)}) == 48
+    assert t.blocks[-1].x1_m == pytest.approx(1020.0)
+    assert t.depth_m == 460.0
 
 
 def test_demo_matches_spec_values():
@@ -49,8 +51,8 @@ def test_demo_matches_spec_values():
         (70, "E"), (76, "W"), (82, "E"), (88, "W")]
     assert t.apron.crossings_every_m == 50
     assert [b.x_m for b in t.apron.buffers if b.sts_id == "STS-01"] == [67.0, 83.0]
-    assert [b.id for b in t.blocks] == list("ABCDEFGHIJKLMNOP")
-    assert [b.x0_m for b in t.blocks] == [25 + 42 * i for i in range(16)]
+    assert [b.id for b in t.blocks] == list("ABCDEFGHIJKLMNOPQRSTUVWX")
+    assert [b.x0_m for b in t.blocks] == [25 + 42 * i for i in range(24)]
     a = t.block("A")
     assert (a.y0_m, a.bays, a.rows, a.tiers, a.asc_ws_id, a.asc_ls_id, a.reefer_rows) == (
         165, 40, 10, 5, "ASC-A-WS", "ASC-A-LS", (9,))
@@ -58,17 +60,32 @@ def test_demo_matches_spec_values():
     assert [k.x_m for k in racks] == [32.5, 36.0, 39.5, 43.0, 46.5, 53.5]
     assert [k.reefer for k in racks] == [False] * 5 + [True]
     assert all(k.y_m == 135 and k.size == "40" for k in racks)
-    assert all((h.y_m, h.lanes, h.len_m) == (525, 4, 35) for h in t.landside)
+    assert all((h.y_m, h.lanes, h.len_m) == (425, 4, 35) for h in t.landside)
+
+
+def test_small_matches_spec_values():
+    t = _small()
+    assert [s.x0_m for s in t.sts] == [66.667, 200.0, 333.333]
+    assert [b.x_m - t.sts[0].x0_m for b in t.apron.buffers if b.sts_id == "STS-01"] == pytest.approx(
+        [-8, 8, -16, 16])
+    assert [b.id for b in t.apron.buffers][:4] == ["BUF-01-1", "BUF-01-2", "BUF-01-3", "BUF-01-4"]
+    assert [b.x0_m for b in t.blocks] == [25.0, 67.0, 109.0, 151.0]
+    assert t.blocks[-1].x1_m == pytest.approx(180.0)
+    assert [(b.id, b.from_m, b.to_m) for b in t.quay.berths] == [("A", 0.0, 400.0)]
 
 
 def test_zones_cover_spec_table():
     t = _demo()
     types = {z.type for z in t.zones}
     assert types == ZONE_TYPES
-    assert sum(z.type == "block" for z in t.zones) == 16
-    assert sum(z.type == "transfer_ws" for z in t.zones) == 16
-    assert sum(z.type == "truck_interchange" for z in t.zones) == 16
-    assert sum(z.type == "maintenance_lane" for z in t.zones) == 15
+    assert sum(z.type == "block" for z in t.zones) == 24
+    assert sum(z.type == "transfer_ws" for z in t.zones) == 24
+    assert sum(z.type == "truck_interchange" for z in t.zones) == 24
+    assert sum(z.type == "maintenance_lane" for z in t.zones) == 23
+    byname = {z.name: z for z in t.zones}
+    assert byname["oog"].polygon[0] == (1040.0, 165.0)
+    assert byname["rail-interchange"].polygon[0][1] == 480.0
+    assert byname["rail-terminal"].polygon[2][1] == 580.0
     assert sum(z.type == "building" for z in t.zones) == 2
     assert all(len(z.polygon) == 4 for z in t.zones)
 
@@ -102,6 +119,7 @@ def test_to_yaml_dict_is_deterministic_and_plain():
 @pytest.mark.parametrize("fname, build", [("terminal_mv_small.yaml", _small), ("terminal_mv.yaml", _demo)])
 def test_shipped_files_match_builder(fname, build):
     assert load_terminal(ROOT / fname) == build()
+    assert yaml.safe_load((ROOT / fname).read_text()) == to_yaml_dict(build())
 
 
 def test_validate_rejects_bad_enums():

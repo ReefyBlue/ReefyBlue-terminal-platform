@@ -14,19 +14,21 @@ Geometry (spec §3 values, generalised where the spec only gives the 1200 m demo
 - Apron y 40..165; drive lanes ``DL1``..``DL4`` at y 70/76/82/88, alternating E/W; crossings every
   50 m. Buffers at y 95, at x0 ±8 (and ±16, ±24, ... when ``n_agv_buffers_per_sts`` > 2), ordered
   -8, +8, -16, +16, ...; ids ``BUF-<nn>-<k>``.
-- Blocks ``A``, ``B``, ... at x0 = ``first_block_x_m + block_pitch_m·i``, y0 165; ``reefer_rows`` =
+- Blocks ``A``, ``B``, ... at x0 = ``first_block_x_m + block_pitch_m·i``, y0 165 (the demo's 24
+  blocks span x 25..1020 of the 1200 m quay); ``reefer_rows`` =
   the landward-most row index (``rows-1``); ASC ids ``ASC-<B>-WS`` / ``ASC-<B>-LS``.
 - Transfer zone per block: ``racks_per_block`` racks ``RK-<B>-<k>`` (size "40") at y 135, centred
   on the block centre with pitch 3.5 (5 racks -> centre -7 ... +7), plus reefer/exception rack
   ``RK-<B>-R`` at centre +14. Approach lane = the landward-most drive lane (``DL4``).
-- Truck heads at y 525 with 4 lanes and ``len_m`` 35 (spec: y 525..560), so ``depth_m`` = 560.
+- Truck heads start at the block end (``y_m`` = block y1 = 165 + 40·6.5 = 425) with 4 lanes and
+  ``len_m`` 35, so ``depth_m`` = 460 (the spec's "yard y 165..525" was an arithmetic slip).
 - Zones (4-point rectangles, spec §3.1): ``berth`` per berth (x of the berth, y 0..40);
   ``agv_lanes`` = apron; ``agv_parking`` = buffer strip y 92..98; per block ``block``,
-  ``transfer_ws`` (block x-range, y 110..160) and ``truck_interchange`` (y 525..560);
+  ``transfer_ws`` (block x-range, y 110..160) and ``truck_interchange`` (y 425..460);
   ``maintenance_lane`` in each gap between adjacent blocks. Placeholders: north (landward) strip
   y depth+20..depth+120 — ``rail_interchange`` (y +20..+50) and ``rail_terminal`` (+50..+120)
   over the yard's x-range, and the gate complex (``gate``, ``ocr_gate``, ``tech_gate``, ``customs``,
-  ``problem_parking``, side by side) to the north-east; east strip (yard east edge + 40 m .. quay
+  ``problem_parking``, side by side) to the north-east; east strip (yard east edge + 20 m .. quay
   end, y 165..depth) split into ``oog``, ``building`` TOB and ``building`` workshop.
 """
 from __future__ import annotations
@@ -71,11 +73,10 @@ RACK_Y_M = 135.0
 RACK_PITCH_M = 3.5
 REEFER_RACK_OFFSET_M = 14.0
 BLOCK_Y0_M = 165.0
-TRUCK_HEAD_Y_M = 525.0
 TRUCK_HEAD_LEN_M = 35.0
 TRUCK_LANES = 4
 NORTH_STRIP_M = (20.0, 50.0, 120.0)  # offsets beyond depth: start, rail split, end
-EAST_STRIP_GAP_M = 40.0
+EAST_STRIP_GAP_M = 20.0
 
 
 def _r(v: float) -> float:
@@ -117,7 +118,7 @@ def standard_terminal(
 
     berth_len = q / n_berths
     berths = tuple(
-        Berth(bid, _r(berth_len * i), q if i == n_berths - 1 else _r(berth_len * (i + 1)))
+        Berth(bid, _r(berth_len * i), _r(q if i == n_berths - 1 else berth_len * (i + 1)))
         for i, bid in enumerate(_letters(n_berths, "berths")))
 
     def berth_of(x: float) -> str:
@@ -148,7 +149,7 @@ def standard_terminal(
     landside: list[TruckHead] = []
     for i, bid in enumerate(_letters(n_blocks, "blocks")):
         b = Block(
-            id=bid, x0_m=float(first_block_x_m + block_pitch_m * i), y0_m=BLOCK_Y0_M,
+            id=bid, x0_m=_r(first_block_x_m + block_pitch_m * i), y0_m=BLOCK_Y0_M,
             bays=block_bays, rows=block_rows, tiers=block_tiers,
             asc_ws_id=f"ASC-{bid}-WS", asc_ls_id=f"ASC-{bid}-LS",
             reefer_rows=(block_rows - 1,),
@@ -160,13 +161,13 @@ def standard_terminal(
                  for k in range(racks_per_block)]
         racks.append(Rack(f"RK-{bid}-R", _r(centre + REEFER_RACK_OFFSET_M), RACK_Y_M, "40", reefer=True))
         transfer_zones.append(TransferZone(bid, tuple(racks), approach))
-        landside.append(TruckHead(bid, TRUCK_LANES, TRUCK_HEAD_Y_M, TRUCK_HEAD_LEN_M))
+        landside.append(TruckHead(bid, TRUCK_LANES, _r(b.y1_m), TRUCK_HEAD_LEN_M))
 
     yard_x0 = blocks[0].x0_m
     yard_x1 = blocks[-1].x1_m
     if yard_x1 > q:
         raise ValueError(f"blocks end at x={yard_x1} m, beyond the {q} m quay")
-    depth = max([b.y1_m for b in blocks] + [TRUCK_HEAD_Y_M + TRUCK_HEAD_LEN_M])
+    depth = max([b.y1_m for b in blocks] + [h.y_m + h.len_m for h in landside])
 
     zones: list[Zone] = [Zone(f"berth-{b.id}", "berth", _rect(b.from_m, 0, b.to_m, RAIL_Y_LS_M))
                          for b in berths]
@@ -177,7 +178,7 @@ def standard_terminal(
                           _rect(b.x0_m, TRANSFER_Y_M[0], b.x1_m, TRANSFER_Y_M[1])))
         zones.append(Zone(f"block-{b.id}", "block", _rect(b.x0_m, b.y0_m, b.x1_m, b.y1_m)))
         zones.append(Zone(f"truck-interchange-{b.id}", "truck_interchange",
-                          _rect(b.x0_m, TRUCK_HEAD_Y_M, b.x1_m, TRUCK_HEAD_Y_M + TRUCK_HEAD_LEN_M)))
+                          _rect(b.x0_m, b.y1_m, b.x1_m, b.y1_m + TRUCK_HEAD_LEN_M)))
     for a, b in pairwise(blocks):
         zones.append(Zone(f"maintenance-lane-{a.id}-{b.id}", "maintenance_lane",
                           _rect(a.x1_m, a.y0_m, b.x0_m, a.y1_m)))

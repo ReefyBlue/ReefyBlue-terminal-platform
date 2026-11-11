@@ -147,7 +147,7 @@ class TruckHead:
     block: str
     lanes: int
     y_m: float
-    len_m: float = 0.0  # landward extent of the truck head (spec §3: y 525..560 -> 35)
+    len_m: float = 0.0  # landward extent of the truck head (standard terminal: 35)
 
 
 @dataclass(frozen=True)

@@ -337,19 +337,19 @@ blocks:
 landside:
 - block: A
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: B
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: C
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 - block: D
   lanes: 4
-  y_m: 525.0
+  y_m: 425.0
   len_m: 35.0
 zones:
 - name: berth-A
@@ -411,13 +411,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 25.0
-    - 525.0
+    - 425.0
   - - 54.0
-    - 525.0
+    - 425.0
   - - 54.0
-    - 560.0
+    - 460.0
   - - 25.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-B
   type: transfer_ws
   polygon:
@@ -444,13 +444,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 67.0
-    - 525.0
+    - 425.0
   - - 96.0
-    - 525.0
+    - 425.0
   - - 96.0
-    - 560.0
+    - 460.0
   - - 67.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-C
   type: transfer_ws
   polygon:
@@ -477,13 +477,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 109.0
-    - 525.0
+    - 425.0
   - - 138.0
-    - 525.0
+    - 425.0
   - - 138.0
-    - 560.0
+    - 460.0
   - - 109.0
-    - 560.0
+    - 460.0
 - name: transfer-ws-D
   type: transfer_ws
   polygon:
@@ -510,13 +510,13 @@ zones:
   type: truck_interchange
   polygon:
   - - 151.0
-    - 525.0
+    - 425.0
   - - 180.0
-    - 525.0
+    - 425.0
   - - 180.0
-    - 560.0
+    - 460.0
   - - 151.0
-    - 560.0
+    - 460.0
 - name: maintenance-lane-A-B
   type: maintenance_lane
   polygon:
@@ -554,112 +554,112 @@ zones:
   type: rail_interchange
   polygon:
   - - 25.0
-    - 580.0
+    - 480.0
   - - 180.0
-    - 580.0
+    - 480.0
   - - 180.0
-    - 610.0
+    - 510.0
   - - 25.0
-    - 610.0
+    - 510.0
 - name: rail-terminal
   type: rail_terminal
   polygon:
   - - 25.0
-    - 610.0
+    - 510.0
   - - 180.0
-    - 610.0
+    - 510.0
   - - 180.0
-    - 680.0
+    - 580.0
   - - 25.0
-    - 680.0
+    - 580.0
 - name: gate
   type: gate
   polygon:
-  - - 220.0
+  - - 200.0
+    - 480.0
+  - - 240.0
+    - 480.0
+  - - 240.0
     - 580.0
-  - - 256.0
+  - - 200.0
     - 580.0
-  - - 256.0
-    - 680.0
-  - - 220.0
-    - 680.0
 - name: ocr-gate
   type: ocr_gate
   polygon:
-  - - 256.0
+  - - 240.0
+    - 480.0
+  - - 280.0
+    - 480.0
+  - - 280.0
     - 580.0
-  - - 292.0
+  - - 240.0
     - 580.0
-  - - 292.0
-    - 680.0
-  - - 256.0
-    - 680.0
 - name: tech-gate
   type: tech_gate
   polygon:
-  - - 292.0
+  - - 280.0
+    - 480.0
+  - - 320.0
+    - 480.0
+  - - 320.0
     - 580.0
-  - - 328.0
+  - - 280.0
     - 580.0
-  - - 328.0
-    - 680.0
-  - - 292.0
-    - 680.0
 - name: customs
   type: customs
   polygon:
-  - - 328.0
+  - - 320.0
+    - 480.0
+  - - 360.0
+    - 480.0
+  - - 360.0
     - 580.0
-  - - 364.0
+  - - 320.0
     - 580.0
-  - - 364.0
-    - 680.0
-  - - 328.0
-    - 680.0
 - name: problem-parking
   type: problem_parking
   polygon:
-  - - 364.0
-    - 580.0
+  - - 360.0
+    - 480.0
+  - - 400.0
+    - 480.0
   - - 400.0
     - 580.0
-  - - 400.0
-    - 680.0
-  - - 364.0
-    - 680.0
+  - - 360.0
+    - 580.0
 - name: oog
   type: oog
   polygon:
-  - - 220.0
+  - - 200.0
     - 165.0
   - - 400.0
     - 165.0
   - - 400.0
-    - 296.667
-  - - 220.0
-    - 296.667
+    - 263.333
+  - - 200.0
+    - 263.333
 - name: building-tob
   type: building
   polygon:
-  - - 220.0
-    - 296.667
+  - - 200.0
+    - 263.333
   - - 400.0
-    - 296.667
+    - 263.333
   - - 400.0
-    - 428.333
-  - - 220.0
-    - 428.333
+    - 361.667
+  - - 200.0
+    - 361.667
 - name: building-workshop
   type: building
   polygon:
-  - - 220.0
-    - 428.333
+  - - 200.0
+    - 361.667
   - - 400.0
-    - 428.333
+    - 361.667
   - - 400.0
-    - 560.0
-  - - 220.0
-    - 560.0
+    - 460.0
+  - - 200.0
+    - 460.0
 opcua:
   base_port: 48400
   host: localhost
