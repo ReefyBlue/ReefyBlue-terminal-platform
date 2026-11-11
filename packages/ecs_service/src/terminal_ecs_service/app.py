@@ -31,11 +31,15 @@ from terminal_ecs_service.core import EcsCore
 from terminal_ecs_service.schemas import (
     AcceptedOut,
     AlarmOut,
+    BlockOut,
     HealthOut,
+    LayoutOut,
+    PositionOut,
     RefusedOut,
     ReleaseOut,
     ResolveIn,
     ResolveOut,
+    StsOut,
     WorkOrderErrorOut,
     WorkOrderErrorsOut,
     WorkOrderIn,
@@ -225,6 +229,29 @@ def create_app(core: EcsCore, *, run_loop: bool = True) -> FastAPI:
             return JSONResponse({"connected": True, "sim_time": core.port.now(), "error": "sim_time_reversed"},
                                 status_code=503)
         return HealthOut(connected=True, sim_time=core.port.now())
+
+    @app.get("/layout", response_model=LayoutOut)
+    async def get_layout() -> LayoutOut:
+        """Static terminal geometry; needs no equipment link."""
+        lo = core.layout
+        return LayoutOut(
+            quay_length_m=lo.quay_length_m,
+            grid_cell_m=lo.grid_cell_m,
+            grid_cols=lo.grid_cols,
+            grid_rows=lo.grid_rows,
+            sts=[
+                StsOut(equipment_id=s.equipment_id, x=s.position.x, y=s.position.y,
+                       lane_cells=(tuple(s.lane_cells[0]), tuple(s.lane_cells[1])))
+                for s in lo.sts
+            ],
+            blocks=[
+                BlockOut(block=b.block, asc_id=b.asc_id,
+                         tp_ws=PositionOut(x=b.tp_ws.x, y=b.tp_ws.y), tp_ws_cell=tuple(b.tp_ws_cell),
+                         bays=b.bays, rows=b.rows, tiers=b.tiers)
+                for b in lo.blocks
+            ],
+            agv_start_cells=[tuple(c) for c in lo.agv_start_cells],
+        )
 
     @app.websocket("/events")
     async def events(ws: WebSocket) -> None:
