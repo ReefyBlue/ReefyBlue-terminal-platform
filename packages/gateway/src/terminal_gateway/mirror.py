@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 
@@ -35,6 +36,15 @@ METHOD_TIMEOUT_S = 2.0
 RECONNECT_S = 5.0
 CONNECT_TIMEOUT_S = 2.0
 WATCHDOG_S = 1.0
+
+
+def _job_id(job_json: str) -> str | None:
+    """``job_id`` of an ``AssignJob`` argument; ``None`` if it is not a JSON object with one."""
+    try:
+        job_id = json.loads(job_json)["job_id"]
+    except (TypeError, ValueError, KeyError):
+        return None
+    return job_id if isinstance(job_id, str) else None
 
 
 async def _safe_disconnect(client: Client) -> None:
@@ -221,7 +231,30 @@ class EquipmentMirror(_UpstreamLink):
         return bool(await self._call(self._uobj, self._uidx, method, *args))
 
     async def _assign(self, job_json: str) -> bool:
+        """Forward ``AssignJob``, except for a job the upstream already runs or ran.
+
+        The ECS re-issues a job id when a forwarded call timed out (e.g. during a link
+        cut) although the upstream executed it; running it again would repeat the job.
+        A job id equal to the mirrored ``CurrentJobId`` or ``LastJobId`` is answered
+        True without forwarding. Unparseable JSON is forwarded (the upstream rejects it).
+        """
+        job_id = _job_id(job_json)
+        if job_id:
+            for name in ("CurrentJobId", "LastJobId"):
+                if await self._mirrored(name) == job_id:
+                    log.info("assign %s: already %s upstream, idempotent True", job_id, name)
+                    return True
         return await self._forward_bool("AssignJob", job_json)
+
+    async def _mirrored(self, name: str) -> object:
+        """The mirrored value of ``name`` (``None`` if it cannot be read)."""
+        if self.obj is None:
+            return None
+        try:
+            return await (await get_var(self.obj, name)).read_value()
+        except Exception:
+            log.exception("%s: reading mirrored %s failed", self.equipment_id, name)
+            return None
 
     async def _cancel(self) -> bool:
         return await self._forward_bool("CancelJob")

@@ -40,14 +40,17 @@ from terminal_tos_stub.allocator import SimpleSlotAllocator
 from terminal_ecs_service.events import Broadcaster
 from terminal_ecs_service.port import ReconnectingPort
 
-__all__ = ["CONNECT_RETRY_S", "DRAIN_POLL_S", "KNOWN_RETENTION", "SAMPLE_INTERVAL_S", "EcsCore", "LayoutLike",
-           "rss_mb"]
+__all__ = ["CONNECT_RETRY_S", "DRAIN_POLL_S", "KNOWN_RETENTION", "RECONNECT_LOG_EVERY_S", "SAMPLE_INTERVAL_S",
+           "EcsCore", "LayoutLike", "rss_mb"]
 
 log = logging.getLogger(__name__)
 
 DRAIN_POLL_S = 0.005
 CONNECT_RETRY_S = 2.0
 KNOWN_RETENTION = 10_000  # finished orders kept for GET /containers and the duplicate check
+RECONNECT_LOG_FIRST = 4  # failed connect attempts in a row that are all logged
+RECONNECT_LOG_EVERY_S = 30.0  # after those: at most one log line per this many wall seconds
+_monotonic = time.monotonic  # wall clock for the reconnect log backoff (patched in tests)
 
 _EMPTY_STATUS = {"pending": 0, "open": 0, "active_jobs": 0, "done": 0, "failed": 0,
                  "replans": 0, "stuck": 0, "bound": 0}
@@ -121,6 +124,9 @@ class EcsCore:
         self._link: EquipmentPort | None = None  # the bound connection, closed on loss
         self._closing: set[asyncio.Future[None]] = set()  # off-loop closes in flight
         self._last_now: float | None = None  # last sim time seen while connected
+        self._failed_attempts = 0  # consecutive failed connect attempts (reset on success)
+        self._failed_since = 0.0  # wall time of the first of them
+        self._failed_logged_period = 0  # last RECONNECT_LOG_EVERY_S period logged
         self.time_reversed = False  # sim time went backwards (sim restarted): /health 503
         self.port.subscribe(self._on_equipment_event)
 
@@ -134,8 +140,9 @@ class EcsCore:
         try:
             link = await asyncio.to_thread(self._connect)  # OPC UA connect blocks
         except ConnectionError as e:
-            log.info("equipment link not available: %s", e)
+            self._log_unavailable(e)
             return False
+        self._failed_attempts = 0
         self._link = link
         try:
             self.port.bind(link)
@@ -158,6 +165,22 @@ class EcsCore:
         self._publish_link()
         self.publish_alarms()
         return True
+
+    def _log_unavailable(self, e: ConnectionError) -> None:
+        """Log a failed attempt at info on attempts 1..``RECONNECT_LOG_FIRST`` of an
+        outage, then once per ``RECONNECT_LOG_EVERY_S`` wall seconds since its first
+        attempt (the others at debug). The retry timing is not affected."""
+        now = _monotonic()
+        self._failed_attempts += 1
+        n = self._failed_attempts
+        if n == 1:
+            self._failed_since, self._failed_logged_period = now, 0
+        period = math.floor((now - self._failed_since) / RECONNECT_LOG_EVERY_S)
+        if n <= RECONNECT_LOG_FIRST or period > self._failed_logged_period:
+            self._failed_logged_period = max(self._failed_logged_period, period)
+            log.info("equipment link not available (attempt %d): %s", n, e)
+        else:
+            log.debug("equipment link not available (attempt %d): %s", n, e)
 
     def _check_time(self, now: float) -> None:
         """Flag (once) sim time going backwards: the sim was restarted under this ECS,
