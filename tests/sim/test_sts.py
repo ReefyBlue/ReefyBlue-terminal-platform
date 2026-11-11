@@ -204,3 +204,47 @@ def test_job_assigned_from_completion_event_runs(rig):
     done = [e.job_id for e in of_kind(rig, EventKind.JOB_COMPLETED)]
     assert done == ["J1", "J2", "J3"]
     assert rig.sts.state == State.IDLE
+
+
+def _last_job(rig):
+    extra = rig.sts.snapshot().extra
+    return extra["last_job_id"], extra["last_job_outcome"]
+
+
+def test_last_job_none_before_first_job(rig):
+    assert _last_job(rig) == (None, None)
+
+
+def test_last_job_set_on_completion(rig):
+    rig.grid.try_reserve((4, 0), "AGV-01")
+    rig.sts.assign_job(job())
+    assert _last_job(rig) == (None, None)  # running, not ended yet
+    rig.env.run(till=200)
+    assert (rig.sts.last_job_id, rig.sts.last_job_outcome) == ("J1", "COMPLETED")
+    assert _last_job(rig) == ("J1", "COMPLETED")
+
+
+def test_last_job_set_on_failure(rig):
+    rig.grid.try_reserve((4, 0), "AGV-01")
+    rig.sts.assign_job(job(job_id="J7"))
+    rig.env.run(till=10)
+    rig.sts.fail_job("FAULT")
+    assert _last_job(rig) == ("J7", "FAILED")
+
+
+def test_last_job_set_on_cancel(rig):
+    rig.grid.try_reserve((4, 0), "AGV-01")
+    rig.sts.assign_job(job(job_id="J8"))
+    rig.env.run(till=10)
+    assert rig.sts.cancel_job() is True
+    assert _last_job(rig) == ("J8", "FAILED")
+
+
+def test_last_job_follows_the_most_recent_job(rig):
+    rig.grid.try_reserve((4, 0), "AGV-01")
+    rig.sts.assign_job(job(job_id="J1"))
+    rig.env.run(till=10)
+    rig.sts.fail_job("FAULT")
+    rig.sts.assign_job(job(job_id="J2"))
+    rig.env.run(till=400)
+    assert _last_job(rig) == ("J2", "COMPLETED")

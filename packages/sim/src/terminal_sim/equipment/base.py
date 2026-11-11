@@ -45,6 +45,10 @@ class Equipment(salabim.Component):
         self.state = State.IDLE
         self.current_job: Job | None = None
         self.energy_kwh = 0.0
+        # Outcome of the most recent job that ended (completed, failed or cancelled), so a
+        # controller that lost the link while it ran can reconcile it (snapshot extra).
+        self.last_job_id: str | None = None
+        self.last_job_outcome: str | None = None  # "COMPLETED" | "FAILED"
 
     # --- job acceptance -------------------------------------------------
     def accepts(self, job: Job) -> bool:
@@ -65,6 +69,7 @@ class Equipment(salabim.Component):
         if job is None:
             return False
         job.status = JobStatus.FAILED
+        self._record_outcome(job, "FAILED")
         self._emit_event(EventKind.JOB_FAILED, job_id=job.job_id, reason="CANCELLED")
         self.current_job = None
         self.cancel()  # stop the running process; state stays BUSY until reset
@@ -87,6 +92,7 @@ class Equipment(salabim.Component):
         assert self.current_job is not None
         job = self.current_job
         job.status = JobStatus.DONE
+        self._record_outcome(job, "COMPLETED")
         self._emit_event(EventKind.JOB_COMPLETED, job_id=job.job_id)
         self.current_job = None
         self.set_state(State.IDLE)
@@ -95,12 +101,16 @@ class Equipment(salabim.Component):
         assert self.current_job is not None
         job = self.current_job
         job.status = JobStatus.FAILED
+        self._record_outcome(job, "FAILED")
         self._emit_event(EventKind.JOB_FAILED, job_id=job.job_id, reason=reason)
         self.current_job = None
         if self.env.current_component() is not self:
             self.cancel()  # called from outside: stop the running process
         if self.state is not State.FAULT:
             self.set_state(State.IDLE)
+
+    def _record_outcome(self, job: Job, outcome: str) -> None:
+        self.last_job_id, self.last_job_outcome = job.job_id, outcome
 
     def _emit_event(self, kind: EventKind, **kwargs) -> None:
         self._emit(
@@ -125,7 +135,7 @@ class Equipment(salabim.Component):
             position=self.position,
             current_job_id=self.current_job.job_id if self.current_job else None,
             energy_kwh=self.energy_kwh,
-            extra=self.extra(),
+            extra={**self.extra(), "last_job_id": self.last_job_id, "last_job_outcome": self.last_job_outcome},
         )
 
     def _run(self):

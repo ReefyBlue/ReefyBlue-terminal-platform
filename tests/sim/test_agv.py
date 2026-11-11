@@ -128,6 +128,8 @@ def test_cancel_mid_route_keeps_cell_reserved(rig):
     assert rig.owned_by("AGV-01") == [a.cell]
     assert a.current_job is None
     assert of_kind(rig, EventKind.JOB_FAILED)[0].reason == "CANCELLED"
+    extra = a.snapshot().extra
+    assert (extra["last_job_id"], extra["last_job_outcome"]) == (of_kind(rig, EventKind.JOB_FAILED)[0].job_id, "FAILED")
 
 
 def test_unreachable_goal_fails():
