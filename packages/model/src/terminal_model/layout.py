@@ -5,8 +5,9 @@ the legacy grid loader in ``terminal_sim.layout`` (a v2 file carries ``version: 
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -30,6 +31,23 @@ RACK_X_MARGIN_M = 10.0
 RACK_HALF_WIDTH_M = 2.438 / 2
 RACK_CLEARANCE_M = 0.2
 _EPS = 1e-6
+
+_AXIS_PARAMS = ("v_max", "accel", "decel")
+_KIN_AXES = {
+    "STS": ("trolley", "hoist_laden", "hoist_empty", "gantry"),
+    "AGV": ("straight", "turning", "zone"),
+    "ASC": ("gantry", "trolley", "hoist_laden", "hoist_empty"),
+}
+_KIN_SCALARS = {
+    "STS": ("twistlock_s",),
+    "AGV": ("rack_position_s", "rack_lift_s", "length_m", "width_m"),
+    "ASC": ("spreader_lock_s",),
+}
+KINEMATICS_KINDS = frozenset(_KIN_AXES)
+KINEMATICS_PARAMS: dict[str, frozenset[str]] = {
+    k: frozenset([f"{ax}.{p}" for ax in _KIN_AXES[k] for p in _AXIS_PARAMS] + list(_KIN_SCALARS[k]))
+    for k in _KIN_AXES
+}
 
 
 class LayoutError(ValueError):
@@ -189,6 +207,7 @@ class TerminalLayout:
     landside: tuple[TruckHead, ...]
     zones: tuple[Zone, ...]
     opcua: OpcUa
+    kinematics: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def block(self, block_id: str) -> Block:
         for b in self.blocks:
@@ -277,7 +296,17 @@ def _build(raw: dict) -> TerminalLayout:
                  tuple((float(p[0]), float(p[1])) for p in z["polygon"]))
             for z in raw.get("zones") or ()),
         opcua=_opcua(raw.get("opcua") or {}),
+        kinematics=_kinematics(raw.get("kinematics")),
     )
+
+
+def _kinematics(raw: object) -> dict[str, dict[str, float]]:
+    """Structure only (mapping of mappings); values are checked by ``validate``."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise LayoutError("kinematics: must be a mapping")
+    return {str(k): (dict(v) if isinstance(v, dict) else v) for k, v in raw.items()}
 
 
 def _opcua(o: dict) -> OpcUa:
@@ -318,6 +347,32 @@ def _overlaps(kind: str, items: list[tuple[str, float, float]], errs: list[str])
         for b, b0, b1 in items[i + 1:]:
             if a0 < b1 - _EPS and b0 < a1 - _EPS:
                 errs.append(f"{kind} '{a}' and '{b}' overlap")
+
+
+def _validate_kinematics(t: TerminalLayout, errs: list[str]) -> None:
+    kind_of: dict[str, str] = {s.id: "STS" for s in t.sts}
+    for b in t.blocks:
+        kind_of[b.asc_ws_id] = kind_of[b.asc_ls_id] = "ASC"
+    for key, params in t.kinematics.items():
+        if key in KINEMATICS_KINDS:
+            kind = key
+        elif key in kind_of:
+            kind = kind_of[key]
+        elif re.fullmatch(r"AGV-\d+", key):  # AGVs are not in the layout
+            kind = "AGV"
+        else:
+            errs.append(f"unknown kinematics key '{key}' (expected STS/AGV/ASC or an equipment id)")
+            continue
+        if not isinstance(params, dict):
+            errs.append(f"kinematics '{key}' must be a mapping of parameter -> value")
+            continue
+        for name, val in params.items():
+            if name not in KINEMATICS_PARAMS[kind]:
+                errs.append(f"kinematics '{key}': unknown parameter '{name}' for {kind}")
+            elif isinstance(val, bool) or not isinstance(val, (int, float)):
+                errs.append(f"kinematics '{key}.{name}': must be numeric, got {val!r}")
+            elif not val > 0:
+                errs.append(f"kinematics '{key}.{name}': {val:g} must be > 0")
 
 
 def validate(t: TerminalLayout) -> None:
@@ -440,6 +495,8 @@ def validate(t: TerminalLayout) -> None:
     for z in t.zones:
         if z.type not in ZONE_TYPES:
             errs.append(f"zone '{z.name}' has unknown zone type '{z.type}'")
+
+    _validate_kinematics(t, errs)
 
     if errs:
         raise LayoutError("\n".join(errs))

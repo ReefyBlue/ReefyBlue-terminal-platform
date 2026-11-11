@@ -217,7 +217,7 @@ def standard_terminal(
 def to_yaml_dict(t: TerminalLayout) -> dict:
     """Plain, insertion-ordered dict (``version: 2``) that ``load_terminal`` reads back to ``t``."""
     f = float
-    return {
+    d = {
         "version": 2,
         "name": t.name,
         "quay": {
@@ -270,3 +270,6 @@ def to_yaml_dict(t: TerminalLayout) -> dict:
                   for z in t.zones],
         "opcua": {"base_port": int(t.opcua.base_port), "host": str(t.opcua.host)},
     }
+    if t.kinematics:  # optional; omitted so layouts without overrides serialise unchanged
+        d["kinematics"] = {k: {n: f(v) for n, v in p.items()} for k, p in t.kinematics.items()}
+    return d

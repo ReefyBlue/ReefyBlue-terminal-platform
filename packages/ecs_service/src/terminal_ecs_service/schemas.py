@@ -238,6 +238,7 @@ class TerminalOut(_Strict):
     landside: list[TruckHeadOut]
     zones: list[ZoneOut]
     opcua: OpcUaOut
+    kinematics: dict[str, dict[str, float]] = {}
 
 
 LayoutOut.model_rebuild()
