@@ -1,7 +1,8 @@
 // Terminal viewer: top view of the terminal (quay at the top, stack at the bottom) served by
 // the ECS service under /ui/. One ES module, no dependencies, organised by the module groups
 // of the B2b spec §4: api, stream, poll, model, map, panel, main. `model` and `map` are pure
-// (no DOM access); the browser tests reach them through `window.__viewer`.
+// (no DOM access); `panel.render(state)` writes the side panel. The browser tests reach them
+// through `window.__viewer`.
 
 export const COLORS = {
   IDLE: "#5b8c5a",
@@ -23,32 +24,130 @@ const RETRY_MS = 5000;
 
 // ---------------------------------------------------------------------------- api
 
-async function getJson(path) {
-  const resp = await fetch(path, { headers: { Accept: "application/json" } });
-  if (!resp.ok) throw new Error(`${path}: HTTP ${resp.status}`);
-  return resp.json();
+/** A non-2xx answer of the ECS service: `code` from the body (`code`, else `detail`, else
+ * "HTTP <status>") and its `message` ("" when absent). */
+export class ApiError extends Error {
+  constructor(status, code, message) {
+    super(message ? `${code}: ${message}` : code);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.message = message;
+  }
 }
+
+async function request(method, path, body) {
+  const init = { method, headers: { Accept: "application/json" } };
+  if (body !== undefined) {
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
+  const resp = await fetch(path, init);
+  let data = null;
+  try {
+    data = await resp.json();
+  } catch {
+    data = null;
+  }
+  if (!resp.ok) {
+    const b = data && typeof data === "object" ? data : {};
+    const code = typeof b.code === "string" ? b.code
+      : typeof b.detail === "string" ? b.detail : `HTTP ${resp.status}`;
+    throw new ApiError(resp.status, code, typeof b.message === "string" ? b.message : "");
+  }
+  return data;
+}
+
+const getJson = (path) => request("GET", path);
+
+/** "code: message" of an ApiError (just the code without a message); else the error text. */
+function errorText(e) {
+  if (e instanceof ApiError) return e.message ? `${e.code}: ${e.message}` : e.code;
+  return String((e && e.message) || e);
+}
+
+const api = {
+  layout: () => getJson("/layout"),
+  equipment: () => getJson("/equipment"),
+  alarms: () => getJson("/alarms"),
+  status: () => getJson("/status"),
+  kpis: () => getJson("/kpis"),
+  release: (id) => request("POST", `/equipment/${encodeURIComponent(id)}/release`),
+  resolve: (jobId, outcome) => request("POST", `/jobs/${encodeURIComponent(jobId)}/resolve`, { outcome }),
+};
 
 // ---------------------------------------------------------------------------- model
 
+const EVENT_RING = 50;
+
 const model = {
-  /** The single viewer state object. */
+  /** The single viewer state object (structuredClone-able: no functions, no DOM). */
   initial() {
     return {
       layout: null,
       equipment: new Map(),
-      alarms: [],
+      alarms: [], // oldest first
       status: null,
       kpis: null,
-      events: [],
-      link: { ws: false, ecs: false, connected: null },
+      events: [], // newest first, at most EVENT_RING
+      link: { ws: false, ecs: false, connected: null, since: null },
       selected: null,
+      actions: {}, // action button key -> {busy, error, until}
       dirty: true,
     };
   },
 
-  /** Apply one WS /events message; the message handling arrives with the panel (Task 4). */
+  /** "kind|equipment_id|job_id" with "" for a null job id. */
+  alarmKey(a) {
+    return `${a.kind}|${a.equipment_id}|${a.job_id ?? ""}`;
+  },
+
+  /** Replace the alarm list with `items` (the GET /alarms list). */
+  setAlarms(state, items) {
+    state.alarms = sortAlarms(items.map(alarmOf));
+    state.dirty = true;
+  },
+
+  /** Store a status (GET /status body or WS `status` message without its `type`). */
+  setStatus(state, status) {
+    const { type, ...rest } = status;
+    state.status = rest;
+    if (typeof rest.connected === "boolean") setConnected(state, rest.connected, rest.sim_time);
+    state.dirty = true;
+  },
+
+  setKpis(state, kpis) {
+    state.kpis = kpis;
+    state.dirty = true;
+  },
+
+  /** Apply one WS /events message. */
   apply(state, message) {
+    switch (message.type) {
+      case "alarm": {
+        const key = model.alarmKey(message);
+        const rest = state.alarms.filter((a) => model.alarmKey(a) !== key);
+        state.alarms = message.action === "raised" ? sortAlarms([...rest, alarmOf(message)]) : rest;
+        break;
+      }
+      case "status":
+        model.setStatus(state, message);
+        break;
+      case "equipment": {
+        pushEvent(state, message);
+        const item = state.equipment.get(message.equipment_id);
+        if (item && message.new_state) item.state = message.new_state;
+        break;
+      }
+      case "job":
+        pushEvent(state, message);
+        break;
+      case "link":
+        setConnected(state, message.connected, message.sim_time);
+        break;
+      default:
+        return;
+    }
     state.dirty = true;
   },
 
@@ -57,7 +156,42 @@ const model = {
     state.equipment = new Map(items.map((it) => [it.equipment_id, it]));
     state.dirty = true;
   },
+
+  /** Set (or with `value` null clear) the progress/error of action button `key`. */
+  setAction(state, key, value) {
+    if (value) state.actions[key] = value;
+    else delete state.actions[key];
+    state.dirty = true;
+  },
+
+  select(state, id) {
+    state.selected = id;
+    state.dirty = true;
+  },
 };
+
+function alarmOf(a) {
+  return { kind: a.kind, equipment_id: a.equipment_id, job_id: a.job_id ?? null,
+           since_sim_time: a.since_sim_time, detail: a.detail ?? "" };
+}
+
+function sortAlarms(alarms) {
+  return alarms.sort((a, b) => (a.since_sim_time - b.since_sim_time) ||
+    model.alarmKey(a).localeCompare(model.alarmKey(b)));
+}
+
+function setConnected(state, connected, simTime) {
+  if (connected === false && state.link.connected !== false) state.link.since = simTime ?? null;
+  if (connected !== false) state.link.since = null;
+  state.link.connected = connected;
+}
+
+function pushEvent(state, m) {
+  state.events = [{
+    sim_time: m.sim_time, type: m.type, kind: m.kind ?? null, equipment_id: m.equipment_id ?? null,
+    job_id: m.job_id ?? null, new_state: m.new_state ?? null, reason: m.reason ?? null,
+  }, ...state.events].slice(0, EVENT_RING);
+}
 
 // ---------------------------------------------------------------------------- map
 
@@ -280,6 +414,131 @@ const map = {
   },
 };
 
+// ---------------------------------------------------------------------------- panel
+
+const ACTION_ERROR_MS = 5000;
+
+const ALARM_LABELS = {
+  LINK_LOST: "Verbinding verbroken",
+  NEEDS_RELEASE: "Vrijgave nodig",
+  UNKNOWN_OUTCOME: "Uitkomst onbekend",
+};
+
+const STATUS_KPIS = [
+  ["done", "Gereed"],
+  ["failed", "Mislukt"],
+  ["open", "Open"],
+  ["offline", "Offline"],
+  ["needs_release", "Vrijgave nodig"],
+  ["unknown_outcomes", "Uitkomst onbekend"],
+];
+
+const esc = (v) => String(v).replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+const fmtNum = (v) => (typeof v === "number" ? (Number.isInteger(v) ? String(v) : v.toFixed(2)) : String(v));
+const fmtTime = (t) => (typeof t === "number" ? `t=${t.toFixed(1)} s` : "");
+
+/** Key of an action button in `state.actions`. */
+const releaseKey = (eid) => `release|${eid}`;
+const resolveKey = (jobId, outcome) => `resolve|${jobId}|${outcome}`;
+
+function bannerOf(state) {
+  const { link } = state;
+  if (!link.ws && !link.ecs) return { cls: "lost", text: "Viewer ↔ ECS verbroken" };
+  if (link.connected === false) {
+    const since = fmtTime(link.since);
+    return { cls: "down", text: since ? `Gateway verbroken sinds ${since}` : "Gateway verbroken" };
+  }
+  return { cls: "ok", text: "ECS ↔ gateway verbonden" };
+}
+
+function kpisHtml(state) {
+  const rows = [];
+  const st = state.status || {};
+  if (typeof st.sim_time === "number") rows.push(["Simulatietijd", fmtTime(st.sim_time)]);
+  for (const [k, lbl] of STATUS_KPIS) if (st[k] !== undefined) rows.push([lbl, fmtNum(st[k])]);
+  for (const [k, v] of Object.entries(state.kpis || {})) rows.push([k, fmtNum(v)]);
+  return rows.map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join("");
+}
+
+function actionButton(state, cls, key, attrs, text) {
+  const a = state.actions[key];
+  const data = Object.entries(attrs).map(([k, v]) => ` data-${k}="${esc(v)}"`).join("");
+  return `<button type="button" class="${cls}"${data}${a && a.busy ? " disabled" : ""}>${esc(text)}</button>`;
+}
+
+function alarmsHtml(state) {
+  const released = new Set();
+  return state.alarms.map((a) => {
+    const buttons = [];
+    const keys = [];
+    if (!released.has(a.equipment_id)) {
+      released.add(a.equipment_id);
+      keys.push(releaseKey(a.equipment_id));
+      buttons.push(actionButton(state, "release", releaseKey(a.equipment_id),
+                                { equipment: a.equipment_id }, "Vrijgeven"));
+    }
+    if (a.kind === "UNKNOWN_OUTCOME" && a.job_id) {
+      for (const [outcome, text] of [["completed", "Voltooid"], ["failed", "Mislukt"]]) {
+        keys.push(resolveKey(a.job_id, outcome));
+        buttons.push(actionButton(state, "resolve", resolveKey(a.job_id, outcome),
+                                  { job: a.job_id, outcome }, text));
+      }
+    }
+    const errors = keys.map((k) => state.actions[k] && state.actions[k].error).filter(Boolean);
+    const what = [a.equipment_id, a.job_id].filter(Boolean).join(" · ");
+    return `<li data-key="${esc(model.alarmKey(a))}" class="alarm ${esc(a.kind.toLowerCase())}">`
+      + `<div><strong>${esc(ALARM_LABELS[a.kind] || a.kind)}</strong> ${esc(what)}`
+      + ` <span class="muted">sinds ${esc(fmtTime(a.since_sim_time))}</span></div>`
+      + (a.detail ? `<div class="muted">${esc(a.detail)}</div>` : "")
+      + (buttons.length ? `<div class="actions">${buttons.join("")}</div>` : "")
+      + errors.map((e) => `<div class="error">${esc(e)}</div>`).join("")
+      + "</li>";
+  }).join("");
+}
+
+function eventsHtml(state) {
+  return state.events.map((e) => {
+    const detail = [e.job_id, e.new_state && `→ ${e.new_state}`, e.reason].filter(Boolean).join(" ");
+    return `<li><span class="muted">${esc(fmtTime(e.sim_time))}</span> ${esc(e.kind || e.type)}`
+      + ` ${esc(e.equipment_id || "")} ${esc(detail)}</li>`;
+  }).join("");
+}
+
+function selectionHtml(state) {
+  const item = state.selected ? state.equipment.get(state.selected) : null;
+  if (!item) return "";
+  const rows = [["Id", item.equipment_id], ["Soort", item.kind], ["Toestand", item.state],
+                ["Job", item.current_job_id ?? "–"]];
+  for (const [k, v] of Object.entries(item.extra || {})) {
+    rows.push([k, v !== null && typeof v === "object" ? JSON.stringify(v) : String(v)]);
+  }
+  return rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+}
+
+/** Set `el.innerHTML` only when it changes, so buttons survive renders that change nothing. */
+function put(el, html) {
+  if (el && el.dataset.html !== html) {
+    el.innerHTML = html;
+    el.dataset.html = html;
+  }
+}
+
+const panel = {
+  /** Write `state` into the side panel (banner, KPIs, alarms, events, selection). */
+  render(state) {
+    const banner = document.getElementById("banner");
+    const b = bannerOf(state);
+    if (banner.textContent !== b.text) banner.textContent = b.text;
+    banner.className = b.cls;
+    put(document.getElementById("kpis"), kpisHtml(state));
+    put(document.getElementById("alarms"), alarmsHtml(state));
+    put(document.getElementById("events"), eventsHtml(state));
+    put(document.getElementById("selection"), selectionHtml(state));
+  },
+};
+
 // ---------------------------------------------------------------------------- main
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -303,7 +562,7 @@ function drawNotice(ctx, text) {
 
 function main() {
   const state = model.initial();
-  const viewer = { state, model, map, ready: false };
+  const viewer = { state, model, map, panel, api, ready: false };
   window.__viewer = viewer;
 
   const canvas = document.getElementById("map");
@@ -331,14 +590,63 @@ function main() {
       } else {
         drawNotice(ctx, notice);
       }
+      panel.render(state);
     }
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
 
+  // initial snapshots (and the resync after an action); a failure leaves the old value
+  const refreshAlarms = () => api.alarms().then((items) => model.setAlarms(state, items), () => {});
+  const refreshStatus = () => api.status().then((st) => model.setStatus(state, st), () => {});
+  const refreshKpis = () => api.kpis().then((k) => model.setKpis(state, k), () => {});
+
+  /** One WS /events message: apply it; a `status` also refetches the KPIs. */
+  viewer.onMessage = (message) => {
+    model.apply(state, message);
+    if (message.type === "status") refreshKpis();
+  };
+
+  const act = async (key, call) => {
+    if (state.actions[key] && state.actions[key].busy) return;
+    model.setAction(state, key, { busy: true, error: null, until: 0 });
+    try {
+      await call();
+      model.setAction(state, key, null);
+      await Promise.all([refreshAlarms(), refreshStatus()]);
+    } catch (e) {
+      const text = errorText(e);
+      const until = Date.now() + ACTION_ERROR_MS;
+      model.setAction(state, key, { busy: false, error: text, until });
+      setTimeout(() => {
+        const a = state.actions[key];
+        if (a && !a.busy && a.until === until) model.setAction(state, key, null);
+      }, ACTION_ERROR_MS);
+    }
+  };
+
+  document.getElementById("alarms").addEventListener("click", (ev) => {
+    const btn = ev.target.closest("button");
+    if (!btn || btn.disabled) return;
+    if (btn.classList.contains("release")) {
+      const eid = btn.dataset.equipment;
+      act(releaseKey(eid), () => api.release(eid));
+    } else if (btn.classList.contains("resolve")) {
+      const { job, outcome } = btn.dataset;
+      act(resolveKey(job, outcome), () => api.resolve(job, outcome));
+    }
+  });
+
+  canvas.addEventListener("click", (ev) => {
+    if (!state.layout) return;
+    const rect = canvas.getBoundingClientRect();
+    const fit = map.fit(state.layout, canvas.clientWidth, canvas.clientHeight);
+    model.select(state, map.hitTest(state, fit, ev.clientX - rect.left, ev.clientY - rect.top));
+  });
+
   (async () => {
     state.layout = await fetchWithRetry("/layout", (e) => {
-      notice = `Plattegrond niet beschikbaar (${e.message}); nieuwe poging over 5 s`;
+      notice = `Plattegrond niet beschikbaar (${errorText(e)}); nieuwe poging over 5 s`;
       state.dirty = true;
     });
     state.dirty = true;
@@ -348,6 +656,7 @@ function main() {
     });
     model.setEquipment(state, items);
     state.link.ecs = true;
+    await Promise.all([refreshAlarms(), refreshStatus(), refreshKpis()]);
     booted = true;
   })();
 }

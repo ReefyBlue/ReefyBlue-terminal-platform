@@ -11,7 +11,23 @@
   <header><h1>Terminal viewer</h1></header>
   <main>
     <canvas id="map"></canvas>
-    <aside id="panel"></aside>
+    <aside id="panel">
+      <div id="banner" class="lost" role="status">Viewer ↔ ECS verbroken</div>
+      <h2>KPI's</h2>
+      <table id="kpis"></table>
+      <h2>Alarmen</h2>
+      <ul id="alarms"></ul>
+      <h2>Selectie</h2>
+      <dl id="selection"></dl>
+      <h2>Events</h2>
+      <ol id="events"></ol>
+      <h2>Legenda</h2>
+      <ul id="legend">
+        <li><span class="swatch berth"></span>Kade (berth)</li>
+        <li><span class="swatch path"></span>Rijpaden (internal path)</li>
+        <li><span class="swatch yard"></span>Stack (yard)</li>
+      </ul>
+    </aside>
   </main>
   <script type="module" src="viewer.js"></script>
 </body>

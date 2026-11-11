@@ -42,3 +42,98 @@ main {
   padding: 12px 16px;
   overflow-y: auto;
 }
+
+#panel h2 {
+  margin: 16px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #546e7a;
+}
+
+#banner {
+  padding: 6px 10px;
+  border-radius: 4px;
+  color: #fff;
+  font-weight: 600;
+}
+
+#banner.ok { background: #2e7d32; }
+#banner.down { background: #c62828; }
+#banner.lost { background: #78909c; }
+
+#kpis {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+#kpis th, #kpis td {
+  padding: 2px 0;
+  border-bottom: 1px solid #eceff1;
+  font-weight: normal;
+}
+
+#kpis th { text-align: left; color: #546e7a; }
+#kpis td { text-align: right; font-variant-numeric: tabular-nums; }
+
+#alarms, #events, #legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+#alarms:empty::before,
+#selection:empty::before,
+#events:empty::before {
+  color: #90a4ae;
+}
+
+#alarms:empty::before { content: "Geen alarmen"; }
+#selection:empty::before { content: "Klik op een apparaat op de plattegrond"; }
+#events:empty::before { content: "Nog geen events"; }
+
+#alarms li {
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border-left: 4px solid #ef6c00;
+  background: #fff8f0;
+}
+
+#alarms li.link_lost { border-left-color: #6d5f8a; background: #f5f3f8; }
+#alarms li.unknown_outcome { border-left-color: #c62828; background: #fdf3f3; }
+
+#alarms .actions { margin-top: 4px; display: flex; gap: 6px; }
+#alarms .error { margin-top: 4px; color: #c62828; font-size: 12px; }
+
+.muted { color: #78909c; font-size: 12px; }
+
+#events li {
+  padding: 1px 0;
+  font-size: 12px;
+  border-bottom: 1px solid #f1f3f4;
+}
+
+#selection {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+
+#selection dt { color: #546e7a; }
+#selection dd { margin: 0; word-break: break-all; }
+
+#legend li { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+
+.swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 1px solid #37474f;
+}
+
+.swatch.berth { background: #1e5aa8; }
+.swatch.path { background: #e3e6ea; }
+.swatch.yard { background: #eceff1; }
