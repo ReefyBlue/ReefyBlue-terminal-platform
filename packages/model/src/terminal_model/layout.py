@@ -18,6 +18,10 @@ ZONE_TYPES = frozenset({
     "problem_parking", "oog", "building", "maintenance_lane",
 })
 
+DRIVE_DIRECTIONS = frozenset({"E", "W"})
+RACK_SIZES = frozenset({"20", "40", "45"})
+LANE_SIDES = frozenset({"E", "W"})
+
 MIN_STS_GAP_M = 27.0
 RACK_X_MARGIN_M = 10.0
 _EPS = 1e-6
@@ -143,6 +147,7 @@ class TruckHead:
     block: str
     lanes: int
     y_m: float
+    len_m: float = 0.0  # landward extent of the truck head (spec §3: y 525..560 -> 35)
 
 
 @dataclass(frozen=True)
@@ -185,8 +190,9 @@ class TerminalLayout:
 
     @property
     def depth_m(self) -> float:
-        """Max y of the block ends or truck heads (landward extent of the terminal)."""
-        return max([b.y1_m for b in self.blocks] + [h.y_m for h in self.landside], default=0.0)
+        """Max y of the block ends or truck-head ends (landward extent of the terminal)."""
+        return max([b.y1_m for b in self.blocks] + [h.y_m + h.len_m for h in self.landside],
+                   default=0.0)
 
 
 def is_v2(raw: dict) -> bool:
@@ -249,7 +255,8 @@ def _build(raw: dict) -> TerminalLayout:
             for b in raw["blocks"]
         ),
         landside=tuple(
-            TruckHead(str(h["block"]), int(h["lanes"]), float(h["y_m"]))
+            TruckHead(str(h["block"]), int(h["lanes"]), float(h["y_m"]),
+                      float(h.get("len_m", 0.0)))
             for h in raw.get("landside") or ()),
         zones=tuple(
             Zone(str(z["name"]), str(z["type"]),
@@ -324,12 +331,17 @@ def validate(t: TerminalLayout) -> None:
             if bid not in berth_ids:
                 errs.append(f"STS '{s.id}' references unknown berth '{bid}'")
     sts_ids = {s.id for s in t.sts}
+    for d in t.apron.drive_lanes:
+        if d.direction not in DRIVE_DIRECTIONS:
+            errs.append(f"drive lane '{d.id}' direction '{d.direction}' not in E/W")
     for buf in t.apron.buffers:
         if buf.sts_id not in sts_ids:
             errs.append(f"buffer '{buf.id}' references unknown STS '{buf.sts_id}'")
 
     # blocks
     for b in t.blocks:
+        if b.maintenance_lane_side not in LANE_SIDES:
+            errs.append(f"block '{b.id}' maintenance_lane_side '{b.maintenance_lane_side}' not in E/W")
         if b.asc_min_gap_bays < 1:
             errs.append(f"block '{b.id}' asc_min_gap_bays {b.asc_min_gap_bays} < 1")
         for r in b.reefer_rows:
@@ -355,6 +367,8 @@ def validate(t: TerminalLayout) -> None:
             errs.append(f"transfer zone '{z.block}' approach lane '{z.approach_lane_id}' unknown")
         b = t.block(z.block)
         for k in z.racks:
+            if k.size not in RACK_SIZES:
+                errs.append(f"rack '{k.id}' size '{k.size}' not in 20/40/45")
             # The zone lies between the STS rail area and the block head. (The brief names
             # apron.y_to_m as the lower bound, but the demo apron ends at the block head
             # (y 165) while the racks sit at y 110..160, so the apron start is used.)
