@@ -46,6 +46,7 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
     "e2e: full 200-container scenario runs (a few seconds each)",
     "e2e_opcua: sim + gateway subprocesses + runner over OPC UA (minutes; run with -m e2e_opcua)",
+    "slow: long-running e2e (the ~11-min mini-soak); always combined with e2e_opcua",
     "e2e_ui: browser test of the viewer with Playwright (run with -m e2e_ui; needs 'uv run playwright install chromium')",
 ]
 addopts = "-m 'not e2e_opcua and not e2e_ui'"

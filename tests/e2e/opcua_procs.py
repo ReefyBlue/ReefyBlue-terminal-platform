@@ -8,6 +8,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -15,8 +16,9 @@ from pathlib import Path
 import httpx
 from asyncua import Client
 from terminal_model.types import State
-from terminal_soak.linkproxy import LinkProxy  # noqa: F401  (re-exported for tests)
 from terminal_sim.layout import load_layout
+from terminal_soak.chaos import Schedule
+from terminal_soak.linkproxy import LinkProxy  # also re-exported for tests
 
 ROOT = Path(__file__).resolve().parents[2]
 READY_TIMEOUT_S = 60.0
@@ -91,6 +93,7 @@ def _stop(proc: subprocess.Popen) -> int:
 @contextlib.contextmanager
 def sim_and_gateway(
     scenario: Path, *, n_sts: int, n_agv: int, log_dir: Path, proxied_sts: bool = False,
+    extra_sim_args: list[str] | None = None,
 ) -> Iterator[dict]:
     """Start sim then gateway on free ports; yield ``{"endpoint", "returncodes"}``.
 
@@ -98,6 +101,8 @@ def sim_and_gateway(
     port P, every slot ``P+i -> B+i`` of the sim's base port B, control slot included);
     ``info["proxy"]`` is it and ``info["sts_port"]`` the proxy port of STS-01 (slot 0), so
     ``proxy.cut([sts_port])`` drops only the gateway's link to STS-01.
+
+    ``extra_sim_args`` are appended to the sim's command line (e.g. ``["--autostart"]``).
 
     On exit both get SIGTERM; their exit codes land in ``returncodes`` (sim, gateway).
     """
@@ -114,7 +119,7 @@ def sim_and_gateway(
     gw_log = (log_dir / "gateway.log").open("w")
     sim = subprocess.Popen(
         [sys.executable, "-m", "terminal_sim.serve", str(scenario), "--layout", str(ROOT / "terminal.yaml"),
-         "--base-port", str(base), "--host", "127.0.0.1"],
+         "--base-port", str(base), "--host", "127.0.0.1", *(extra_sim_args or [])],
         cwd=ROOT, stdout=sim_log, stderr=subprocess.STDOUT)
     gw = subprocess.Popen(
         [sys.executable, "-m", "terminal_gateway.serve", "--config", str(ROOT / "terminal.yaml"),
@@ -184,3 +189,32 @@ def ecs_service(gateway_endpoint: str, *, log_dir: Path, auto_release: bool = Fa
     finally:
         info["returncode"] = _stop(proc)
         log.close()
+
+
+@contextlib.contextmanager
+def chaos_proxy(target_port: int, every: float, for_s: float) -> Iterator[dict]:
+    """A ``LinkProxy`` on a free port in front of ``127.0.0.1:target_port`` whose link a
+    ``chaos.Schedule(every, for_s)`` cuts in a daemon thread (first cut ``every`` s after
+    entry). Yields ``{"endpoint", "proxy", "events", "stop_cuts"}``: ``endpoint`` is the
+    proxied ``opc.tcp://`` URL, ``events`` the ``(monotonic, "cut"|"restore")`` log and
+    ``stop_cuts()`` ends the schedule with the link up (a cut in progress is restored)
+    while the proxy keeps serving. On exit the schedule stops and the proxy closes."""
+    listen = free_port()
+    proxy = LinkProxy({listen: target_port}).start()
+    stop = threading.Event()
+    events: list[tuple[float, str]] = []
+    thread = threading.Thread(
+        target=Schedule(every, for_s).run, args=(proxy, stop),
+        kwargs={"on_event": lambda e: events.append((time.monotonic(), e))}, daemon=True)
+    thread.start()
+
+    def stop_cuts() -> None:
+        stop.set()
+        thread.join(timeout=for_s + 5.0)
+
+    try:
+        yield {"endpoint": f"opc.tcp://127.0.0.1:{listen}", "proxy": proxy, "events": events,
+               "stop_cuts": stop_cuts}
+    finally:
+        stop_cuts()
+        proxy.stop()
