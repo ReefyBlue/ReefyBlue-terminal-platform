@@ -43,6 +43,27 @@ Fictief, maar in verhouding tot een middelgrote ASC-terminal:
 - **Landzijde**: y = 525 … 560 truckkop per blok met 4 truck-lanes (alleen als in-/uitstroombron: orders `TRUCK_IN`/`TRUCK_OUT` worden door de landzijde-ASC afgehandeld met een vaste cyclustijd; geen truck-model) — Plan C4 vult dit in.
 - **Hekwerk**: apron+transferzone+yard zijn automatiseringsgebied; alleen de truckkop is bemand gebied (relevant voor noodstop-/safety-events in C2).
 
+### 3.1 Terminalzones (volledigheid naar de Quaysim-tekening van de gebruiker)
+
+De tekening `docs/superpowers/references/c1-terminal/quaysim_stack_layout_concept.pdf` (gebruiker, 2026) is de **checklist** voor wat een volautomatische terminal bevat; maatvoering en blokoriëntatie volgen §3 (niet de tekening). Alle zones staan als `zones:` in de layout (polygoon in meters, type, naam) zodat viewer en latere plannen ze kennen; in C1 hebben alleen de met ★ gemarkeerde zones gedrag.
+
+| Zone | Type | Gedrag in C1 |
+|---|---|---|
+| ★ Berth area + kade | `berth` | STS-gantrybereik, scheepsbays |
+| ★ AGV lanes (apron) | `agv_lanes` | rijbanen, kruisingen |
+| ★ AGV parking area | `agv_parking` | parkeer-/wachtvakken; later laadstations (C2) |
+| ★ Transferzones waterzijde (racks) | `transfer_ws` | rackposities |
+| ★ Stackblokken | `block` | ASC-paar, stapelkolommen |
+| ★ Interchange zone truck (per blokkolom) | `truck_interchange` | TRUCK_IN/OUT met vaste cyclustijd (C4: trucks) |
+| Interchange zone rail + rail terminal | `rail_interchange`, `rail_terminal` | alleen zone (C4) |
+| Gate in/out, OCR-gate, technical gate, customs, problem parking | `gate`, `ocr_gate`, `tech_gate`, `customs`, `problem_parking` | alleen zone (C4) |
+| OOG & special cargo area | `oog` | alleen zone; OOG-orders worden in C1 geweigerd (`OOG_NOT_SUPPORTED`) |
+| Reeferrijen in het blok | `reefer_rows` (attribuut van `Block`) | plug-slots: reefercontainers alleen daar (TOS-stub-regel) |
+| TOB-hoofdgebouw, workshop/technical services | `building` | alleen zone; workshop = parkeerdoel voor equipment in MAINTENANCE (C2) |
+| Onderhoudsgang tussen blokken | `maintenance_lane` | geen AGV-verkeer |
+
+De demo-layout krijgt deze zones op plausibele plekken: railterminal en gate-complex aan de noordrand, OOG en workshop aan de oostrand, truck-interchange aan de landzijdekop van elke blokkolom.
+
 Een `terminal_mv_small.yaml` (400 m kade, 3 STS, 4 blokken, 12 Lift-AGV's) is de **testlayout** voor snelle runs en de e2e-suites; de volledige `terminal_mv.yaml` is de demo/soak-layout.
 
 ## 4. Layoutmodel (`terminal_model.layout`, nieuw; `terminal_sim.layout` wordt een adapter)
@@ -110,6 +131,8 @@ C1 houdt de dispatcher-logica gelijk en breidt alleen uit wat nodig is om de nie
 C1a en C1b worden als twee plannen uitgevoerd (SDD, aparte PR's op `feat/plan-b2c-deploy-soak`); daarna C3 voordat C2, zodat je de nieuwe terminal kunt zíen tijdens het verkeersmodel.
 
 ## 9. Beslissingen (door mij, zonder te vragen)
+
+0. De Quaysim-tekening van de gebruiker is de volledigheidsreferentie (zones); blokoriëntatie en maten volgen de Konecranes-opzet (haaks op de kade) omdat die bij Lift-AGV's met racks hoort — de gebruiker gaf aan dat de tekening niet exact gevolgd hoeft te worden.
 
 1. Fictieve maar realistische terminal (1 200 m, 8 STS, 16 blokken) als demo-layout; kleine variant voor tests. Geen kopie van een bestaande terminal.
 2. Alle maten in meters; het 20 m-grid blijft tijdelijk als afgeleide view om C1 klein te houden; de router wordt in C2 vervangen.
