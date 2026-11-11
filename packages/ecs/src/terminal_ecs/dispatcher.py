@@ -26,8 +26,10 @@ RECOVERY (any other JOB_FAILED, STATE_CHANGED->FAULT with a running job, watchdo
 QUARANTINE
     an order that fails (any reason) while its box is on its AGV (``BOX_ON_AGV``), and
     the AGV of a failed hand-over (TRANSFER_ERROR), quarantine that AGV: it gets no job
-    and needs an operator ``release()`` (cause "quarantined: box may be on board"); this
-    is never lifted by ``auto_release``.
+    and needs an operator ``release()`` (cause "quarantined: box may be on board"). With
+    ``auto_release`` an IDLE report with no box on board (snapshot extra
+    ``loaded_container_id`` present and empty) lifts it like a release; with a box, or
+    when the AGV does not report its load, it stays.
 LINK LOSS (STATE_CHANGED->OFFLINE)
     no replan: the order keeps its stage and job, the device gets no new jobs and the
     watchdog clock of an offline AGV stands still. On return (reason LINK_RESTORED /
@@ -41,8 +43,8 @@ LINK LOSS (STATE_CHANGED->OFFLINE)
 
 State sets: ``_excluded`` (until IDLE), ``_quarantined`` (until release),
 ``_offline`` (until the link returns) and ``_needs_release`` (until release, or IDLE
-with ``auto_release`` unless quarantined) are independent; a device in any of them
-gets no job (``_unusable``). A FAULT puts the device in both ``_excluded`` and
+with ``auto_release`` unless quarantined with a box on board) are independent; a
+device in any of them gets no job (``_unusable``). A FAULT puts the device in both ``_excluded`` and
 ``_needs_release``; an unknown outcome or a quarantine only in ``_needs_release`` (and
 ``_quarantined``), so ``_needs_release`` is not a subset of ``_excluded``.
 
@@ -85,6 +87,7 @@ from __future__ import annotations
 import heapq
 import itertools
 import logging
+from collections import deque
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
 from typing import Literal
@@ -144,6 +147,7 @@ class Dispatcher:
         self.jobs: dict[str, Job] = {}
         self.completed: list[str] = []
         self._job_log: dict[str, LoggedJob] = {}
+        self._new_jobs: deque[LoggedJob] = deque()  # logged since the last drain
 
         self._sts: list[str] = []
         self._agvs: list[str] = []
@@ -333,14 +337,19 @@ class Dispatcher:
         for job_id, eid in self._unknown.items():
             if eid == equipment_id:
                 raise ReleaseRefused(f"resolve job {job_id} first")
-        self._clear_release(equipment_id)
-        self._excluded.discard(equipment_id)
-        if equipment_id in self._quarantined:
-            self._quarantined.discard(equipment_id)
-            log.warning("quarantine of %s lifted by operator release", equipment_id)
+        self._lift(equipment_id, "operator release")
         log.info("released %s", equipment_id)
         if tick:
             self.tick()
+
+    def _lift(self, eid: str, by: str) -> None:
+        """What a release does once it is allowed: clear the release need, the exclusion
+        and a quarantine (with its alarm)."""
+        self._clear_release(eid)
+        self._excluded.discard(eid)
+        if eid in self._quarantined:
+            self._quarantined.discard(eid)
+            log.warning("quarantine of %s lifted by %s", eid, by)
 
     def resolve_job(self, job_id: str, outcome: Literal["completed", "failed"], *, tick: bool = True) -> None:
         """Operator verdict on a job whose outcome was lost during a link outage.
@@ -360,6 +369,14 @@ class Dispatcher:
     def job_log(self) -> Mapping[str, LoggedJob]:
         """Read-only: every job id ever accepted by equipment -> who got it and when."""
         return MappingProxyType(self._job_log)
+
+    def new_jobs_since_last_publish(self) -> list[LoggedJob]:
+        """Jobs accepted by equipment since the previous call, in log order; drains.
+
+        A job rejected by its equipment (or pruned) before the drain is left out."""
+        out = [lj for lj in self._new_jobs if self._job_log.get(lj.job.job_id) is lj]
+        self._new_jobs.clear()
+        return out
 
     def committed_agvs(self) -> frozenset[str]:
         """AGVs reserved for an open order (also while idle, e.g. waiting in a lane)."""
@@ -559,7 +576,8 @@ class Dispatcher:
         self._job_eq[job.job_id] = eid
         if eid in self._agvs:
             self._last_progress[eid] = self.port.now()
-        self._job_log[job.job_id] = LoggedJob(job, eid, self.port.now())
+        logged = self._job_log[job.job_id] = LoggedJob(job, eid, self.port.now())
+        self._new_jobs.append(logged)
         if self.port.assign_job(eid, job):
             rec.job_counts[job.type] = rec.job_counts.get(job.type, 0) + 1
             log.debug("assign %s -> %s (%s -> %s)", job.job_id, eid, job.from_loc, job.to_loc)
@@ -693,8 +711,11 @@ class Dispatcher:
 
     def _apply_state(self, eid: str, state: State | None) -> None:
         if state is State.IDLE:
-            if self.auto_release and eid not in self._quarantined:  # a quarantine needs a human
-                self._clear_release(eid)
+            if self.auto_release:
+                if eid not in self._quarantined:
+                    self._clear_release(eid)
+                elif self._box_free(eid):  # nothing to recover: no human needed
+                    self._lift(eid, "auto_release (IDLE, no box on board)")
             if eid not in self._needs_release:
                 self._excluded.discard(eid)
         elif state is State.FAULT:
@@ -704,6 +725,12 @@ class Dispatcher:
             for job_id, jeq in list(self._job_eq.items()):
                 if jeq == eid and job_id not in self._unknown:  # unknown ones wait for resolve_job
                     self._replan(self._by_job[job_id], jeq, "FAULT", streak=True)
+
+    def _box_free(self, eid: str) -> bool:
+        """The device reports its load and it is empty (``None`` or ``""``); a device that
+        does not report ``loaded_container_id`` may still carry a box."""
+        extra = self.port.snapshot(eid).extra
+        return "loaded_container_id" in extra and not extra["loaded_container_id"]
 
     def _go_offline(self, eid: str, reason: str | None) -> None:
         if eid in self._offline:

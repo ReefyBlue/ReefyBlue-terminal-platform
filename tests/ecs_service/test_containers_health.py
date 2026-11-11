@@ -104,7 +104,7 @@ async def test_step_prunes_finished_and_keeps_counting(monkeypatch):
         assert len(d.completed) == 3 and d.status()["done"] == 6
         assert core.kpis()["containers_done"] == 6.0  # KPI stays cumulative
         assert not core.is_known("C0") and core.is_known("C5") and core.is_known("C7")
-        assert core._seen_jobs <= set(d.job_log)  # published-job memory pruned alongside
+        assert d.new_jobs_since_last_publish() == []  # published-job queue drained
         # a pruned container id may be submitted again; a retained or open one may not
         r = await client.post("/workorders", json=[_order("C0", 20)])
         assert r.status_code == 202

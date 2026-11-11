@@ -13,8 +13,10 @@ lost link unbinds and closes the connection, a later one is bound in its place a
 both keep their state.
 
 Memory stays bounded over a long run: on each sample boundary ``step()`` prunes the
-Dispatcher's finished orders beyond ``known_retention`` (``Dispatcher.prune_done``) and
-forgets the published job ids that went with them.
+Dispatcher's finished orders beyond ``known_retention`` (``Dispatcher.prune_done``).
+``job`` messages come from ``Dispatcher.new_jobs_since_last_publish()`` (drained on
+every publish, so nothing accumulates); no ``status`` message is built while no
+event-stream client is connected.
 """
 
 from __future__ import annotations
@@ -117,7 +119,6 @@ class EcsCore:
         self.tick_count = 0
         self.started_at = time.monotonic()
         self._link: EquipmentPort | None = None  # the bound connection, closed on loss
-        self._seen_jobs: set[str] = set()
         self._closing: set[asyncio.Future[None]] = set()  # off-loop closes in flight
         self._last_now: float | None = None  # last sim time seen while connected
         self.time_reversed = False  # sim time went backwards (sim restarted): /health 503
@@ -226,8 +227,7 @@ class EcsCore:
     def _prune(self) -> None:
         """Bound the finished-order memory (see the module docstring)."""
         assert self.dispatcher is not None
-        if self.dispatcher.prune_done(self.known_retention):
-            self._seen_jobs.intersection_update(self.dispatcher.job_log)
+        self.dispatcher.prune_done(self.known_retention)
 
     async def run(self) -> None:
         """Connect, then ``step()`` forever. An unexpected exception is logged and
@@ -404,19 +404,16 @@ class EcsCore:
         return {"type": "status", "sim_time": self.port.now(), **base}
 
     def publish_status(self) -> None:
-        if self.dispatcher is not None:
+        if self.dispatcher is not None and self.broadcaster.client_count > 0:
             self.broadcaster.publish(self.status_message())
 
     def publish_new_jobs(self) -> None:
         if self.dispatcher is None:
             return
-        for job_id, logged in self.dispatcher.job_log.items():
-            if job_id in self._seen_jobs:
-                continue
-            self._seen_jobs.add(job_id)
+        for logged in self.dispatcher.new_jobs_since_last_publish():
             self.broadcaster.publish({
                 "type": "job",
-                "job_id": job_id,
+                "job_id": logged.job.job_id,
                 "equipment_id": logged.equipment_id,
                 "sim_time": logged.assigned_at,
             })
