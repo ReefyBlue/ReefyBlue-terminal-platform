@@ -28,11 +28,10 @@ const RETRY_MS = 5000;
  * "HTTP <status>") and its `message` ("" when absent). */
 export class ApiError extends Error {
   constructor(status, code, message) {
-    super(message ? `${code}: ${message}` : code);
+    super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
-    this.message = message;
   }
 }
 
@@ -424,6 +423,8 @@ const ALARM_LABELS = {
   UNKNOWN_OUTCOME: "Uitkomst onbekend",
 };
 
+const RELEASABLE = new Set(["NEEDS_RELEASE", "LINK_LOST"]);
+
 const STATUS_KPIS = [
   ["done", "Gereed"],
   ["failed", "Mislukt"],
@@ -469,11 +470,13 @@ function actionButton(state, cls, key, attrs, text) {
 }
 
 function alarmsHtml(state) {
+  // the release button sits on the first NEEDS_RELEASE / LINK_LOST row of each equipment
+  // (spec §5); an UNKNOWN_OUTCOME alone is answered with Voltooid / Mislukt, not a release
   const released = new Set();
   return state.alarms.map((a) => {
     const buttons = [];
     const keys = [];
-    if (!released.has(a.equipment_id)) {
+    if (RELEASABLE.has(a.kind) && !released.has(a.equipment_id)) {
       released.add(a.equipment_id);
       keys.push(releaseKey(a.equipment_id));
       buttons.push(actionButton(state, "release", releaseKey(a.equipment_id),

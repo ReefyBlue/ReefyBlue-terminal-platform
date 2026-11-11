@@ -27,7 +27,7 @@ def test_panel_shows_alarms_and_release_works(fault_agv, page):
     page.goto(fault_agv + "/ui/")
     page.wait_for_selector(RELEASE_ROW, timeout=60_000)
     eid = page.get_attribute(RELEASE_ROW, "data-key").split("|")[1]
-    rows = f"#alarms li[data-key*='|{eid}|']"
+    rows = f"#alarms li[data-key^='NEEDS_RELEASE|{eid}|']"
     button = f"#alarms button.release[data-equipment='{eid}']"
     assert page.locator(button).count() == 1  # Review Focus 4
     assert "null" not in page.inner_text("#alarms")  # Review Focus 3
@@ -51,6 +51,7 @@ def test_resolve_buttons_only_for_unknown_outcome(page, viewer_url):
     assert page.locator("#alarms li[data-key='LINK_LOST|STS-01|'] button.resolve").count() == 0
     assert page.locator("#alarms li[data-key='UNKNOWN_OUTCOME|AGV-02|J-7'] button.resolve").count() == 2
     assert page.locator("#alarms button.release[data-equipment='STS-01']").count() == 1
+    assert page.locator("#alarms button.release[data-equipment='AGV-02']").count() == 0
 
 
 def test_refused_action_shows_error_for_5_s(page, viewer_url):
