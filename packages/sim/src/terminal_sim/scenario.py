@@ -29,6 +29,14 @@ class Scenario:
     faults: dict[Kind, FaultParams]
     speed_factor: float
     duration_s: float
+    vessel_bays: int = 50  # v2: bays per berth of the vessel model
+    twin_20: bool = False  # v2: Lift-AGVs may carry two 20' boxes (slots A and B)
+
+
+def _bool(v: object, what: str) -> bool:
+    if isinstance(v, bool):
+        return v
+    raise ValueError(f"{what} must be true or false, got {v!r}")
 
 
 def load_scenario(path: Path, layout: Layout | None = None) -> Scenario:
@@ -72,7 +80,11 @@ def load_scenario(path: Path, layout: Layout | None = None) -> Scenario:
         faults=faults,
         speed_factor=float(raw["speed_factor"]),
         duration_s=float(raw["duration_s"]),
+        vessel_bays=int(raw.get("vessel_bays", 50)),
+        twin_20=_bool(raw.get("twin_20", False), "twin_20"),
     )
+    if s.vessel_bays < 1:
+        raise ValueError(f"vessel_bays must be >= 1, got {s.vessel_bays}")
     for field, value, limit in (
         ("n_sts", s.n_sts, None if layout is None else len(layout.sts)),
         ("n_agv", s.n_agv, None if layout is None else len(layout.agv_start_cells)),

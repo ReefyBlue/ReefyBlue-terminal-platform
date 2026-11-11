@@ -25,6 +25,9 @@ class JobType(StrEnum):
     STACK_IN = "STACK_IN"
     STACK_OUT = "STACK_OUT"
     TRANSPORT = "TRANSPORT"
+    STACK_MOVE = "STACK_MOVE"  # v2: column -> column in one block (rehandle / housekeeping)
+    TRUCK_IN = "TRUCK_IN"  # v2: landside truck lane -> column (LS-ASC)
+    TRUCK_OUT = "TRUCK_OUT"  # v2: column -> landside truck lane (LS-ASC)
 
 
 class JobStatus(StrEnum):
