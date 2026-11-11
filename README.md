@@ -263,6 +263,67 @@ Visuele check: `uv run python tests/ui/render_check.py docs/superpowers/reports/
 - Posities worden 1× per seconde gepolld (`GET /equipment`); events (toestand, alarmen, jobs) komen direct via `WS /events`.
 - Met een operator achter de viewer is `--auto-release` niet meer nodig: FAULT-apparaten en onbekende uitkomsten handel je hier af. Een AGV in quarantaine vraagt sowieso een mens (box eraf halen, dan **Vrijgeven**).
 
+## Draaien op de NAS (B2c)
+
+Ontwerp: `docs/superpowers/specs/2026-11-11-plan-b2c-deploy-soak-design.md`. De hele keten draait als één `docker compose`-stack (map `deploy/`) op de QNAP TS-473A (Container Station, x86-64): één image, vijf services.
+
+| service | wat | poort |
+|---|---|---|
+| `sim` | `terminal_sim.serve` met `deploy/scenarios/$SCENARIO`, `--autostart`, `--speed-factor $SPEED_FACTOR` | 48400–48412 intern |
+| `gateway` | `terminal_gateway.serve --upstream-host sim` | 4840 intern |
+| `chaos` | `terminal_soak.chaos`: proxy gateway ↔ ECS die elke `CUT_EVERY_S` de verbinding `CUT_FOR_S` lang verbreekt | 4840 intern |
+| `ecs` | `terminal_ecs_service.serve --gateway opc.tcp://chaos:4840` (+ `--auto-release` bij `AUTO_RELEASE=1`), met viewer | **8000:8000** (de enige gepubliceerde poort) |
+| `soak` | `terminal_soak.driver`: houdt het werk gaande (batches van `BATCH` zodra er minder dan `LOW_WATER` open zijn), elk uur een meetpunt in volume `soakdata` | – |
+
+Ze starten in de keten sim → gateway → chaos → ecs → soak (elk wacht tot de vorige healthy is). Alle services: `restart: unless-stopped`, behalve `soak` (`on-failure`: na een normaal einde van `SOAK_HOURS` blijft hij uit in plaats van een nieuw venster te beginnen). Logs: `json-file`, 5 × 20 MB per service. De healthcheck van `ecs` test alleen of poort 8000 open is: `GET /health` geeft 503 zolang de gatewaykoppeling weg is, en dat gebeurt bij elke cut; de container is dan niet kapot en mag niet "unhealthy" worden.
+
+**Instellingen** (`deploy/.env`, kopie van `deploy/.env.example`):
+
+| sleutel | standaard | betekenis |
+|---|---|---|
+| `SCENARIO` | `soak.yaml` | bestand in `deploy/scenarios/` (bind-mount: wisselen zonder rebuild, wel `docker compose up -d` opnieuw) |
+| `SPEED_FACTOR` | `1` | overschrijft `speed_factor` van het scenario; 1 = echte tijd |
+| `SOAK_HOURS` | `72` | duur van de run |
+| `CUT_EVERY_S` / `CUT_FOR_S` | `14400` / `30` | verbindingscut elke 4 u, 30 s lang |
+| `AUTO_RELEASE` | `1` | `1` = storingen en onbekende uitkomsten komen vanzelf vrij; `0` (of leeg) = handmatig via de viewer |
+| `LOW_WATER` / `BATCH` | `40` / `60` | driver: nieuwe batch onder 40 open orders, 60 containers per batch |
+
+**Starten via SSH** (aanbevolen):
+
+```bash
+ssh admin@<nas>
+git clone <repo-url> terminal-platform && cd terminal-platform/deploy
+cp .env.example .env            # eventueel aanpassen
+docker compose up -d --build    # bouwt de image op de NAS (eenmalig een paar minuten)
+docker compose ps               # alle vijf "running", sim/gateway/chaos/ecs "healthy"
+```
+
+**Of via Container Station:** zet de repo op de NAS (bijv. `git clone` in een gedeelde map), maak `deploy/.env` aan, en kies *Applications → Create* met de inhoud van `deploy/docker-compose.yml`. Het build-context is `..` vanaf `deploy/`; Container Station moet de compose dus vanuit die map gebruiken (het pad van de applicatie = `…/terminal-platform/deploy`). Lukt dat niet, gebruik dan SSH.
+
+**Meekijken:**
+
+- Viewer: `http://<nas>:8000/ui/` (alarmen, koppelingsbanner; tijdens een cut kort rood).
+- `docker compose logs -f ecs` (JSON-regels; `equipment link lost` / `equipment link connected` rond elke cut), idem voor `chaos` (een JSON-regel per cut en herstel) en `soak`.
+- Meetpunten: `docker compose exec soak tail -f /data/soak/samples.jsonl` (één regel per uur).
+
+**Afronden:** na `SOAK_HOURS` stopt `soak` vanzelf (de rest blijft draaien). Dan in `deploy/`:
+
+```bash
+./collect.sh        # -> restarts.json, samples.jsonl en soak-report.md in deploy/
+docker compose down # pas daarna: na 'down' zijn de herstarttellers weg (het volume blijft)
+```
+
+`collect.sh` leest per service de `RestartCount` van Docker (criterium 1), zet die als `restarts.json` in het volume, haalt `samples.jsonl` eruit en draait `terminal_soak.report` in de image. Met `AUTO_RELEASE` anders dan `1` krijgt het rapport `--manual` (criterium 5 "handmatig"). Eerder stoppen kan: `docker compose stop soak` (de driver schrijft nog een laatste meetpunt), daarna `./collect.sh`; het rapport beoordeelt een onvolledig venster dan niet.
+
+**Auto-release:** de NAS-stack draait standaard met `AUTO_RELEASE=1`, want zonder operator moeten storingen vanzelf vrijkomen (een AGV in quarantaine zonder box aan boord ook). Wil je het "handmatig oplossen" uit B2d testen, zet dan `AUTO_RELEASE=0` en handel alarmen af in de viewer; het rapport markeert criterium 5 dan als "handmatig". Een AGV in quarantaine *met* een box aan boord wacht in beide modi op **Vrijgeven**.
+
+**Bekende beperkingen:**
+
+- ECS-herstart midden in een run: de service kent de lopende jobs niet meer. Reconciliatie via `LastJobId` vangt afgeronde jobs, maar open orders uit de vorige ECS-instantie zijn weg. De driver gaat door met nieuwe batches; `restart_count` in het rapport maakt het zichtbaar. Volledig herstel van de ECS-toestand is B3.
+- Geen authenticatie; alleen voor het thuisnetwerk. CSRF op release/resolve (B2b-risico) blijft staan tot B3.
+- `speed_factor: 1` = echte tijd; 72 u ≈ 3 000 moves. Hoger zetten mag (`SPEED_FACTOR`; de ECS-service meet in sim-tijd), maar cuts en MTBF's zijn dan in sim-seconden.
+- De image is alleen `linux/amd64` (de TS-473A is x86-64).
+
 ## Verder
 
 Ontwerp: `docs/superpowers/specs/2026-11-10-terminal-platform-fase1-design.md` en `docs/superpowers/specs/2026-11-10-plan-b1-opcua-design.md`. Plan B2 (ECS-service, viewer, Docker) en B3 (eigen DataTypes, beveiliging, vendor-adapters) volgen.

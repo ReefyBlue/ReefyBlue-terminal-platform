@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from asyncua import Client
+import pytest
 from terminal_model.locations import SlotLoc
 from terminal_sim.layout import load_layout
 from terminal_sim.scenario import load_scenario
@@ -175,6 +176,27 @@ def test_autostart_flag_parsed(monkeypatch, tmp_path):
     assert seen["autostart"] is True
     serve.main([str(_scenario(tmp_path))])
     assert seen["autostart"] is False
+
+
+def test_speed_factor_flag_overrides_scenario(monkeypatch, tmp_path):
+    from terminal_sim import serve
+    seen = {}
+
+    class Fake:
+        def __init__(self, scenario, *a, **kw):
+            seen["scenario"] = scenario
+
+    async def fake_amain(service):
+        return None
+
+    monkeypatch.setattr(serve, "SimService", Fake)
+    monkeypatch.setattr(serve, "_amain", fake_amain)
+    serve.main([str(_scenario(tmp_path)), "--speed-factor", "3"])
+    assert seen["scenario"].speed_factor == 3.0
+    serve.main([str(_scenario(tmp_path))])
+    assert seen["scenario"].speed_factor == 100.0  # from the yaml
+    with pytest.raises(SystemExit):
+        serve.main([str(_scenario(tmp_path)), "--speed-factor", "0"])
 
 
 def test_too_many_equipment_raises(tmp_path, monkeypatch):

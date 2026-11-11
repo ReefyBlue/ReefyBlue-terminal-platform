@@ -1,0 +1,162 @@
+# Plan B2c: het platform als één stack op de QNAP (Container Station).
+#   cd deploy && cp .env.example .env && docker compose up -d --build
+# Keten: sim -> gateway -> chaos (verbindingscuts) -> ecs (+ viewer op :8000/ui/) -> soak (driver).
+name: terminal-platform
+
+x-service: &service
+  # Every service carries the same build + tag: one image (BuildKit cache makes the repeats free)
+  # and no service tries to pull terminal-platform:local from a registry.
+  image: terminal-platform:local
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+    platforms: [linux/amd64]
+  init: true                       # tini as PID 1: forwards SIGTERM, reaps children
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  sim:
+    <<: *service
+    command:
+      - python
+      - -m
+      - terminal_sim.serve
+      - /app/deploy/scenarios/${SCENARIO:-soak.yaml}
+      - --layout
+      - /app/terminal.yaml
+      - --autostart
+      - --speed-factor
+      - ${SPEED_FACTOR:-1}
+      - --base-port
+      - "48400"
+      - --host
+      - 0.0.0.0
+    volumes:
+      - ./scenarios:/app/deploy/scenarios:ro    # scenario's wisselen zonder rebuild
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 48400), 2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  gateway:
+    <<: *service
+    command:
+      - python
+      - -m
+      - terminal_gateway.serve
+      - --config
+      - /app/terminal.yaml
+      - --upstream-host
+      - sim
+      - --base-port
+      - "48400"
+      - --port
+      - "4840"
+      - --host
+      - 0.0.0.0
+      - --n-sts
+      - "2"
+      - --n-agv
+      - "6"
+    depends_on:
+      sim:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 4840), 2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  chaos:
+    <<: *service
+    command:
+      - python
+      - -m
+      - terminal_soak.chaos
+      - --listen
+      - "4840"
+      - --target
+      - gateway:4840
+      - --every
+      - ${CUT_EVERY_S:-14400}
+      - --for
+      - ${CUT_FOR_S:-30}
+      - --host
+      - 0.0.0.0
+    depends_on:
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      # The listener stays open during a cut (the proxy drops the link, not the socket).
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 4840), 2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  ecs:
+    <<: *service
+    environment:
+      AUTO_RELEASE: ${AUTO_RELEASE-1}   # unset -> 1; empty or 0 -> off
+    # Shell form: the container shell turns AUTO_RELEASE=1 into --auto-release. A compose-time
+    # ${AUTO_RELEASE:+--auto-release} would also fire for AUTO_RELEASE=0 (non-empty).
+    command:
+      - sh
+      - -c
+      - >-
+        case "$$AUTO_RELEASE" in 1|true|yes) set -- --auto-release ;; *) set -- ;; esac;
+        exec python -m terminal_ecs_service.serve --gateway opc.tcp://chaos:4840
+        --layout /app/terminal.yaml --host 0.0.0.0 --port 8000 "$$@"
+    ports:
+      - "8000:8000"                # the only published port (viewer + API)
+    depends_on:
+      chaos:
+        condition: service_healthy
+    healthcheck:
+      # TCP connect only, on purpose: GET /health answers 503 while the gateway link is down,
+      # which is exactly what every chaos cut does. An HTTP check would mark the ECS unhealthy
+      # during cuts (and soak/criterium 1 would see it); the process is alive, so TCP is the check.
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 60s
+
+  soak:
+    <<: *service
+    # on-failure, not unless-stopped: after a normal end of --hours the driver exits 0 and must
+    # stay down (unless-stopped would start a fresh --hours window and append to samples.jsonl).
+    restart: on-failure
+    stop_grace_period: 60s         # the driver writes a last sample on SIGTERM
+    command:
+      - python
+      - -m
+      - terminal_soak.driver
+      - --ecs
+      - http://ecs:8000
+      - --layout
+      - /app/terminal.yaml
+      - --hours
+      - ${SOAK_HOURS:-72}
+      - --out
+      - /data/soak
+      - --low-water
+      - ${LOW_WATER:-40}
+      - --batch
+      - ${BATCH:-60}
+    volumes:
+      - soakdata:/data/soak
+    depends_on:
+      ecs:
+        condition: service_healthy
+
+volumes:
+  soakdata:
