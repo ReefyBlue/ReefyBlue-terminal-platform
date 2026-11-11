@@ -926,6 +926,12 @@ requires-dist = [
 name = "terminal-model"
 version = "0.1.0"
 source = { editable = "packages/model" }
+dependencies = [
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pyyaml", specifier = ">=6" }]
 
 [[package]]
 name = "terminal-opcua"
