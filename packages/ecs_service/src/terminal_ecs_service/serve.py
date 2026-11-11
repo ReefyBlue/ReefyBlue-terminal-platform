@@ -20,6 +20,8 @@ from pathlib import Path
 
 import uvicorn
 import yaml
+from terminal_model.layout import TerminalLayout, is_v2, load_terminal
+from terminal_model.layout_grid import grid_view
 from terminal_model.logging import configure_json_logging
 from terminal_opcua.port import OpcUaEquipmentPort
 
@@ -68,14 +70,35 @@ class Layout:
     grid_rows: int
     sts: list[Sts]
     agv_start_cells: list[tuple[int, int]]
+    terminal: TerminalLayout | None = None  # the v2 model (None for a legacy v1 layout)
 
 
 def _cell(c) -> tuple[int, int]:
     return int(c[0]), int(c[1])
 
 
+def _layout_from_v2(path: str | Path) -> Layout:
+    t = load_terminal(Path(path))
+    g = grid_view(t)
+    return Layout(
+        blocks=[Block(b.id, b.bays, b.rows, b.tiers, asc_id=b.asc_id,
+                      tp_ws=Position(b.tp_ws_m[0], b.tp_ws_m[1]), tp_ws_cell=_cell(b.tp_ws_cell))
+                for b in g.blocks],
+        quay_length_m=float(t.quay.length_m),
+        grid_cell_m=g.cell_m,
+        grid_cols=g.cols,
+        grid_rows=g.rows,
+        sts=[Sts(s.id, Position(s.x_m, s.y_m), (_cell(s.lane_cells[0]), _cell(s.lane_cells[1])))
+             for s in g.sts],
+        agv_start_cells=[_cell(c) for c in g.agv_start_cells],
+        terminal=t,
+    )
+
+
 def load_layout(path: str | Path) -> Layout:
     raw = yaml.safe_load(Path(path).read_text())
+    if isinstance(raw, dict) and is_v2(raw):
+        return _layout_from_v2(path)
     return Layout(
         blocks=[Block(str(b["block"]), int(b["bays"]), int(b["rows"]), int(b["tiers"]),
                       asc_id=str(b["asc_id"]),

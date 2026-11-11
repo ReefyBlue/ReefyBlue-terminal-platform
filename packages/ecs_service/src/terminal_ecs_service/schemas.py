@@ -112,3 +112,125 @@ class LayoutOut(BaseModel):
     sts: list[StsOut]
     blocks: list[BlockOut]
     agv_start_cells: list[tuple[int, int]]
+    version: int = 1  # 1 = legacy terminal.yaml, 2 = v2 terminal model
+    terminal: TerminalOut | None = None  # the v2 model (zones inside); None for v1
+
+
+class BerthOut(BaseModel):
+    id: str
+    from_m: float
+    to_m: float
+
+
+class QuayOut(BaseModel):
+    length_m: float
+    berths: list[BerthOut]
+
+
+class RailsOut(BaseModel):
+    y_ws_m: float
+    y_ls_m: float
+
+
+class LaneOut(BaseModel):
+    id: str
+    x_m: float
+    y_m: float
+    len_m: float
+    width_m: float
+
+
+class StsSpecOut(BaseModel):
+    id: str
+    x0_m: float
+    min_gap_m: float
+    berth_ids: list[str]
+    lanes: list[LaneOut]
+
+
+class DriveLaneOut(BaseModel):
+    id: str
+    y_m: float
+    direction: Literal["E", "W"]
+
+
+class BufferOut(BaseModel):
+    id: str
+    x_m: float
+    y_m: float
+    sts_id: str
+
+
+class ApronOut(BaseModel):
+    y_from_m: float
+    y_to_m: float
+    drive_lanes: list[DriveLaneOut]
+    crossings_every_m: float
+    buffers: list[BufferOut]
+
+
+class RackOut(BaseModel):
+    id: str
+    x_m: float
+    y_m: float
+    size: Literal["20", "40", "45"]
+    reefer: bool = False
+
+
+class TransferZoneOut(BaseModel):
+    block: str
+    racks: list[RackOut]
+    approach_lane_id: str
+
+
+class TerminalBlockOut(BaseModel):
+    id: str
+    x0_m: float
+    y0_m: float
+    bays: int
+    rows: int
+    tiers: int
+    asc_ws_id: str
+    asc_ls_id: str
+    bay_pitch_m: float
+    row_pitch_m: float
+    tier_h_m: float
+    asc_min_gap_bays: int
+    maintenance_lane_side: Literal["E", "W"]
+    reefer_rows: list[int]
+
+
+class TruckHeadOut(BaseModel):
+    block: str
+    lanes: int
+    y_m: float
+    len_m: float
+
+
+class ZoneOut(BaseModel):
+    name: str
+    type: str
+    polygon: list[tuple[float, float]]
+
+
+class OpcUaOut(BaseModel):
+    base_port: int
+    host: str
+
+
+class TerminalOut(BaseModel):
+    """The v2 terminal model (mirrors ``terminal_model.layout.TerminalLayout``; metres)."""
+
+    name: str
+    quay: QuayOut
+    sts_rails: RailsOut
+    sts: list[StsSpecOut]
+    apron: ApronOut
+    transfer_zones: list[TransferZoneOut]
+    blocks: list[TerminalBlockOut]
+    landside: list[TruckHeadOut]
+    zones: list[ZoneOut]
+    opcua: OpcUaOut
+
+
+LayoutOut.model_rebuild()
