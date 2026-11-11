@@ -93,7 +93,7 @@ def _stop(proc: subprocess.Popen) -> int:
 @contextlib.contextmanager
 def sim_and_gateway(
     scenario: Path, *, n_sts: int, n_agv: int, log_dir: Path, proxied_sts: bool = False,
-    extra_sim_args: list[str] | None = None,
+    extra_sim_args: list[str] | None = None, layout: Path = ROOT / "terminal.yaml",
 ) -> Iterator[dict]:
     """Start sim then gateway on free ports; yield ``{"endpoint", "returncodes"}``.
 
@@ -103,6 +103,9 @@ def sim_and_gateway(
     ``proxy.cut([sts_port])`` drops only the gateway's link to STS-01.
 
     ``extra_sim_args`` are appended to the sim's command line (e.g. ``["--autostart"]``).
+
+    ``layout`` is passed to the sim (``--layout``) and the gateway (``--config``); the fleet
+    the gateway mirrors is ``n_sts``/``n_agv`` plus one ASC per block of that layout.
 
     On exit both get SIGTERM; their exit codes land in ``returncodes`` (sim, gateway).
     """
@@ -118,11 +121,11 @@ def sim_and_gateway(
     sim_log = (log_dir / "sim.log").open("w")
     gw_log = (log_dir / "gateway.log").open("w")
     sim = subprocess.Popen(
-        [sys.executable, "-m", "terminal_sim.serve", str(scenario), "--layout", str(ROOT / "terminal.yaml"),
+        [sys.executable, "-m", "terminal_sim.serve", str(scenario), "--layout", str(layout),
          "--base-port", str(base), "--host", "127.0.0.1", *(extra_sim_args or [])],
         cwd=ROOT, stdout=sim_log, stderr=subprocess.STDOUT)
     gw = subprocess.Popen(
-        [sys.executable, "-m", "terminal_gateway.serve", "--config", str(ROOT / "terminal.yaml"),
+        [sys.executable, "-m", "terminal_gateway.serve", "--config", str(layout),
          "--port", str(gw_port), "--host", "127.0.0.1", "--upstream-host", "127.0.0.1",
          "--base-port", str(gw_base), "--n-sts", str(n_sts), "--n-agv", str(n_agv)],
         cwd=ROOT, stdout=gw_log, stderr=subprocess.STDOUT)
@@ -131,7 +134,7 @@ def sim_and_gateway(
             "proxy": proxy, "sts_port": gw_base if proxy else None}
     try:
         deadline = time.monotonic() + READY_TIMEOUT_S
-        n_equipment = n_sts + n_agv + len(load_layout(ROOT / "terminal.yaml").blocks)  # 1 ASC/block
+        n_equipment = n_sts + n_agv + len(load_layout(layout).blocks)  # 1 ASC/block
         while not asyncio.run(_gateway_ready(endpoint, n_equipment)):
             if sim.poll() is not None or gw.poll() is not None:
                 raise RuntimeError(f"process died during startup; see {info['logs']}")
@@ -156,9 +159,12 @@ def _fleet_up(url: str) -> bool:
 
 
 @contextlib.contextmanager
-def ecs_service(gateway_endpoint: str, *, log_dir: Path, auto_release: bool = False) -> Iterator[dict]:
-    """Start ``terminal_ecs_service.serve`` on a free port (``--auto-release`` when
-    ``auto_release``); yield ``{"url", "returncode", "log"}``.
+def ecs_service(
+    gateway_endpoint: str, *, log_dir: Path, auto_release: bool = False,
+    layout: Path = ROOT / "terminal.yaml",
+) -> Iterator[dict]:
+    """Start ``terminal_ecs_service.serve`` on a free port with ``--layout layout``
+    (``--auto-release`` when ``auto_release``); yield ``{"url", "returncode", "log"}``.
 
     Waits for ``GET /health`` 200 and no device FAULT or OFFLINE in ``GET /equipment``; on
     exit SIGTERM and the exit code lands in ``returncode``.
@@ -167,7 +173,7 @@ def ecs_service(gateway_endpoint: str, *, log_dir: Path, auto_release: bool = Fa
     log = (log_dir / "ecs.log").open("w")
     proc = subprocess.Popen(
         [sys.executable, "-m", "terminal_ecs_service.serve", "--gateway", gateway_endpoint,
-         "--layout", str(ROOT / "terminal.yaml"), "--host", "127.0.0.1", "--port", str(port),
+         "--layout", str(layout), "--host", "127.0.0.1", "--port", str(port),
          *(["--auto-release"] if auto_release else [])],
         cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
     url = f"http://127.0.0.1:{port}"

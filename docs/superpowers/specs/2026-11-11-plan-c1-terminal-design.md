@@ -12,7 +12,7 @@ Succescriteria:
 1. `terminal.yaml` beschrijft de terminal volledig in meters (geen gridcellen meer als primaire eenheid); de bestaande `load_layout`-API blijft bestaan als afgeleide (het 20 m-grid wordt berekend uit de meter-layout voor de huidige AGV-router) tot Plan C2 de router vervangt.
 2. Elk equipment heeft een **kinematisch profiel** (max. snelheid, versnelling, vertraging; voor kranen per as) met Konecranes-ordegrootte defaults; cyclustijden komen uit de bewegingen, niet uit een getrokken driehoeksverdeling.
 3. STS-productiviteit in de baseline-run ligt tussen 25 en 35 moves/uur per kraan bij 5 Lift-AGV's per kraan (ordegrootte van echte ASC/AGV-terminals); de nieuwe KPI `sts_moves_per_hour` staat in `/kpis`.
-4. Alle bestaande tests blijven groen op de **oude layout** (`terminal.yaml` → `terminal_legacy.yaml`, fixtures ongewijzigd); de nieuwe layout is `terminal_mv.yaml` en heeft eigen baseline-fixtures.
+4. Alle bestaande tests blijven groen op de **oude layout** (`terminal.yaml` houdt zijn naam en blijft de legacy v1-grid-layout zonder `version`-sleutel; géén `terminal_legacy.yaml`; fixtures ongewijzigd); de nieuwe layout is `terminal_mv.yaml` (`version: 2`) en heeft eigen baseline-fixtures.
 5. De viewer tekent de nieuwe layout op schaal uit `/layout` (Plan C3, apart).
 
 Buiten scope (geparkeerd): landzijde-equipment (landzijde-ASC-cyclus, truck-lanes, gate, spoor) → C4; dubbele-trolley-STS met lashing platform → later; batterijladen/laadstations voor AGV's → C2 (routering) omdat laadlocaties routeringsdoelen zijn; windstilstand en weerseffecten; meerdere schepen tegelijk.
@@ -39,8 +39,8 @@ Fictief, maar in verhouding tot een middelgrote ASC-terminal:
 - **STS**: 8 kranen (`STS-01`…`STS-08`), startposities op 75 + 150·n m; gantry-bereik per ligplaats; minimale onderlinge afstand 27 m (breedte over bumpers) → `min_gap_m`.
 - **Apron**: y = 40 … 165 (125 m): STS-backreach met per STS **3 transfer-lanes** (lane-breedte 3,5 m, lengte 16 m) op y = 45–61; AGV-rijbanen: 4 banen parallel aan de kade (y = 70, 76, 82, 88; richting afwisselend oost/west), dwarsverbindingen elke 50 m; AGV-wachtvakken ("buffer") per STS 2 stuks op y = 95.
 - **Transferzone waterzijde**: y = 110 … 160 vóór elke blokkop: per blok **5 rackposities** (20'/40'-rack op 2,4 m hoogte, pitch 3,5 m) in de lijn van het blok, plus 1 reefer/exception-positie; AGV nadert via een inrijbaan, zet af, rijdt leeg door (ontkoppeld).
-- **Yard**: y = 165 … 525: **16 blokken** (`A`…`P`), hartafstand 42 m (10 wide × 2,9 m = 29 m + ASC-poot + onderhoudsgang 13 m), elk blok **40 bays × 10 rijen × 1-over-5** (tiers 5; 2 000 TEU-grondslots), kraanbaanlengte 360 m; twee ASC's per blok op één spoor (`ASC-A-WS`, `ASC-A-LS`), waterzijde-ASC werkt bay 1–40 + transferzone, landzijde-ASC bay 1–40 + truckkop; **passeren onmogelijk**, minimale afstand 2 bays → `asc_min_gap_bays: 2`; werkverdeling: WS-ASC doet alle waterzijde-jobs, LS-ASC alle landzijde-jobs en housekeeping; bij conflict wijkt de LS-ASC.
-- **Landzijde**: y = 525 … 560 truckkop per blok met 4 truck-lanes (alleen als in-/uitstroombron: orders `TRUCK_IN`/`TRUCK_OUT` worden door de landzijde-ASC afgehandeld met een vaste cyclustijd; geen truck-model) — Plan C4 vult dit in.
+- **Yard**: y = 165 … 425 (40 bays × 6,5 m = 260 m): **24 blokken** (`A`…`X`, x0 = 25 + 42·i, zodat de yard de hele kade beslaat), hartafstand 42 m (10 wide × 2,9 m = 29 m + ASC-poot + onderhoudsgang 13 m), elk blok **40 bays × 10 rijen × 1-over-5** (tiers 5; 2 000 TEU-grondslots), kraanbaan van transferzone tot truckkop y = 110 … 460 ≈ 350 m; twee ASC's per blok op één spoor (`ASC-A-WS`, `ASC-A-LS`), waterzijde-ASC werkt bay 1–40 + transferzone, landzijde-ASC bay 1–40 + truckkop; **passeren onmogelijk**, minimale afstand 2 bays → `asc_min_gap_bays: 2`; werkverdeling: WS-ASC doet alle waterzijde-jobs, LS-ASC alle landzijde-jobs en housekeeping; bij conflict wijkt de LS-ASC.
+- **Landzijde**: y = 425 … 460 truckkop per blok met 4 truck-lanes (alleen als in-/uitstroombron: orders `TRUCK_IN`/`TRUCK_OUT` worden door de landzijde-ASC afgehandeld met een vaste cyclustijd; geen truck-model) — Plan C4 vult dit in.
 - **Hekwerk**: apron+transferzone+yard zijn automatiseringsgebied; alleen de truckkop is bemand gebied (relevant voor noodstop-/safety-events in C2).
 
 ### 3.1 Terminalzones (volledigheid naar de Quaysim-tekening van de gebruiker)
@@ -122,7 +122,7 @@ C1 houdt de dispatcher-logica gelijk en breidt alleen uit wat nodig is om de nie
 
 | Plan | Inhoud | Resultaat |
 |---|---|---|
-| **C1a** | `terminal_model.layout` (meters) + validatie + `Layout.grid()` + `terminal_mv(.small).yaml` + `/layout` uitgebreid; oude yaml → `terminal_legacy.yaml`, alle tests groen | layout op schaal, nog oude equipment |
+| **C1a** | `terminal_model.layout` (meters) + validatie + `Layout.grid()` + `terminal_mv(.small).yaml` + `/layout` uitgebreid; `terminal.yaml` blijft de legacy-layout, alle tests groen | layout op schaal, nog oude equipment |
 | **C1b** | Kinematica-module + STS/Lift-AGV/ASC-paar/racks/stack-met-kolommen in de sim; OPC UA-variabelen; dispatcher-stages §6; TOS-stub yardregels; nieuwe KPI's; baseline-fixtures `mv_small` | simulator op schaal |
 | **C2** | Lane-routering met kruispunten, laadstations, STS-gantryverplaatsing tussen ligplaatsen, dual-cycling | realistisch verkeer |
 | **C3** | Viewer: tekenen uit het metermodel (racks, lanes, twee ASC's, STS-trolley/hoist, scheepsbays), zoom/pan | zichtbaar |
@@ -134,7 +134,7 @@ C1a en C1b worden als twee plannen uitgevoerd (SDD, aparte PR's op `feat/plan-b2
 
 0. De Quaysim-tekening van de gebruiker is de volledigheidsreferentie (zones); blokoriëntatie en maten volgen de Konecranes-opzet (haaks op de kade) omdat die bij Lift-AGV's met racks hoort — de gebruiker gaf aan dat de tekening niet exact gevolgd hoeft te worden.
 
-1. Fictieve maar realistische terminal (1 200 m, 8 STS, 16 blokken) als demo-layout; kleine variant voor tests. Geen kopie van een bestaande terminal.
+1. Fictieve maar realistische terminal (1 200 m, 8 STS, 24 blokken) als demo-layout; kleine variant voor tests. Geen kopie van een bestaande terminal.
 2. Alle maten in meters; het 20 m-grid blijft tijdelijk als afgeleide view om C1 klein te houden; de router wordt in C2 vervangen.
 3. Twee ASC's per blok op één spoor (niet-passerend), WS/LS-taakverdeling met claim/yield — de meest voorkomende configuratie.
 4. Racks = 5 per blok + 1 exception-positie; AGV wacht nooit op een ASC (ontkoppeling is het hele punt van Lift-AGV's).
