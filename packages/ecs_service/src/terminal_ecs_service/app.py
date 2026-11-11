@@ -15,13 +15,15 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any, TypeVar
 
 import anyio
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from terminal_ecs.alarms import ReleaseRefused
 from terminal_ecs.workorders import WorkOrder, WorkOrderError
 from terminal_model.locations import SlotLoc, parse_location
@@ -53,6 +55,15 @@ T = TypeVar("T")
 
 _NOT_CONNECTED = {"detail": "not connected to the equipment"}
 _503 = {"description": "Not connected to the equipment"}
+
+
+def _viewer_dir() -> Path | None:
+    """Static viewer directory, or None when ``terminal_viewer`` is not installed."""
+    try:
+        from terminal_viewer import static_dir
+    except ImportError:
+        return None
+    return static_dir()
 
 
 def _refused(code: str, message: str, status: int) -> JSONResponse:
@@ -286,5 +297,16 @@ def create_app(core: EcsCore, *, run_loop: bool = True) -> FastAPI:
             pass
         finally:
             core.broadcaster.unregister(q)
+
+    if (viewer := _viewer_dir()) is not None:
+        app.mount("/ui", StaticFiles(directory=str(viewer), html=True), name="ui")
+
+        @app.get("/", include_in_schema=False)
+        async def root() -> RedirectResponse:
+            return RedirectResponse("/ui/", status_code=307)
+
+        log.info("viewer mounted at /ui from %s", viewer)
+    else:
+        log.info("terminal_viewer not installed; no /ui")
 
     return app

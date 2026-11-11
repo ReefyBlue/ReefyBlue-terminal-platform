@@ -16,6 +16,7 @@ dev = [
     "terminal-gateway",
     "terminal-kpi",
     "terminal-ecs-service",
+    "terminal-viewer",
     "pytest-asyncio>=1.4.1.post1",
     "httpx2>=2.16.0",
 ]
@@ -30,6 +31,7 @@ terminal-opcua = { workspace = true }
 terminal-gateway = { workspace = true }
 terminal-kpi = { workspace = true }
 terminal-ecs-service = { workspace = true }
+terminal-viewer = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -53,6 +55,7 @@ pythonpath = [
     "packages/gateway/src",
     "packages/kpi/src",
     "packages/ecs_service/src",
+    "packages/viewer/src",
     "tests/opcua",
     "tests/gateway",
 ]

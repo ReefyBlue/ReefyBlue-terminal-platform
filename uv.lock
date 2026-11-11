@@ -14,6 +14,7 @@ members = [
     "terminal-runner",
     "terminal-sim",
     "terminal-tos-stub",
+    "terminal-viewer",
 ]
 
 [[package]]
@@ -782,6 +783,11 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
 ]
 
+[package.optional-dependencies]
+viewer = [
+    { name = "terminal-viewer" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4" },
@@ -792,8 +798,10 @@ requires-dist = [
     { name = "terminal-model", editable = "packages/model" },
     { name = "terminal-opcua", editable = "packages/opcua" },
     { name = "terminal-tos-stub", editable = "packages/tos_stub" },
+    { name = "terminal-viewer", marker = "extra == 'viewer'", editable = "packages/viewer" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
+provides-extras = ["viewer"]
 
 [[package]]
 name = "terminal-gateway"
@@ -866,6 +874,7 @@ dev = [
     { name = "terminal-runner" },
     { name = "terminal-sim" },
     { name = "terminal-tos-stub" },
+    { name = "terminal-viewer" },
 ]
 
 [package.metadata]
@@ -884,6 +893,7 @@ dev = [
     { name = "terminal-runner", editable = "packages/runner" },
     { name = "terminal-sim", editable = "packages/sim" },
     { name = "terminal-tos-stub", editable = "packages/tos_stub" },
+    { name = "terminal-viewer", editable = "packages/viewer" },
 ]
 
 [[package]]
@@ -946,6 +956,11 @@ requires-dist = [
     { name = "terminal-ecs", editable = "packages/ecs" },
     { name = "terminal-model", editable = "packages/model" },
 ]
+
+[[package]]
+name = "terminal-viewer"
+version = "0.1.0"
+source = { editable = "packages/viewer" }
 
 [[package]]
 name = "truststore"

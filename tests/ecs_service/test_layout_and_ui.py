@@ -36,3 +36,23 @@ async def test_layout_available_without_equipment_link():
     layout = load_layout(ROOT / "terminal.yaml")
     async with _client(layout) as c:  # core never connected
         assert (await c.get("/layout")).status_code == 200
+
+
+async def test_ui_served_and_root_redirects():
+    layout = load_layout(ROOT / "terminal.yaml")
+    async with _client(layout) as c:
+        r = await c.get("/ui/")
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+        assert (await c.get("/ui/viewer.js")).status_code == 200
+        root = await c.get("/", follow_redirects=False)
+        assert root.status_code == 307 and root.headers["location"] == "/ui/"
+
+
+async def test_without_viewer_package_no_ui(monkeypatch):
+    import terminal_ecs_service.app as appmod
+
+    monkeypatch.setattr(appmod, "_viewer_dir", lambda: None)
+    layout = load_layout(ROOT / "terminal.yaml")
+    async with _client(layout) as c:
+        assert (await c.get("/ui/")).status_code == 404
+        assert (await c.get("/", follow_redirects=False)).status_code == 404

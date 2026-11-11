@@ -11,19 +11,21 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGES = ["model", "sim", "ecs", "tos_stub", "runner", "gateway", "opcua", "kpi", "ecs_service"]
+PACKAGES = ["model", "sim", "ecs", "tos_stub", "runner", "gateway", "opcua", "kpi", "ecs_service", "viewer"]
 ECS_HASH_FIXTURE = ROOT / "tests" / "fixtures" / "ecs_sources.sha256"
 
 # Workspace packages each package may import (besides itself); runner may import all.
 ALLOWED = {
     "model": set(),
+    "viewer": set(),
     "opcua": {"terminal_model"},
     "ecs": {"terminal_model"},
     "sim": {"terminal_model", "terminal_opcua"},
     "gateway": {"terminal_model", "terminal_opcua"},
     "tos_stub": {"terminal_model", "terminal_ecs"},
     "kpi": {"terminal_model", "terminal_ecs"},
-    "ecs_service": {"terminal_model", "terminal_ecs", "terminal_opcua", "terminal_kpi", "terminal_tos_stub"},
+    "ecs_service": {"terminal_model", "terminal_ecs", "terminal_opcua", "terminal_kpi", "terminal_tos_stub",
+                    "terminal_viewer"},
 }
 _TERMINAL = re.compile(r"^\s*(?:from|import)\s+(terminal_\w+)", re.MULTILINE)
 
@@ -135,3 +137,10 @@ def test_guard_detects_a_real_import_but_not_a_docstring(tmp_path, monkeypatch):
     assert _imports("ecs", ["terminal_sim"]) == []
     (pkg / "bad.py").write_text("from terminal_sim.world import World\n")
     assert len(_imports("ecs", ["terminal_sim"])) == 1
+
+
+def test_viewer_has_no_python_logic():
+    pkg = ROOT / "packages" / "viewer" / "src" / "terminal_viewer"
+    assert [p.name for p in pkg.rglob("*.py")] == ["__init__.py"]
+    for name in ("index.html", "viewer.js", "viewer.css"):
+        assert (pkg / "static" / name).is_file()
