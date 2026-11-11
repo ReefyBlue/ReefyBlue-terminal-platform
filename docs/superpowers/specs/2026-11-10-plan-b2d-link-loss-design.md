@@ -69,7 +69,7 @@ Nieuwe constructor-parameter `auto_release: bool = False`. Nieuwe interne verzam
 
 ### 5.3a Herhaalde mislukkingen
 
-`OrderRecord.replan_streak` telt herplanningen door `JOB_FAILED` (generieke tak van `_on_failed`) en door `FAULT`; een `JOB_COMPLETED` van een job van de order zet hem op 0; watchdog-annuleringen en `resolve_job(…, "failed")` tellen niet mee en resetten niet. Bij `WATCHDOG_MAX_CANCELS` (5) op rij wordt de order gefaald met reden `REPLAN_STREAK` (`_fail_order`: TP en AGV vrij, telt in `failed`/`containers_failed`) met ERROR-log `replan streak: <cid> failed <n> times in a row on <eid> (<reason>); order failed`. `stuck` houdt zijn watchdog-betekenis.
+`OrderRecord.replan_streak` telt herplanningen door `JOB_FAILED` (generieke tak van `_on_failed`) en door `FAULT`; een `JOB_COMPLETED` van een job van de order zet hem op 0; watchdog-annuleringen en `resolve_job(…, "failed")` tellen niet mee en resetten niet. Bij `WATCHDOG_MAX_CANCELS` (5) op rij wordt de order gefaald met reden `REPLAN_STREAK` (`_fail_order`: TP vrij; de AGV ook, tenzij de box er nog op staat — dan gaat de AGV in quarantaine en heeft hij `release` nodig (§5.2); telt in `failed`/`containers_failed`) met ERROR-log `replan streak: <cid> failed <n> times in a row on <eid> (<reason>); order failed`. `stuck` houdt zijn watchdog-betekenis.
 
 ### 5.4 Status en alarmen
 
@@ -103,7 +103,7 @@ CLI: `terminal_ecs_service.serve --auto-release` (standaard uit); `terminal_runn
 
 ## 8. Tests
 
-- `tests/ecs`: OFFLINE herplant niet en pauzeert de watchdog (600 s offline → geen cancel); terugkeer BUSY/IDLE-met-job/IDLE-zonder-job/FAULT/OFFLINE; FAULT → `needs_release`, IDLE heft niet op; `release` geweigerd bij FAULT en bij open onbekende uitkomst, toegestaan bij IDLE; `resolve_job` completed en failed; `auto_release=True`: alle bestaande dispatcher-tests ongewijzigd groen (fixture draait met `auto_release=True`), onbekende uitkomst → completed; `alarms()`-inhoud en `since`.
+- `tests/ecs`: OFFLINE herplant niet en pauzeert de watchdog (600 s offline → geen cancel); terugkeer BUSY/IDLE-met-job/IDLE-zonder-job/FAULT/OFFLINE; FAULT → `needs_release`, IDLE heft niet op; `release` geweigerd bij FAULT en bij open onbekende uitkomst, toegestaan bij IDLE; `resolve_job` completed en failed; `auto_release=True`: alle bestaande dispatcher-tests ongewijzigd groen (fixture draait met `auto_release=True`), IDLE na OFFLINE met de lopende job als gemelde laatste job → uitkomst uit die melding verwerkt (COMPLETED/FAILED), echt onbekende uitkomst → failed (herplannen); `alarms()`-inhoud en `since`.
 - `tests/gateway`: OFFLINE i.p.v. FAULT bij verlies; recovery-event ook bij upstream FAULT.
 - `tests/ecs_service`: port LINK_LOST voor alle apparaten bij `unbind`, LINK_RESTORED voor alle bij `bind`; API alarms/release/resolve incl. 404/409/422/503; WS `alarm` raised/cleared; `EcsCore` met FakePort: offline → terug IDLE met job → alarm UNKNOWN_OUTCOME → resolve → release → apparaat weer toegewezen.
 - `tests/e2e`: Plan A-baseline exact (geen storingen); `faults.yaml` in-process met `auto_release=True` → tellingen gelijk aan vóór B2d (nieuwe referentie-fixture voor faults seed 1 vastleggen vóór de wijziging, in Task 1); `e2e_opcua`: proxy-blip sim↔gateway tijdens een run (service `--auto-release`) → run voltooit zonder `stuck`; proxy-blip ECS↔gateway → idem.
