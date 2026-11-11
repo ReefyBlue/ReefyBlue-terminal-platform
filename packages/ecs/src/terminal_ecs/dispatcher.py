@@ -72,10 +72,17 @@ operator ``resolve_job(.., "failed")`` neither count nor reset. At
 log, ``status()["failed"]``; its TP is freed, its AGV too unless the box is on it, see
 QUARANTINE) instead of being re-issued in an
 endless loop of immediately failing jobs.
+
+Finished orders (DONE and FAILED) are kept, in finish order, for ``containers_since``
+and the DUPLICATE_CONTAINER check until ``prune_done(keep)`` drops the oldest beyond
+``keep`` (with their ``completed`` entries and job-log entries; ``status()`` counters stay
+cumulative). Only the long-running ECS service prunes; nothing here calls it, so a run
+without pruning behaves exactly as before.
 """
 
 from __future__ import annotations
 
+import heapq
 import itertools
 import logging
 from collections.abc import Callable, Mapping
@@ -98,6 +105,7 @@ from terminal_ecs.orders import (
     RELEASE_AGV,
     ROLLBACK,
     TP_BUSY,
+    ContainerView,
     LoggedJob,
     OrderRecord,
     Stage,
@@ -151,7 +159,10 @@ class Dispatcher:
                 self._asc_by_block[str(block) if block else eid.split("-", 1)[1]] = eid
 
         self._all_eq = frozenset({*self._sts, *self._agvs, *self._asc_by_block.values()})
-        self._known: set[str] = set()
+        self._known: set[str] = set()  # open + retained finished orders (DUPLICATE_CONTAINER)
+        self._finished: dict[str, OrderRecord] = {}  # DONE/FAILED records, in finish order
+        self._done_total = 0  # cumulative, unaffected by prune_done
+        self._change_hw = 0  # last ContainerView seq handed out
         self._open: dict[str, OrderRecord] = {}  # submit order = per-STS FIFO
         self._by_job: dict[str, OrderRecord] = {}
         self._job_eq: dict[str, str] = {}  # running job_id -> equipment id
@@ -201,7 +212,9 @@ class Dispatcher:
             self._known.add(o.container_id)
             stage = Stage.AWAIT_AGV if o.type is JobType.DISCHARGE else Stage.AWAIT_ASC
             seq = next(self._seq)
-            self._open[o.container_id] = OrderRecord(o, o.yard_slot, stage, seq=seq, submit_seq=seq)
+            rec = OrderRecord(o, o.yard_slot, stage, seq=seq, submit_seq=seq)
+            self._open[o.container_id] = rec
+            self._changed(rec)
         self.tick()
 
     def status(self) -> dict:
@@ -209,7 +222,7 @@ class Dispatcher:
             "pending": sum(r.stage in PENDING for r in self._open.values()),
             "open": len(self._open),  # every order not yet DONE or FAILED
             "active_jobs": len(self.jobs),
-            "done": len(self.completed),
+            "done": self._done_total,
             "failed": self._failed,
             "replans": self._replans,
             "stuck": sum(r.stuck for r in self._open.values()),
@@ -225,6 +238,66 @@ class Dispatcher:
             "needs_release": len(self._needs_release),
             "unknown_outcomes": len(self._unknown),
         }
+
+    def is_known(self, container_id: str) -> bool:
+        """True for an open order and a finished one not yet pruned (a re-submit is a
+        DUPLICATE_CONTAINER)."""
+        return container_id in self._known
+
+    def prune_done(self, keep: int) -> int:
+        """Forget the oldest finished (DONE/FAILED) orders beyond the newest ``keep``: their
+        records, ``completed`` entries, job-log entries and container ids (which may then
+        be submitted again). Open orders and the ``status()`` counters are untouched.
+        Returns how many were dropped. Never called by the dispatcher itself."""
+        if keep < 0:
+            raise ValueError(f"keep must be >= 0, not {keep}")
+        n = len(self._finished) - keep
+        if n <= 0:
+            return 0
+        done = 0
+        for cid in list(itertools.islice(self._finished, n)):
+            rec = self._finished.pop(cid)
+            self._known.discard(cid)
+            done += rec.stage is Stage.DONE
+            for jtype, count in rec.job_counts.items():  # job ids are "<cid>-<type>-<1..count>"
+                for i in range(1, count + 1):
+                    self._job_log.pop(f"{cid}-{jtype}-{i}", None)
+        # ``completed`` and ``_finished`` are both in finish order: the pruned DONE
+        # orders are the head of ``completed``.
+        del self.completed[:done]
+        return n
+
+    def containers_since(self, since: int, *, limit: int | None = None) -> tuple[int, list[ContainerView]]:
+        """Orders whose open/done/failed state changed after ``since`` (``seq`` order, at
+        most ``limit``), and the cursor for the next call: the last returned ``seq``, or
+        with nothing to return the newest ``seq`` handed out (also when ``since`` lies
+        beyond it, e.g. a cursor from another dispatcher). Pruned orders are gone; a
+        cursor older than the retained window gets every retained order."""
+        if since < 0:
+            raise ValueError(f"since must be >= 0, not {since}")
+        # Both sources are already ascending in change_seq: open orders keep their
+        # submit seq, finished ones get a new seq when they enter ``_finished``.
+        opened = [r for r in self._open.values() if r.change_seq > since]
+        finished: list[OrderRecord] = []
+        for r in reversed(self._finished.values()):
+            if r.change_seq <= since:
+                break
+            finished.append(r)
+        finished.reverse()
+        recs = list(heapq.merge(opened, finished, key=lambda r: r.change_seq))
+        if limit is not None:
+            recs = recs[:limit]
+        items = [
+            ContainerView(
+                seq=r.change_seq,
+                container_id=r.cid,
+                state="open" if r.cid in self._open else ("done" if r.stage is Stage.DONE else "failed"),
+                job_type=r.order.type.value,  # type: ignore[arg-type]
+                yard_slot=r.yard_slot,
+            )
+            for r in recs
+        ]
+        return (items[-1].seq if items else self._change_hw), items
 
     def alarms(self) -> list[Alarm]:
         """What the operator has to act on, oldest first (derived from the state sets)."""
@@ -576,6 +649,17 @@ class Dispatcher:
         self._enter(rec, Stage.DONE)
         del self._open[rec.cid]
         self.completed.append(rec.cid)
+        self._done_total += 1
+        self._retire(rec)
+
+    def _retire(self, rec: OrderRecord) -> None:
+        """Keep a finished order for ``containers_since`` until ``prune_done``."""
+        self._finished[rec.cid] = rec
+        self._changed(rec)
+
+    def _changed(self, rec: OrderRecord) -> None:
+        self._change_hw += 1
+        rec.change_seq = self._change_hw
 
     def _on_failed(self, ev: EquipmentEvent) -> None:
         rec = self._record_for(ev)
@@ -797,7 +881,8 @@ class Dispatcher:
         rec.fail_reason = reason
         rec.agv_id = None
         self._enter(rec, Stage.FAILED)
-        self._open.pop(rec.cid, None)
+        if self._open.pop(rec.cid, None) is not None:
+            self._retire(rec)
         self._failed += 1
 
     def _transfer(self, rec: OrderRecord, kind: str, eid: str, agv: str | None) -> bool:

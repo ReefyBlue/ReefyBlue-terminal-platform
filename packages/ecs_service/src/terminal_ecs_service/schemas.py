@@ -32,6 +32,24 @@ class HealthOut(BaseModel):
     connected: bool
     sim_time: float | None
     error: str | None = None  # "sim_time_reversed": the sim restarted under this ECS
+    rss_mb: float | None = None  # peak resident set size of the service process (MiB)
+    uptime_s: float | None = None  # wall seconds since the service started
+
+
+class ContainerOut(BaseModel):
+    seq: int  # number of the order's last open/done/failed change
+    container_id: str
+    state: Literal["open", "done", "failed"]
+    job_type: Literal["DISCHARGE", "LOAD"]
+    yard_slot: str
+
+
+class ContainersOut(BaseModel):
+    """``GET /containers?since=N``: changes after ``N`` in ``seq`` order; ``next`` is
+    the ``since`` of the following call."""
+
+    next: int
+    items: list[ContainerOut]
 
 
 class AlarmOut(BaseModel):

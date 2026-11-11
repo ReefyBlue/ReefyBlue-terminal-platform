@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import anyio
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -29,11 +29,12 @@ from terminal_ecs.workorders import WorkOrder, WorkOrderError
 from terminal_model.locations import SlotLoc, parse_location
 from terminal_model.types import JobType
 
-from terminal_ecs_service.core import EcsCore
+from terminal_ecs_service.core import EcsCore, rss_mb
 from terminal_ecs_service.schemas import (
     AcceptedOut,
     AlarmOut,
     BlockOut,
+    ContainersOut,
     HealthOut,
     LayoutOut,
     PositionOut,
@@ -55,6 +56,7 @@ T = TypeVar("T")
 
 _NOT_CONNECTED = {"detail": "not connected to the equipment"}
 _503 = {"description": "Not connected to the equipment"}
+CONTAINERS_PAGE = 500  # max items per GET /containers
 
 
 def _viewer_dir() -> Path | None:
@@ -90,7 +92,7 @@ def validate_orders(core: EcsCore, orders: list[WorkOrderIn]) -> list[dict]:
     seen: set[str] = set()
     for o in orders:
         cid = o.container_id
-        duplicate = cid in seen or cid in core.known_containers
+        duplicate = cid in seen or core.is_known(cid)
         seen.add(cid)
         if duplicate:
             errors.append(_error(cid, "DUPLICATE_CONTAINER", f"{cid}: container already has a work order"))
@@ -234,12 +236,20 @@ def create_app(core: EcsCore, *, run_loop: bool = True) -> FastAPI:
     @app.get("/health", response_model=HealthOut, response_model_exclude_none=True,
              responses={503: {"model": HealthOut}})
     async def get_health() -> Any:
+        proc = {"rss_mb": rss_mb(), "uptime_s": core.uptime_s()}
         if not core.connected:
-            return JSONResponse({"connected": False, "sim_time": None}, status_code=503)
+            return JSONResponse({"connected": False, "sim_time": None, **proc}, status_code=503)
         if core.time_reversed:  # sim restarted under this ECS: unusable until restarted
-            return JSONResponse({"connected": True, "sim_time": core.port.now(), "error": "sim_time_reversed"},
-                                status_code=503)
-        return HealthOut(connected=True, sim_time=core.port.now())
+            return JSONResponse({"connected": True, "sim_time": core.port.now(), "error": "sim_time_reversed",
+                                 **proc}, status_code=503)
+        return HealthOut(connected=True, sim_time=core.port.now(), **proc)
+
+    @app.get("/containers", response_model=ContainersOut)
+    async def get_containers(since: int = Query(0, ge=0)) -> Any:
+        """Work orders whose state (open/done/failed) changed after ``since``, oldest
+        change first, at most ``CONTAINERS_PAGE``; pass ``next`` as the following
+        ``since``. Needs no equipment link (empty before the first connection)."""
+        return core.containers(since, CONTAINERS_PAGE)
 
     @app.get("/layout", response_model=LayoutOut)
     async def get_layout() -> LayoutOut:

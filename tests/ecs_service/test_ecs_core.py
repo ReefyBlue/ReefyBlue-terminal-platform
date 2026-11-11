@@ -259,10 +259,10 @@ async def test_submit_while_link_lost_raises_not_connected():
 async def test_submit_records_known_containers():
     core, _ = _core(_fake())
     await core.connect_once()
-    assert core.known_containers == set()
+    assert not core.is_known("C1")
     core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1"),
                  WorkOrder("C2", JobType.LOAD, "STS-01", "A/1/1/2")])
-    assert core.known_containers == {"C1", "C2"}
+    assert core.is_known("C1") and core.is_known("C2") and not core.is_known("C3")
 
 
 class SlowClosePort(FakePort):
@@ -362,7 +362,7 @@ async def test_submit_connection_error_after_take_still_records_containers():
     await core.connect_once()
     fake.lost = True
     core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")])  # no raise: taken
-    assert core.known_containers == {"C1"}  # the Dispatcher took it: a retry is a duplicate
+    assert core.is_known("C1")  # the Dispatcher took it: a retry is a duplicate
     assert core.connected is False and core.dispatcher.status()["open"] == 1
 
 
@@ -446,7 +446,8 @@ async def test_sim_time_going_backwards_flags_and_health_503(caplog):
         assert errors == ["sim time went backwards (300.0 -> 0.0): restart the ECS service per sim run"]
         r = await client.get("/health")
         assert r.status_code == 503
-        assert r.json() == {"connected": True, "sim_time": 0.0, "error": "sim_time_reversed"}
+        assert r.json().items() >= {"connected": True, "sim_time": 0.0, "error": "sim_time_reversed"}.items()
+        assert r.json()["rss_mb"] > 0 and r.json()["uptime_s"] >= 0
         second.advance(60.0)
         core.step()  # the loop keeps running
         assert core.connected is True and core.time_reversed is True
