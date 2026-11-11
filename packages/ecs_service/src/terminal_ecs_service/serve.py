@@ -23,10 +23,12 @@ import yaml
 from terminal_model.logging import configure_json_logging
 from terminal_opcua.port import OpcUaEquipmentPort
 
-from terminal_ecs_service.app import create_app
+from terminal_ecs_service.app import _viewer_dir, create_app
 from terminal_ecs_service.core import EcsCore
 
 __all__ = ["Block", "Layout", "Position", "Sts", "load_layout", "main", "port_factory"]
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
     # uvicorn restores the pre-run() handler and re-raises the captured signal into it after its
     # graceful shutdown; with the default SIGTERM handler that would exit -15, so exit 0 instead.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    if _viewer_dir() is not None:
+        log.info("viewer at http://%s:%d/ui/", args.host, args.port)
+    else:
+        log.info("viewer package terminal_viewer absent; no /ui/ (install the 'viewer' extra)")
     uvicorn.run(create_app(core), host=args.host, port=args.port, log_config=None, log_level=args.log_level)
     return 0
 

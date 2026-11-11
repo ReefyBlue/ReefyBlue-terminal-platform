@@ -13,7 +13,9 @@ export const COLORS = {
 };
 
 const UNKNOWN_COLOR = "#9e9e9e"; // equipment the layout names but /equipment has not reported
-const QUAY_COLOR = "#1e5aa8";
+const QUAY_COLOR = "#1e5aa8"; // quay edge and STS lane hatching
+const STS_COLOR = "#0d3b8c"; // STS structure (state shows in its cabin)
+const SEA_COLOR = "#cfe3f7"; // berth: water / vessel side above the quay
 const GRID_COLOR = "#e3e6ea";
 const OUTLINE_COLOR = "#37474f";
 const LABEL_COLOR = "#263238";
@@ -305,7 +307,11 @@ function pushEvent(state, m) {
 // ---------------------------------------------------------------------------- map
 
 const MARGIN_PX = 20;
+const SEA_CELLS = 1; // berth strip drawn above the quay (y < 0), as in the reference
+const STS_REACH_CELLS = 0.8; // how far an STS bar reaches over the berth strip
+const BLOCK_DEPTH_CELLS = 2; // drawn depth of a block below its TP row
 const STS_BAR_PX = 12;
+const STS_CABIN_PX = 18; // state-coloured square on an STS bar at the quay edge
 const ASC_BAR_PX = 6;
 const AGV_L_M = 8;
 const AGV_W_M = 4;
@@ -355,12 +361,57 @@ function outline(ctx, item) {
   ctx.setLineDash(item && item.state === "OFFLINE" ? [4, 3] : []);
 }
 
-function label(ctx, text, x, y, align = "center", baseline = "bottom") {
-  ctx.fillStyle = LABEL_COLOR;
-  ctx.font = "11px system-ui, sans-serif";
+/** Text with a white halo, so ids stay readable where they cross bars, hatching or grid. */
+function label(ctx, text, x, y, align = "center", baseline = "bottom", font = "12px system-ui, sans-serif") {
+  ctx.save();
+  ctx.setLineDash([]);
+  ctx.font = font;
   ctx.textAlign = align;
   ctx.textBaseline = baseline;
+  ctx.lineJoin = "round";
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = LABEL_COLOR;
   ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+/** The cells of `route` still ahead of an AGV at world `pos`: the AGV reports its whole
+ * planned route (cells already passed included), so drop everything up to the route cell
+ * nearest to it. */
+function remainingRoute(route, pos, cell) {
+  let best = 0;
+  let bestD = Infinity;
+  route.forEach(([c, r], i) => {
+    const d = Math.hypot((c + 0.5) * cell - pos.x, (r + 0.5) * cell - pos.y);
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  });
+  return route.slice(best + 1);
+}
+
+/** Place a label of `text` centred at `x`, above the box `top` if that spot is free of the
+ * already `placed` label boxes, else below `bottom`; records the box it takes. */
+function placeLabel(ctx, placed, text, x, top, bottom) {
+  ctx.save();
+  ctx.font = "12px system-ui, sans-serif";
+  const w = ctx.measureText(text).width + 4;
+  ctx.restore();
+  const h = 14;
+  const hits = (b) => placed.some((p) => b.x < p.x + p.w && p.x < b.x + b.w && b.y < p.y + p.h && p.y < b.y + b.h);
+  const above = { x: x - w / 2, y: top - 2 - h, w, h };
+  const below = { x: x - w / 2, y: bottom + 2, w, h };
+  const box = !hits(above) || hits(below) ? above : below;
+  placed.push(box);
+  label(ctx, text, x, box.y + h, "center", "bottom");
+}
+
+/** World y of the bottom edge of `block` as drawn (its TP row plus BLOCK_DEPTH_CELLS). */
+function blockBottom(layout, block) {
+  return block.tp_ws.y + BLOCK_DEPTH_CELLS * layout.grid_cell_m;
 }
 
 /** Screen rectangles of every drawn piece of equipment, topmost first (AGV, ASC, STS). */
@@ -386,36 +437,42 @@ function shapes(state, fit) {
     const x = Math.min(Math.max(left + along, left), left + bw);
     const top = sy(b.tp_ws.y);
     out.push({ id: b.asc_id, kind: "ASC", item, block: b,
-               x: sx(x) - ASC_BAR_PX / 2, y: top - 3, w: ASC_BAR_PX, h: sy(fit.worldH) - top + 3 });
+               x: sx(x) - ASC_BAR_PX / 2, y: top - 3, w: ASC_BAR_PX, h: sy(blockBottom(layout, b)) - top + 6 });
   }
   for (const s of layout.sts) {
     const item = equipment.get(s.equipment_id);
+    const top = -STS_REACH_CELLS * layout.grid_cell_m;
     out.push({ id: s.equipment_id, kind: "STS", item, sts: s,
-               x: sx(s.x) - STS_BAR_PX / 2, y: sy(0), w: STS_BAR_PX, h: stsBottom(layout, s) * k });
+               x: sx(s.x) - STS_BAR_PX / 2, y: sy(top), w: STS_BAR_PX, h: (stsBottom(layout, s) - top) * k });
   }
   return out;
 }
 
 const map = {
-  /** Uniform scale and offset placing the world bounding box (quay length, grid and every
-   * STS/block position) inside `width × height` px with a 20 px margin. */
+  /** Uniform scale and offset placing the world bounding box (berth strip above the quay,
+   * quay length, grid, every STS position and every block with its drawn depth) inside
+   * `width × height` px with a 20 px margin: centred horizontally, at the top vertically
+   * (quay on top, as in the reference). `worldTop` (< 0) is the top of the berth strip,
+   * `worldH` the bottom of the world. */
   fit(layout, width, height) {
     const cell = layout.grid_cell_m;
     const xs = [...layout.sts.map((s) => s.x), ...layout.blocks.map((b) => b.tp_ws.x)];
-    const ys = [...layout.sts.map((s) => s.y), ...layout.blocks.map((b) => b.tp_ws.y)];
+    const ys = [...layout.sts.map((s) => s.y + cell), ...layout.blocks.map((b) => blockBottom(layout, b))];
     const worldW = Math.max(layout.quay_length_m, layout.grid_cols * cell,
                             xs.length ? Math.max(...xs) + cell : 0);
-    const worldH = Math.max(layout.grid_rows * cell, ys.length ? Math.max(...ys) + cell : 0);
-    const scale = Math.max(0, Math.min((width - 2 * MARGIN_PX) / worldW, (height - 2 * MARGIN_PX) / worldH));
+    const worldTop = -SEA_CELLS * cell;
+    const worldH = Math.max(layout.grid_rows * cell, ys.length ? Math.max(...ys) : 0);
+    const scale = Math.max(0, Math.min((width - 2 * MARGIN_PX) / worldW,
+                                       (height - 2 * MARGIN_PX) / (worldH - worldTop)));
     const ox = (width - worldW * scale) / 2;
-    const oy = (height - worldH * scale) / 2;
-    return { scale, ox, oy, worldW, worldH };
+    const oy = MARGIN_PX - worldTop * scale;
+    return { scale, ox, oy, worldW, worldH, worldTop };
   },
 
   /** Draw the whole top view of `state` onto `ctx` with the transform `fit`. */
   draw(ctx, state, fit) {
     const { layout, equipment } = state;
-    const { scale: k, ox, oy, worldW, worldH } = fit;
+    const { scale: k, ox, oy, worldW, worldTop } = fit;
     const cell = layout.grid_cell_m;
     const sx = (x) => ox + x * k;
     const sy = (y) => oy + y * k;
@@ -438,9 +495,17 @@ const map = {
     }
     ctx.stroke();
 
-    // quay band
-    ctx.fillStyle = QUAY_COLOR;
-    ctx.fillRect(sx(0), sy(0), worldW * k, (cell / 2) * k);
+    // berth strip (water / vessel side) above the quay, quay edge as a heavy line
+    ctx.fillStyle = SEA_COLOR;
+    ctx.fillRect(sx(0), sy(worldTop), worldW * k, -worldTop * k);
+    ctx.strokeStyle = QUAY_COLOR;
+    ctx.lineWidth = 3;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(sx(0), sy(0));
+    ctx.lineTo(sx(worldW), sy(0));
+    ctx.stroke();
+    label(ctx, "Kade", sx(0) + 6, sy(worldTop) + 4, "left", "top", "600 12px system-ui, sans-serif");
 
     // blocks with TP cell and block letter
     for (const b of layout.blocks) {
@@ -448,32 +513,45 @@ const map = {
       const bw = blockDrawWidth(layout, b);
       const x = sx(b.tp_ws.x - bw / 2);
       const y = sy(b.tp_ws.y);
+      const h = sy(blockBottom(layout, b)) - y;
       ctx.fillStyle = BLOCK_FILL;
-      ctx.fillRect(x, y, bw * k, sy(worldH) - y);
+      ctx.fillRect(x, y, bw * k, h);
       ctx.strokeStyle = OUTLINE_COLOR;
       ctx.lineWidth = 1;
       ctx.setLineDash([]);
-      ctx.strokeRect(x, y, bw * k, sy(worldH) - y);
-      label(ctx, b.block, x + (bw * k) / 2, y + (sy(worldH) - y) / 2, "center", "middle");
+      ctx.strokeRect(x, y, bw * k, h);
+      label(ctx, `Blok ${b.block}`, x + (bw * k) / 2, y + h / 2, "center", "middle",
+            "600 13px system-ui, sans-serif");
       const [tc, tr] = b.tp_ws_cell;
       const tx = sx(tc * cell);
       const ty = sy(tr * cell);
-      ctx.strokeRect(tx, ty, cell * k, cell * k);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(tx, ty, cell * k, cell * k);
       if (asc && asc.extra && asc.extra.ws_tp_occupied) hatch(ctx, tx, ty, cell * k, cell * k, OUTLINE_COLOR);
+      ctx.strokeStyle = OUTLINE_COLOR;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(tx, ty, cell * k, cell * k);
+      label(ctx, "TP", tx + 3, ty + 3, "left", "top", "10px system-ui, sans-serif");
     }
 
     const drawn = shapes(state, fit);
 
-    // STS: bar over quay and handover lane, lane cells hatched while occupied
+    // STS: blue bar over berth, quay and handover lane (as in the reference) with a cabin in
+    // the state colour on the quay edge; lane cells hatched while occupied
     for (const s of drawn.filter((d) => d.kind === "STS")) {
       if (s.item && s.item.extra && s.item.extra.handover_lane_occupied) {
         for (const [c, r] of s.sts.lane_cells) hatch(ctx, sx(c * cell), sy(r * cell), cell * k, cell * k, QUAY_COLOR);
       }
-      ctx.fillStyle = colorOf(s.item);
+      ctx.fillStyle = STS_COLOR;
       ctx.fillRect(s.x, s.y, s.w, s.h);
+      const cab = STS_CABIN_PX;
+      const cx = s.x + s.w / 2 - cab / 2;
+      const cy = sy(0) - cab / 2;
+      ctx.fillStyle = colorOf(s.item);
+      ctx.fillRect(cx, cy, cab, cab);
       outline(ctx, s.item);
-      ctx.strokeRect(s.x, s.y, s.w, s.h);
-      label(ctx, s.id, s.x + s.w + 3, s.y + s.h, "left", "bottom");
+      ctx.strokeRect(cx, cy, cab, cab);
+      label(ctx, s.id, s.x + s.w + 4, s.y + 2, "left", "top");
     }
 
     // ASC: bar across its block at the gantry position, id under the block
@@ -485,10 +563,12 @@ const map = {
       label(ctx, a.id, a.x + a.w / 2, a.y + a.h + 2, "center", "top");
     }
 
-    // AGV: remaining route, body, box when loaded, id above
-    for (const a of drawn.filter((d) => d.kind === "AGV")) {
+    // AGV: remaining route, body, box when loaded; ids after all bodies, above (or below
+    // when that spot is taken by a neighbour's id)
+    const agvs = drawn.filter((d) => d.kind === "AGV");
+    for (const a of agvs) {
       const extra = a.item.extra || {};
-      const route = Array.isArray(extra.route) ? extra.route : [];
+      const route = Array.isArray(extra.route) ? remainingRoute(extra.route, a.item.position, cell) : [];
       if (route.length) {
         ctx.strokeStyle = ROUTE_COLOR;
         ctx.lineWidth = 1;
@@ -507,8 +587,9 @@ const map = {
         ctx.fillStyle = BOX_COLOR;
         ctx.fillRect(a.x + (a.w - s) / 2, a.y + (a.h - s) / 2, s, s);
       }
-      label(ctx, a.id, a.x + a.w / 2, a.y - 2, "center", "bottom");
     }
+    const placed = [];
+    for (const a of agvs) placeLabel(ctx, placed, a.id, a.x + a.w / 2, a.y, a.y + a.h);
 
     ctx.restore();
   },
@@ -564,12 +645,43 @@ function bannerOf(state) {
   return { cls: "ok", text: "ECS ↔ gateway verbonden" };
 }
 
+// GET /kpis keys with a Dutch label (prefix match for the per-STS / per-kind keys); others
+// are shown under their own key. sim_elapsed_s repeats the simulation time and is left out.
+const KPI_LABELS = [
+  ["moves_per_hour_total", "Moves/uur totaal"],
+  ["moves_per_hour_", "Moves/uur "],
+  ["agv_wait_sts_s_mean", "AGV wacht bij STS (s)"],
+  ["agv_wait_tp_s_mean", "AGV wacht bij TP (s)"],
+  ["agv_travel_s_mean", "AGV rijtijd (s)"],
+  ["utilisation_", "Bezetting "],
+  ["vessel_turnaround_s", "Schip omlooptijd (s)"],
+  ["faults", "Storingen"],
+  ["replans", "Herplanningen"],
+  ["energy_kwh_per_move", "Energie (kWh/move)"],
+  ["containers_done", "Containers gereed"],
+  ["containers_failed", "Containers mislukt"],
+  ["containers_stuck", "Containers vast"],
+];
+const KPI_HIDDEN = new Set(["sim_elapsed_s"]);
+
+function kpiRow(key, value) {
+  for (const [k, lbl] of KPI_LABELS) {
+    if (key === k) return [lbl, fmtNum(value)];
+    if (k.endsWith("_") && key.startsWith(k)) {
+      const rest = key.slice(k.length);
+      if (k === "utilisation_" && typeof value === "number") return [lbl + rest, `${Math.round(value * 100)} %`];
+      return [lbl + rest, fmtNum(value)];
+    }
+  }
+  return [key, fmtNum(value)];
+}
+
 function kpisHtml(state) {
   const rows = [];
   const st = state.status || {};
   if (typeof st.sim_time === "number") rows.push(["Simulatietijd", fmtTime(st.sim_time)]);
   for (const [k, lbl] of STATUS_KPIS) if (st[k] !== undefined) rows.push([lbl, fmtNum(st[k])]);
-  for (const [k, v] of Object.entries(state.kpis || {})) rows.push([k, fmtNum(v)]);
+  for (const [k, v] of Object.entries(state.kpis || {})) if (!KPI_HIDDEN.has(k)) rows.push(kpiRow(k, v));
   return rows.map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join("");
 }
 
