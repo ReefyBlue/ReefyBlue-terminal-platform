@@ -3,6 +3,8 @@
 #   cd deploy && ./collect.sh            -> restarts.json, samples.jsonl, soak-report.md (hier)
 # Werkt ook als de soak-container al gestopt is (normaal einde van --hours).
 set -eu
+# pipefail where the shell has it (bash, busybox ash, dash >= 0.5.13; older dash lacks it)
+if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
 cd "$(dirname "$0")"
 
 # AUTO_RELEASE zoals compose het ziet: .env (indien aanwezig), anders 1.
@@ -14,15 +16,17 @@ if [ -f .env ]; then
   fi
 fi
 
-# 1. RestartCount per service -> restarts.json  ({"sim": 0, ...}; -1 = container niet gevonden)
+# 1. RestartCount per service -> restarts.json  ({"sim": 0, ...}). Een service zonder container
+#    ontbreekt in het bestand; het rapport meldt hem dan als "niet gemeten".
 printf '{' > restarts.json
 sep=''
 for svc in sim gateway chaos ecs soak; do
   id=$(docker compose ps -a -q "$svc" | head -n 1)
-  count=-1
-  if [ -n "$id" ]; then
-    count=$(docker inspect -f '{{.RestartCount}}' "$id")
+  if [ -z "$id" ]; then
+    echo "let op: geen container voor $svc (niet gemeten)" >&2
+    continue
   fi
+  count=$(docker inspect -f '{{.RestartCount}}' "$id")
   printf '%s"%s": %s' "$sep" "$svc" "$count" >> restarts.json
   sep=', '
 done

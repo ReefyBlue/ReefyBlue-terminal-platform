@@ -8,7 +8,8 @@ Every ``loop_s`` wall seconds ``tick()``:
    starts again from 0);
 2. compares the open ``LINK_LOST`` alarms with the previous tick: none -> some is a
    cut, some -> none its recovery (duration in wall seconds);
-3. if ``/status`` answers and ``open < low_water``: posts ``make_batch()``.
+3. if ``/status`` answers, is not ``connected: false`` and ``open < low_water``: posts
+   ``make_batch()``.
 
 ``make_batch()`` writes the orders itself (ids ``SOAK-<batch>-<i>``): only DISCHARGE
 while fewer than ``batch // 2`` slots are taken, else DISCHARGE/LOAD alternating;
@@ -18,7 +19,9 @@ and puts all DISCHARGEs first.
 
 ``tick(now)``/``sample(now)`` take the wall time (epoch seconds) as an argument and
 never sleep; ``run(hours)`` is the only place with real waits. No ECS error ends a
-tick or a sample.
+tick or a sample, and ``run`` logs and survives any other exception of an iteration.
+A ``/health.uptime_s`` lower than in the previous sample counts as an ECS restart
+(``ecs_resets_seen``) unless ``/containers`` already counted it.
 
 Usage: python -m terminal_soak.driver --ecs http://ecs:8000 --layout terminal.yaml --out /data/soak
 """
@@ -84,7 +87,9 @@ class Driver:
         self._cursor = 0
         self._batch_no = 0  # last batch number used (or seen in /containers)
         self.batches_posted = 0
-        self.ecs_resets_seen = 0  # /containers answered next < since
+        self.ecs_resets_seen = 0  # /containers answered next < since, or /health uptime fell
+        self._last_uptime: float | None = None
+        self._resets_at_last_sample = 0
         self.cuts_seen = 0
         self.recoveries: list[dict] = []
         self._cut_since: float | None = None
@@ -195,7 +200,7 @@ class Driver:
 
     def _submit(self) -> None:
         st = self._safe("GET /status", self.client.status_if_connected)
-        if st is None or st.get("open", 0) >= self.low_water:
+        if st is None or st.get("connected") is False or st.get("open", 0) >= self.low_water:
             return
         orders = self.make_batch()
         if not orders:
@@ -237,12 +242,23 @@ class Driver:
         self._submit()
 
     # -- measuring ---------------------------------------------------------------------
+    def _check_uptime(self, uptime: Any) -> None:
+        """An ECS uptime lower than in the previous sample: the ECS restarted."""
+        if isinstance(uptime, (int, float)):
+            if self._last_uptime is not None and uptime < self._last_uptime:
+                log.warning("/health uptime_s fell from %.0f to %.0f (ECS restarted?)", self._last_uptime, uptime)
+                if self.ecs_resets_seen == self._resets_at_last_sample:  # not yet seen by /containers
+                    self.ecs_resets_seen += 1
+            self._last_uptime = float(uptime)
+        self._resets_at_last_sample = self.ecs_resets_seen
+
     def sample(self, now: float) -> dict:
         """Append one measuring point (spec §3.2) to ``out_dir/samples.jsonl``."""
         status = self._safe("GET /status", self.client.status_if_connected) or {}
         kpis = self._safe("GET /kpis", self.client.kpis) or {}
         health = self._safe("GET /health", self.client.health_json) or {}
         alarms = self._safe("GET /alarms", self.client.alarms) or []
+        self._check_uptime(health.get("uptime_s"))
         line = {
             "wall_time": _iso(now),
             "sim_time": status.get("sim_time", health.get("sim_time")),
@@ -266,6 +282,14 @@ class Driver:
             f.write(json.dumps(line) + "\n")
         return line
 
+    def _guarded(self, what: str, fn: Callable[[], Any]) -> None:
+        """Run one iteration step; an unexpected error is logged, not fatal
+        (SystemExit/KeyboardInterrupt still end the run)."""
+        try:
+            fn()
+        except Exception:
+            log.exception("driver iteration failed (%s)", what)
+
     def run(self, hours: float, *, clock: Callable[[], float] = time.time) -> int:
         """Wait for a healthy ECS (max ``HEALTH_WAIT_S``), resume, then tick every
         ``loop_s`` and sample at start, every ``sample_every_s`` and at the end, for
@@ -273,21 +297,22 @@ class Driver:
         if not self.client.wait_healthy(HEALTH_WAIT_S):
             log.error("ECS not healthy after %.0f s", HEALTH_WAIT_S)
             return 1
-        self.resume()
+        self._guarded("resume", self.resume)
         start = clock()
         end = start + hours * 3600.0
-        self.sample(start)
+        self._guarded("sample", lambda: self.sample(start))
         next_sample = start + self.sample_every_s
         while True:
             now = clock()
-            self.tick(now)
+            self._guarded("tick", lambda now=now: self.tick(now))
             if now >= next_sample:
-                self.sample(now)
+                self._guarded("sample", lambda now=now: self.sample(now))
                 next_sample = max(next_sample + self.sample_every_s, now)  # no catch-up burst
             remaining = end - clock()
             if remaining <= 0 or self._stop.wait(min(self.loop_s, remaining)):
                 break
-        self.sample(clock())
+        end_now = clock()
+        self._guarded("sample", lambda: self.sample(end_now))
         return 0
 
 

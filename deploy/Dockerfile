@@ -1,9 +1,9 @@
 # One image for all five services (sim, gateway, chaos, ecs, soak). Build context: repo root.
 #   docker build -f deploy/Dockerfile -t terminal-platform .
-# The QNAP TS-473A is x86-64: linux/amd64 only.
+# The QNAP TS-473A is x86-64: linux/amd64 only (set via `platforms` in docker-compose.yml).
 
 # --- builder: resolve the locked workspace into /app/.venv ------------------------------------
-FROM --platform=linux/amd64 ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --all-packages
 
 # --- runtime -----------------------------------------------------------------------------------
-FROM --platform=linux/amd64 python:3.12-slim AS runtime
+FROM python:3.12-slim-bookworm AS runtime
 RUN groupadd --system --gid 1000 app \
  && useradd --system --uid 1000 --gid app --home-dir /app --shell /usr/sbin/nologin app \
  && mkdir -p /data/soak \

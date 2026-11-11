@@ -281,7 +281,7 @@ Ze starten in de keten sim → gateway → chaos → ecs → soak (elk wacht tot
 
 | sleutel | standaard | betekenis |
 |---|---|---|
-| `SCENARIO` | `soak.yaml` | bestand in `deploy/scenarios/` (bind-mount: wisselen zonder rebuild, wel `docker compose up -d` opnieuw) |
+| `SCENARIO` | `soak.yaml` | bestand in `deploy/scenarios/` (bind-mount: wisselen zonder rebuild; wel een nieuwe run, zie *Ander scenario of `SPEED_FACTOR`*) |
 | `SPEED_FACTOR` | `1` | overschrijft `speed_factor` van het scenario; 1 = echte tijd |
 | `SOAK_HOURS` | `72` | duur van de run |
 | `CUT_EVERY_S` / `CUT_FOR_S` | `14400` / `30` | verbindingscut elke 4 u, 30 s lang |
@@ -315,6 +315,17 @@ docker compose down # pas daarna: na 'down' zijn de herstarttellers weg (het vol
 
 `collect.sh` leest per service de `RestartCount` van Docker (criterium 1), zet die als `restarts.json` in het volume, haalt `samples.jsonl` eruit en draait `terminal_soak.report` in de image. Met `AUTO_RELEASE` anders dan `1` krijgt het rapport `--manual` (criterium 5 "handmatig"). Eerder stoppen kan: `docker compose stop soak` (de driver schrijft nog een laatste meetpunt), daarna `./collect.sh`; het rapport beoordeelt een onvolledig venster dan niet.
 
+**Ander scenario of `SPEED_FACTOR`:** dat is een nieuwe run en vraagt een schone stack, niet een losse `docker compose up -d`:
+
+```bash
+docker compose stop soak        # driver schrijft nog een laatste meetpunt
+./collect.sh                    # alleen als je de meetpunten van de vorige run wilt bewaren
+docker compose down -v          # -v: ook volume soakdata (samples.jsonl) weg
+docker compose up -d --build
+```
+
+Een kale `docker compose up -d` na het wijzigen van `.env` gaat mis: (a) compose maakt alleen `sim` opnieuw; de sim-tijd begint weer bij 0, de ECS ziet `sim_time_reversed` en `/health` blijft de rest van de run 503 terwijl de healthcheck (alleen TCP-poort 8000) groen blijft; (b) een al geëindigde `soak` start opnieuw en schrijft een tweede run achter de eerste in `samples.jsonl`.
+
 **Auto-release:** de NAS-stack draait standaard met `AUTO_RELEASE=1`, want zonder operator moeten storingen vanzelf vrijkomen (een AGV in quarantaine zonder box aan boord ook). Wil je het "handmatig oplossen" uit B2d testen, zet dan `AUTO_RELEASE=0` en handel alarmen af in de viewer; het rapport markeert criterium 5 dan als "handmatig". Een AGV in quarantaine *met* een box aan boord wacht in beide modi op **Vrijgeven**.
 
 **Bekende beperkingen:**
@@ -322,7 +333,10 @@ docker compose down # pas daarna: na 'down' zijn de herstarttellers weg (het vol
 - ECS-herstart midden in een run: de service kent de lopende jobs niet meer. Reconciliatie via `LastJobId` vangt afgeronde jobs, maar open orders uit de vorige ECS-instantie zijn weg. De driver gaat door met nieuwe batches; `restart_count` in het rapport maakt het zichtbaar. Volledig herstel van de ECS-toestand is B3.
 - Geen authenticatie; alleen voor het thuisnetwerk. CSRF op release/resolve (B2b-risico) blijft staan tot B3.
 - `speed_factor: 1` = echte tijd; 72 u ≈ 3 000 moves. Hoger zetten mag (`SPEED_FACTOR`; de ECS-service meet in sim-tijd), maar cuts en MTBF's zijn dan in sim-seconden.
-- De image is alleen `linux/amd64` (de TS-473A is x86-64).
+- De image is alleen `linux/amd64` (de TS-473A is x86-64; `platforms` in de compose).
+- Scenario of `SPEED_FACTOR` wijzigen met alleen `docker compose up -d`: sim-tijd terug → ECS `sim_time_reversed`, `/health` 503 voor de rest van de run (healthcheck blijft groen), en een geëindigde `soak` voegt een tweede run toe aan `samples.jsonl`. Gebruik `down` → (`collect.sh`) → `down -v` → `up -d --build`, zie hierboven.
+- Een herstart van de NAS beëindigt de soak-run stil: `soak` heeft `restart: on-failure` en komt na een reboot niet terug (de andere services wel, `unless-stopped`). Draai daarna `./collect.sh`; het rapport beoordeelt het onvolledige venster niet.
+- Ontbreekt de container van een service bij `collect.sh`, dan staat die service niet in `restarts.json` en meldt het rapport criterium 1 als "niet gemeten" voor die service.
 
 ## Verder
 

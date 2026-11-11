@@ -135,6 +135,7 @@ def test_auto_release_maps_to_flag(tmp_path, value, flag):
 FAKE_DOCKER = """#!/bin/sh
 echo "$@" >> "$FAKE_LOG"
 case "$*" in
+  "compose ps -a -q chaos") ;;
   "compose ps -a -q "*) echo "id-$5" ;;
   "inspect "*) case "$4" in id-ecs) echo 2 ;; *) echo 0 ;; esac ;;
   *"sh -c cat > /data/soak/restarts.json") cat > "$FAKE_DIR/received-restarts.json" ;;
@@ -144,9 +145,10 @@ esac
 """
 
 
+@pytest.mark.parametrize("shell", ["sh", "bash"])  # bash: with pipefail active
 @pytest.mark.parametrize("env_line, manual", [(None, False), ("AUTO_RELEASE=1", False),
                                               ("AUTO_RELEASE=0", True), ("AUTO_RELEASE=", True)])
-def test_collect_sh(tmp_path, env_line, manual):
+def test_collect_sh(tmp_path, env_line, manual, shell):
     work = tmp_path / "deploy"
     work.mkdir()
     shutil.copy(DEPLOY / "collect.sh", work / "collect.sh")
@@ -158,14 +160,43 @@ def test_collect_sh(tmp_path, env_line, manual):
     (bin_dir / "docker").chmod(0o755)
     env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", FAKE_LOG=str(tmp_path / "log"),
                FAKE_DIR=str(tmp_path))
-    proc = subprocess.run(["sh", str(work / "collect.sh")], env=env, capture_output=True, text=True)
+    proc = subprocess.run([shell, str(work / "collect.sh")], env=env, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
+    assert "geen container voor chaos" in proc.stderr
 
     restarts = json.loads((work / "restarts.json").read_text())
-    assert restarts == {"sim": 0, "gateway": 0, "chaos": 0, "ecs": 2, "soak": 0}
+    # no chaos container: its key is left out (report: "niet gemeten"), never -1
+    assert restarts == {"sim": 0, "gateway": 0, "ecs": 2, "soak": 0}
     assert json.loads((tmp_path / "received-restarts.json").read_text()) == restarts
     assert (work / "samples.jsonl").read_text().splitlines() == ['{"a": 1}', '{"a": 2}']
     report = (work / "soak-report.md").read_text()
     assert "python -m terminal_soak.report /data/soak/samples.jsonl --restarts /data/soak/restarts.json" in report
     assert "run --rm --no-deps -T soak" in report
     assert ("--manual" in report) is manual
+
+
+def test_collect_sh_fails_on_docker_error(tmp_path):
+    """set -e(o pipefail): a failing docker call ends collect.sh non-zero."""
+    work = tmp_path / "deploy"
+    work.mkdir()
+    shutil.copy(DEPLOY / "collect.sh", work / "collect.sh")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text("#!/bin/sh\nexit 3\n")
+    (bin_dir / "docker").chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+    proc = subprocess.run(["sh", str(work / "collect.sh")], env=env, capture_output=True, text=True, check=False)
+    assert proc.returncode != 0
+    assert not (work / "soak-report.md").exists()
+
+
+def test_report_treats_missing_restart_key_as_not_measured():
+    from terminal_soak.report import _c1
+    c = _c1({"sim": 0, "gateway": 0, "ecs": 0, "soak": 0})
+    assert c.passed is None and "chaos" in c.detail
+
+
+def test_dockerfile_stages_are_bookworm_without_platform_pin():
+    froms = [ln for ln in (DEPLOY / "Dockerfile").read_text().splitlines() if ln.startswith("FROM ")]
+    assert len(froms) == 2
+    assert all("bookworm" in ln and "--platform" not in ln for ln in froms)  # compose sets `platforms`

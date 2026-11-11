@@ -268,3 +268,67 @@ def test_main_parses_args(tmp_path, monkeypatch):
     assert seen["hours"] == 0.5 and seen["low_water"] == 20 and seen["batch"] == 30
     assert seen["loop_s"] == 2.0 and seen["sample_every_s"] == 60.0 and seen["out_dir"] == tmp_path
     assert [b.block for b in seen["layout"].blocks] == ["A", "B", "C", "D"]
+
+
+class _Proxy:
+    """Wraps a real client; attributes in ``over`` replace the client's."""
+
+    def __init__(self, client, **over):
+        self._client, self._over = client, over
+
+    def __getattr__(self, name):
+        return self._over[name] if name in self._over else getattr(self._client, name)
+
+
+def test_run_survives_unexpected_errors(tmp_path):
+    def broken(since):
+        raise TypeError("unexpected payload")
+
+    with ecs() as e:
+        d = _driver(_Proxy(e.client, containers=broken), tmp_path, loop_s=0.01, sample_every_s=3600)
+        assert d.run(hours=0.03 / 3600) == 0
+        lines = (tmp_path / "samples.jsonl").read_text().splitlines()
+        assert len(lines) == 2  # start + final sample despite every tick failing
+
+
+def test_submit_skips_batch_when_status_says_disconnected(tmp_path):
+    with ecs() as e:
+        st = e.client.status_if_connected()
+        d = _driver(_Proxy(e.client, status_if_connected=lambda: dict(st, connected=False, open=0)), tmp_path)
+        d.resume()
+        d.tick(T0)
+        assert d.batches_posted == 0 and e.core.dispatcher.status()["open"] == 0
+        assert d._batch_no == 0  # no batch built (no reserved slots)
+
+
+def test_sample_counts_uptime_regression_as_ecs_reset(tmp_path, caplog):
+    uptimes = iter([500.0, 900.0, 20.0, 40.0])
+
+    def health():
+        return {"connected": True, "sim_time": 1.0, "uptime_s": next(uptimes)}
+
+    with ecs() as e:
+        d = _driver(_Proxy(e.client, health_json=health), tmp_path)
+        d.sample(T0)
+        d.sample(T0 + 1)
+        assert d.ecs_resets_seen == 0
+        with caplog.at_level("WARNING", logger="terminal_soak.driver"):
+            s = d.sample(T0 + 2)
+        assert d.ecs_resets_seen == 1 and s["ecs_resets_seen"] == 1
+        assert any("uptime" in r.getMessage() for r in caplog.records)
+        d.sample(T0 + 3)
+        assert d.ecs_resets_seen == 1
+
+
+def test_uptime_regression_not_double_counted_after_containers_reset(tmp_path):
+    uptimes = iter([500.0, 20.0])
+
+    def health():
+        return {"connected": True, "sim_time": 1.0, "uptime_s": next(uptimes)}
+
+    with ecs() as e:
+        d = _driver(_Proxy(e.client, health_json=health), tmp_path)
+        d.sample(T0)
+        d.ecs_resets_seen += 1  # the /containers poll already saw this restart
+        d.sample(T0 + 1)
+        assert d.ecs_resets_seen == 1
