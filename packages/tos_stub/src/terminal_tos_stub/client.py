@@ -30,9 +30,17 @@ class EcsRefused(Exception):
 
 
 class EcsClient:
-    def __init__(self, base_url: str, *, transport: httpx.BaseTransport | None = None,
-                 timeout_s: float = 5.0) -> None:
-        self._http = httpx.Client(base_url=base_url, transport=transport, timeout=timeout_s)
+    """Sync client of the ECS service API. ``http`` wraps an existing ``httpx.Client``
+    (e.g. a Starlette ``TestClient`` around an in-process app) instead of building one
+    from ``base_url``/``transport``."""
+
+    def __init__(self, base_url: str | None = None, *, transport: httpx.BaseTransport | None = None,
+                 timeout_s: float = 5.0, http: httpx.Client | None = None) -> None:
+        if http is None:
+            if base_url is None:
+                raise TypeError("EcsClient needs base_url or http")
+            http = httpx.Client(base_url=base_url, transport=transport, timeout=timeout_s)
+        self._http = http
 
     def __enter__(self) -> EcsClient:
         return self
@@ -55,8 +63,8 @@ class EcsClient:
         resp.raise_for_status()
         return int(resp.json()["accepted"])
 
-    def _get(self, path: str) -> Any:
-        resp = self._http.get(path)
+    def _get(self, path: str, params: dict | None = None) -> Any:
+        resp = self._http.get(path, params=params)
         resp.raise_for_status()
         return resp.json()
 
@@ -81,6 +89,10 @@ class EcsClient:
     def alarms(self) -> list[dict]:
         return self._get("/alarms")
 
+    def containers(self, since: int) -> dict:
+        """``GET /containers?since=`` -> ``{"next": int, "items": [...]}``."""
+        return self._get("/containers", {"since": since})
+
     def _operator_post(self, path: str, body: dict | None = None) -> dict:
         resp = self._http.post(path, json=body)
         if resp.status_code in (404, 409):
@@ -100,6 +112,18 @@ class EcsClient:
     def health(self) -> bool:
         try:
             return self._http.get("/health").status_code == 200
+        except httpx.HTTPError:
+            return False
+
+    def health_json(self) -> dict:
+        """The ``GET /health`` body, also on 503 (``connected``, ``sim_time``, ``rss_mb``,
+        ``uptime_s``); ``httpx.HTTPError`` when the service is unreachable."""
+        return self._http.get("/health").json()
+
+    def ui_ok(self) -> bool:
+        """``GET /ui/`` answers 200 (the viewer is served)."""
+        try:
+            return self._http.get("/ui/").status_code == 200
         except httpx.HTTPError:
             return False
 

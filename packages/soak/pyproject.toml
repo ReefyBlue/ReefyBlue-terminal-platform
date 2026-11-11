@@ -6,10 +6,12 @@ build-backend = "hatchling.build"
 name = "terminal-soak"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["terminal-model", "terminal-tos-stub", "httpx"]
+dependencies = ["terminal-model", "terminal-ecs", "terminal-sim", "terminal-tos-stub", "httpx"]
 
 [tool.uv.sources]
 terminal-model = { workspace = true }
+terminal-ecs = { workspace = true }
+terminal-sim = { workspace = true }
 terminal-tos-stub = { workspace = true }
 
 [tool.hatch.build.targets.wheel]

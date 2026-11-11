@@ -128,3 +128,34 @@ def test_resolve_404_raises_refused_and_422_http_error():
     c = client_for(lambda r: httpx.Response(503, json={"detail": "not connected"}))
     with pytest.raises(httpx.HTTPStatusError):
         c.release("AGV-01")
+
+
+def test_containers_health_json_ui_ok():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, dict(request.url.params)))
+        if request.url.path == "/containers":
+            return httpx.Response(200, json={"next": 7, "items": []})
+        if request.url.path == "/health":
+            return httpx.Response(503, json={"connected": False, "sim_time": None, "rss_mb": 50.0, "uptime_s": 3.0})
+        return httpx.Response(404)
+
+    with client_for(handler) as c:
+        assert c.containers(5) == {"next": 7, "items": []}
+        assert c.health_json() == {"connected": False, "sim_time": None, "rss_mb": 50.0, "uptime_s": 3.0}
+        assert c.ui_ok() is False
+    assert seen == [("/containers", {"since": "5"}), ("/health", {}), ("/ui/", {})]
+    assert client_for(lambda r: httpx.Response(200, text="<html>")).ui_ok() is True
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    assert client_for(boom).ui_ok() is False
+
+
+def test_client_wraps_an_existing_http_client():
+    http = httpx.Client(base_url="http://x", transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={"open": 0})))
+    c = EcsClient(http=http)
+    assert c.status() == {"open": 0}

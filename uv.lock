@@ -1035,14 +1035,18 @@ version = "0.1.0"
 source = { editable = "packages/soak" }
 dependencies = [
     { name = "httpx" },
+    { name = "terminal-ecs" },
     { name = "terminal-model" },
+    { name = "terminal-sim" },
     { name = "terminal-tos-stub" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx" },
+    { name = "terminal-ecs", editable = "packages/ecs" },
     { name = "terminal-model", editable = "packages/model" },
+    { name = "terminal-sim", editable = "packages/sim" },
     { name = "terminal-tos-stub", editable = "packages/tos_stub" },
 ]
 

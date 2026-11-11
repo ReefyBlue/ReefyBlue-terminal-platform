@@ -25,7 +25,8 @@ ALLOWED = {
     "gateway": {"terminal_model", "terminal_opcua"},
     "tos_stub": {"terminal_model", "terminal_ecs"},
     "kpi": {"terminal_model", "terminal_ecs"},
-    "soak": {"terminal_model", "terminal_tos_stub"},
+    # soak driver: WorkOrder (terminal_ecs) for the client, the layout loader (terminal_sim)
+    "soak": {"terminal_model", "terminal_ecs", "terminal_sim", "terminal_tos_stub"},
     "ecs_service": {"terminal_model", "terminal_ecs", "terminal_opcua", "terminal_kpi", "terminal_tos_stub",
                     "terminal_viewer"},
 }
