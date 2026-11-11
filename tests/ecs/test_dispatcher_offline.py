@@ -196,17 +196,103 @@ def test_resolve_bad_outcome_valueerror():
     assert d.status()["unknown_outcomes"] == 1
 
 
-def test_auto_release_resolves_unknown_as_completed():
+def test_auto_release_resolves_as_failed_when_truly_unknown():
     port = make_port()
     d = Dispatcher(port, FakeSlots(), auto_release=True)
     d.submit([order("C1")])
     port.set_state("AGV-01", State.OFFLINE, LOST)
+    port.set_last_job("AGV-01", "C0-TRANSPORT-9", "COMPLETED")  # some other job: no evidence
     port.set_state("AGV-01", State.IDLE, RESTORED)
+    s = d.status()
+    assert (s["replans"], s["unknown_outcomes"], s["needs_release"], s["offline"]) == (1, 0, 0, 0)
+    assert d.alarms() == []
+    # the leg is re-planned (safe default) and re-issued; the order did not advance
+    assert jobs_of(port, "AGV-01") + jobs_of(port, "AGV-02") == ["C1-TRANSPORT-1", "C1-TRANSPORT-2"]
+    assert jobs_of(port, "STS-01") == []
+
+
+def test_manual_unrelated_last_job_is_unknown():
+    port = make_port()
+    d = Dispatcher(port, FakeSlots())
+    d.submit([order("C1")])
+    port.set_state("AGV-01", State.OFFLINE, LOST)
+    port.set_last_job("AGV-01", "C0-TRANSPORT-9", "FAILED")
+    port.set_state("AGV-01", State.IDLE, RESTORED)
+    s = d.status()
+    assert (s["replans"], s["unknown_outcomes"], s["needs_release"]) == (0, 1, 1)
+    assert d.unknown_jobs() == frozenset({"C1-TRANSPORT-1"})
+    assert kinds(d) == {(AlarmKind.NEEDS_RELEASE, "AGV-01", None),
+                        (AlarmKind.UNKNOWN_OUTCOME, "AGV-01", "C1-TRANSPORT-1")}
+
+
+@pytest.mark.parametrize("auto_release", [False, True])
+def test_reconciled_completed_from_equipment_advances_without_alarm(auto_release, caplog):
+    port = make_port()
+    d = Dispatcher(port, FakeSlots(), auto_release=auto_release)
+    d.submit([order("C1")])
+    port.set_state("AGV-01", State.OFFLINE, LOST)
+    port.finish_silently("AGV-01", "COMPLETED")  # its JOB_COMPLETED is lost with the link
+    with caplog.at_level(logging.INFO, logger="terminal_ecs"):
+        port.set_state("AGV-01", State.IDLE, RESTORED)
     s = d.status()
     assert (s["replans"], s["unknown_outcomes"], s["needs_release"], s["offline"]) == (0, 0, 0, 0)
     assert d.alarms() == []
-    assert jobs_of(port, "AGV-01") == ["C1-TRANSPORT-1"]  # no re-issue: the leg counts as done
-    assert jobs_of(port, "STS-01") == ["C1-DISCHARGE-1"]  # order advanced AGV_EN_ROUTE -> AT_STS
+    assert jobs_of(port, "AGV-01") == ["C1-TRANSPORT-1"]  # no re-issue
+    assert jobs_of(port, "STS-01") == ["C1-DISCHARGE-1"]  # AGV_EN_ROUTE -> AT_STS
+    assert "reconciled C1-TRANSPORT-1 on AGV-01 from equipment: COMPLETED" in caplog.messages
+
+
+@pytest.mark.parametrize("auto_release", [False, True])
+def test_reconciled_failed_from_equipment_replans_without_alarm(auto_release):
+    """A FAULT + repair inside the outage: the device returns IDLE and reports FAILED."""
+    port = make_port()
+    d = Dispatcher(port, FakeSlots(), auto_release=auto_release)
+    d.submit([order("C1")])
+    port.set_state("AGV-01", State.OFFLINE, LOST)
+    port.finish_silently("AGV-01", "FAILED")
+    port.set_state("AGV-01", State.IDLE, RESTORED)
+    s = d.status()
+    assert (s["replans"], s["unknown_outcomes"], s["needs_release"], s["offline"]) == (1, 0, 0, 0)
+    assert d.alarms() == []
+    assert "C1-TRANSPORT-1" not in d.jobs
+    # re-planned to AWAIT_AGV and re-dispatched; the device reports IDLE, so it is usable
+    assert len(jobs_of(port, "AGV-01") + jobs_of(port, "AGV-02")) == 2
+
+
+def test_late_outcome_clears_needs_release_from_unknown():
+    port = make_port()
+    d = Dispatcher(port, FakeSlots())
+    _unknown_discharge(port, d)
+    assert d.status()["needs_release"] == 1
+    port.complete("STS-01")  # the lost JOB_COMPLETED arrives after all
+    s = d.status()
+    assert (s["unknown_outcomes"], s["needs_release"]) == (0, 0)
+    assert d.alarms() == []
+    assert jobs_of(port, "AGV-01") == ["C1-TRANSPORT-1", "C1-TRANSPORT-2"]  # order advanced
+
+
+def test_late_outcome_keeps_needs_release_after_fault():
+    port = make_port()
+    d = Dispatcher(port, FakeSlots())
+    _unknown_discharge(port, d)
+    port.set_state("STS-01", State.FAULT)
+    port.set_state("STS-01", State.IDLE)
+    port.complete("STS-01")
+    s = d.status()
+    assert (s["unknown_outcomes"], s["needs_release"]) == (0, 1)  # the FAULT still needs a human
+
+
+def test_offline_at_construction_is_seeded():
+    port = make_port()
+    port._state["AGV-02"] = State.OFFLINE
+    port.advance(7)
+    d = Dispatcher(port, FakeSlots())
+    assert d.status()["offline"] == 1
+    assert d.alarms() == [Alarm(AlarmKind.LINK_LOST, "AGV-02", None, 7.0, "no link to equipment")]
+    d.submit([order("C1"), order("C2", slot="A/1/1/2")])
+    assert jobs_of(port, "AGV-02") == []
+    port.set_state("AGV-02", State.IDLE, RESTORED)
+    assert d.status()["offline"] == 0 and d.alarms() == []
 
 
 def test_fault_after_unknown_outcome_keeps_job_for_operator():

@@ -58,6 +58,10 @@ HEAD_NEEDS_AGV_LATER = frozenset({Stage.AWAIT_ASC, Stage.UNSTACKING, Stage.AT_TP
 # The TP of a block holds one box: no new STACK_OUT while one of these exists for the block.
 TP_BUSY = frozenset({Stage.UNSTACKING, Stage.AT_TP, Stage.AGV_TO_TP})
 PENDING = frozenset({Stage.AWAIT_AGV, Stage.AWAIT_ASC})
+# Stages in which the order's box is on its AGV: from the sts_to_agv / tp_to_agv
+# hand-over until agv_to_tp (discharge, entering STACKING) / agv_to_sts (load, DONE).
+# A failed LOADING rolls back to AT_STS_LOAD with the box still on board.
+BOX_ON_AGV = frozenset({Stage.TO_YARD, Stage.AWAIT_TP, Stage.TO_STS, Stage.AT_STS_LOAD, Stage.LOADING})
 
 # Where an order goes when its running job fails. Stages missing here keep their stage
 # (the box is on the AGV/at the TP) and simply get the job re-issued by ``tick()``.

@@ -366,3 +366,54 @@ def test_replan_streak_resets_on_completion():
     port.complete("STS-01")  # 5th try works: the streak starts over
     assert d.status()["stuck"] == 0
     assert d._open["C1"].replan_streak == 0
+
+
+def test_replan_streak_with_box_on_agv_quarantines_it(caplog):
+    from terminal_ecs.alarms import AlarmKind
+
+    port = make_port()
+    d = make_dispatcher(port, FakeSlots())  # auto_release=True: still needs a human
+    d.submit([discharge("C1")])
+    port.complete("AGV-01")  # to the STS
+    port.complete("STS-01")  # box on AGV-01: TO_YARD, AGV-01 gets the leg to the TP
+    for n in range(1, 6):
+        assert jobs_of(port, "AGV-01")[-1] == f"C1-TRANSPORT-{n + 1}"
+        port.fail("AGV-01", "NO_ROUTE")
+        port.set_state("AGV-01", State.IDLE)
+    s = d.status()
+    assert (s["failed"], s["open"], s["needs_release"]) == (1, 0, 1)
+    assert "quarantining AGV-01: it may still carry C1 (REPLAN_STREAK)" in caplog.text
+    assert [(a.kind, a.equipment_id, a.detail) for a in d.alarms()] == [
+        (AlarmKind.NEEDS_RELEASE, "AGV-01", "quarantined: box may be on board: release required")]
+
+    n_calls = len(jobs_of(port, "AGV-01"))
+    d.submit([discharge("C2", slot="A/1/1/2")])
+    port.set_state("AGV-01", State.IDLE)  # IDLE (even with auto_release) does not lift it
+    assert len(jobs_of(port, "AGV-01")) == n_calls
+    assert jobs_of(port, "AGV-02") == ["C2-TRANSPORT-1"]
+
+    d.release("AGV-01")  # operator unloaded the AGV
+    assert d.alarms() == [] and d.status()["needs_release"] == 0
+    d.submit([discharge("C3", slot="A/1/1/3")])
+    assert jobs_of(port, "AGV-01")[-1] == "C3-TRANSPORT-1"
+
+
+def test_transfer_error_quarantine_raises_needs_release():
+    from terminal_ecs.alarms import AlarmKind
+
+    port = make_port()
+    d = make_dispatcher(port, FakeSlots())
+
+    def hook(kind: str, eid: str, cid: str) -> None:
+        raise RuntimeError("box lost")
+
+    d.on_transfer = hook
+    d.submit([discharge("C1")])
+    port.complete("AGV-01")
+    port.complete("STS-01")  # sts_to_agv raises: AGV-01 quarantined
+    assert [(a.kind, a.equipment_id, a.detail) for a in d.alarms()] == [
+        (AlarmKind.NEEDS_RELEASE, "AGV-01", "quarantined: box may be on board: release required")]
+    d.on_transfer = None
+    d.release("AGV-01")
+    d.submit([discharge("C2", slot="A/1/1/2")])
+    assert jobs_of(port, "AGV-01")[-1] == "C2-TRANSPORT-1"

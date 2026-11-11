@@ -22,15 +22,29 @@ RECOVERY (any other JOB_FAILED, STATE_CHANGED->FAULT with a running job, watchdo
     on the AGV / at the TP), keeps its TOS position, ``replans += 1``; the equipment
     is excluded until STATE_CHANGED->IDLE. After a FAULT the device also needs an
     operator ``release()`` (with ``auto_release`` the IDLE releases it).
-    any stage --on_transfer raises--> FAILED (TRANSFER_ERROR), AGV quarantined for good.
+    any stage --on_transfer raises--> FAILED (TRANSFER_ERROR), AGV quarantined.
+QUARANTINE
+    an order that fails (any reason) while its box is on its AGV (``BOX_ON_AGV``), and
+    the AGV of a failed hand-over (TRANSFER_ERROR), quarantine that AGV: it gets no job
+    and needs an operator ``release()`` (cause "quarantined: box may be on board"); this
+    is never lifted by ``auto_release``.
 LINK LOSS (STATE_CHANGED->OFFLINE)
     no replan: the order keeps its stage and job, the device gets no new jobs and the
     watchdog clock of an offline AGV stands still. On return (reason LINK_RESTORED /
     UPSTREAM_RECONNECTED): BUSY -> the job runs on; FAULT -> as above; IDLE while the
-    job had not ended -> its outcome is unknown: the order waits for
-    ``resolve_job(job, "completed"|"failed")`` and the device for ``release()``
-    (with ``auto_release`` it counts as completed at once, see ``_come_back``). ``alarms()``
-    lists what the operator has to do.
+    job had not ended -> the device's reported last job (snapshot extra ``last_job_id``
+    / ``last_job_outcome``) decides: the job itself -> its JOB_COMPLETED / JOB_FAILED
+    (reason FAULT_DURING_OUTAGE) is processed as if it had arrived; otherwise its outcome
+    is unknown: the order waits for ``resolve_job(job, "completed"|"failed")`` and the
+    device for ``release()`` (with ``auto_release`` it is resolved as failed at once,
+    see ``_come_back``). ``alarms()`` lists what the operator has to do.
+
+State sets: ``_excluded`` (until IDLE), ``_quarantined`` (until release),
+``_offline`` (until the link returns) and ``_needs_release`` (until release, or IDLE
+with ``auto_release`` unless quarantined) are independent; a device in any of them
+gets no job (``_unusable``). A FAULT puts the device in both ``_excluded`` and
+``_needs_release``; an unknown outcome or a quarantine only in ``_needs_release`` (and
+``_quarantined``), so ``_needs_release`` is not a subset of ``_excluded``.
 
 A TP holds one discharge box, from ``agv_to_tp`` until its STACK_IN completes
 (``_tp_occupied``). No TO_YARD leg is issued to an occupied TP (the box waits on its
@@ -55,7 +69,8 @@ Repeated failures: JOB_FAILED- and FAULT-driven replans count in the order's
 ``replan_streak``; a JOB_COMPLETED of one of its jobs resets it, watchdog cancels and an
 operator ``resolve_job(.., "failed")`` neither count nor reset. At
 ``WATCHDOG_MAX_CANCELS`` in a row the order fails with reason ``REPLAN_STREAK`` (ERROR
-log, ``status()["failed"]``; its TP and AGV are freed) instead of being re-issued in an
+log, ``status()["failed"]``; its TP is freed, its AGV too unless the box is on it, see
+QUARANTINE) instead of being re-issued in an
 endless loop of immediately failing jobs.
 """
 
@@ -73,6 +88,7 @@ from terminal_model.types import Job, JobType, Kind, Position, State
 
 from terminal_ecs.alarms import Alarm, AlarmKind, ReleaseRefused
 from terminal_ecs.orders import (
+    BOX_ON_AGV,
     HEAD_NEEDS_AGV_LATER,
     IN_LANE,
     LOOKAHEAD_STAGES,
@@ -95,6 +111,8 @@ WATCHDOG_MAX_CANCELS = 5
 
 _RETURN_REASONS = (LinkReason.LINK_RESTORED, LinkReason.UPSTREAM_RECONNECTED)
 _OUTCOMES = ("completed", "failed")
+_QUARANTINE_CAUSE = "quarantined: box may be on board"
+_UNKNOWN_CAUSE = "unknown outcome"
 
 _CRANE_JOB = {Stage.AT_STS: (JobType.DISCHARGE, Stage.DISCHARGING), Stage.AT_STS_LOAD: (JobType.LOAD, Stage.LOADING)}
 
@@ -147,12 +165,17 @@ class Dispatcher:
         self._needs_release: set[str] = set()  # until release() (or IDLE with auto_release)
         self._unknown: dict[str, str] = {}  # job whose outcome was lost -> equipment id
         self._release_cause: dict[str, str] = {}  # why a device needs release (first cause)
+        self._faulted: set[str] = set()  # reported FAULT since its last release
         self._alarm_since: dict[tuple[AlarmKind, str], float] = {}
         self._seq = itertools.count(1)
         self._failed = 0
         self._replans = 0
         self._in_tick = False
         self._dirty = False
+
+        for eid in sorted(self._all_eq):  # no link to it from the start
+            if port.snapshot(eid).state is State.OFFLINE:
+                self._go_offline(eid, "OFFLINE_AT_START")
 
         port.subscribe(self.on_event)
 
@@ -215,11 +238,20 @@ class Dispatcher:
                       f"outcome of {job_id} unknown after link loss") for job_id, eid in self._unknown.items()]
         return sorted(out, key=lambda a: (a.since, a.kind, a.equipment_id, a.job_id or ""))
 
-    def release(self, equipment_id: str) -> None:
-        """Operator release after a FAULT / unknown outcome: the device may get jobs again.
+    def has_equipment(self, equipment_id: str) -> bool:
+        return equipment_id in self._all_eq
+
+    def unknown_jobs(self) -> frozenset[str]:
+        """Jobs whose outcome was lost during a link outage and awaits ``resolve_job``."""
+        return frozenset(self._unknown)
+
+    def release(self, equipment_id: str, *, tick: bool = True) -> None:
+        """Operator release after a FAULT / unknown outcome / quarantine: the device may
+        get jobs again.
 
         ``KeyError`` for unknown equipment; ``ReleaseRefused`` while it reports FAULT or
-        OFFLINE, or while one of its jobs still has an unknown outcome."""
+        OFFLINE, or while one of its jobs still has an unknown outcome. These checks come
+        before any change; with ``tick=False`` the caller ticks afterwards."""
         if equipment_id not in self._all_eq:
             raise KeyError(equipment_id)
         state = self.port.snapshot(equipment_id).state
@@ -230,20 +262,26 @@ class Dispatcher:
                 raise ReleaseRefused(f"resolve job {job_id} first")
         self._clear_release(equipment_id)
         self._excluded.discard(equipment_id)
+        if equipment_id in self._quarantined:
+            self._quarantined.discard(equipment_id)
+            log.warning("quarantine of %s lifted by operator release", equipment_id)
         log.info("released %s", equipment_id)
-        self.tick()
+        if tick:
+            self.tick()
 
-    def resolve_job(self, job_id: str, outcome: Literal["completed", "failed"]) -> None:
+    def resolve_job(self, job_id: str, outcome: Literal["completed", "failed"], *, tick: bool = True) -> None:
         """Operator verdict on a job whose outcome was lost during a link outage.
 
         ``ValueError`` for another outcome; ``KeyError`` if ``job_id`` has no unknown
-        outcome. The device stays in need of release."""
+        outcome (both before any change). The device stays in need of release. With
+        ``tick=False`` the caller ticks afterwards."""
         if outcome not in _OUTCOMES:
             raise ValueError(f"outcome must be 'completed' or 'failed', not {outcome!r}")
         if job_id not in self._unknown:
             raise KeyError(job_id)
         self._resolve(job_id, outcome)
-        self.tick()
+        if tick:
+            self.tick()
 
     @property
     def job_log(self) -> Mapping[str, LoggedJob]:
@@ -571,15 +609,14 @@ class Dispatcher:
 
     def _apply_state(self, eid: str, state: State | None) -> None:
         if state is State.IDLE:
-            if self.auto_release:
+            if self.auto_release and eid not in self._quarantined:  # a quarantine needs a human
                 self._clear_release(eid)
             if eid not in self._needs_release:
                 self._excluded.discard(eid)
         elif state is State.FAULT:
             self._excluded.add(eid)
-            self._raise(AlarmKind.NEEDS_RELEASE, eid)
-            self._needs_release.add(eid)
-            self._release_cause.setdefault(eid, "fault")
+            self._faulted.add(eid)
+            self._need_release(eid, "fault")
             for job_id, jeq in list(self._job_eq.items()):
                 if jeq == eid and job_id not in self._unknown:  # unknown ones wait for resolve_job
                     self._replan(self._by_job[job_id], jeq, "FAULT", streak=True)
@@ -601,21 +638,30 @@ class Dispatcher:
         job_id = self._offline_job.pop(eid, None)
         log.info("%s back online: %s (job %s)", eid, state, job_id)
         if state is State.IDLE and job_id is not None and job_id in self._job_eq:
-            # The job ended while we could not see it: completed or failed is unknown.
-            # With auto_release it counts as completed: the premise of OFFLINE is that
-            # the equipment keeps working, so a job already running when the link dropped
-            # can only end in JOB_COMPLETED or in a FAULT (and then the device returns
-            # FAULT, not IDLE); start-time failures (NO_AGV_IN_LANE, SLOT_*) happen
-            # before the outage. Without auto_release the operator decides (resolve_job).
-            log.warning("outcome of %s on %s unknown after link loss", job_id, eid)
-            self._unknown[job_id] = eid
-            self._raise(AlarmKind.UNKNOWN_OUTCOME, job_id)
-            if self.auto_release:
-                self._resolve(job_id, "completed")
+            # The job ended while we could not see it. The device reports the outcome of
+            # its most recent job; if that is this job, process it as the event we missed
+            # (a FAULT repaired during the outage shows up here as FAILED). Otherwise the
+            # outcome is truly unknown: the operator decides (resolve_job); with
+            # auto_release it is resolved as failed (the safe default: the order is
+            # re-planned; the replan-streak cap bounds a loop).
+            extra = self.port.snapshot(eid).extra
+            reported = extra.get("last_job_outcome") if extra.get("last_job_id") == job_id else None
+            if reported in ("COMPLETED", "FAILED"):
+                log.info("reconciled %s on %s from equipment: %s", job_id, eid, reported)
+                self._outcome_seen(job_id)
+                if reported == "COMPLETED":
+                    self._on_completed(EquipmentEvent(EventKind.JOB_COMPLETED, eid, self.port.now(), job_id=job_id))
+                else:
+                    self._on_failed(EquipmentEvent(EventKind.JOB_FAILED, eid, self.port.now(), job_id=job_id,
+                                                   reason="FAULT_DURING_OUTAGE"))
             else:
-                self._raise(AlarmKind.NEEDS_RELEASE, eid)
-                self._needs_release.add(eid)
-                self._release_cause.setdefault(eid, "unknown outcome")
+                log.warning("outcome of %s on %s unknown after link loss", job_id, eid)
+                self._unknown[job_id] = eid
+                self._raise(AlarmKind.UNKNOWN_OUTCOME, job_id)
+                if self.auto_release:
+                    self._resolve(job_id, "failed")
+                else:
+                    self._need_release(eid, _UNKNOWN_CAUSE)
         self._apply_state(eid, state)
 
     def _resolve(self, job_id: str, outcome: str) -> None:
@@ -632,20 +678,46 @@ class Dispatcher:
             self._replan(rec, eid, "UNKNOWN_OUTCOME")
 
     def _outcome_seen(self, job_id: str) -> None:
-        """A JOB_COMPLETED/JOB_FAILED arrived: the job's outcome is known after all."""
+        """A JOB_COMPLETED/JOB_FAILED arrived: the job's outcome is known after all.
+
+        If the unknown outcome was the only reason its device needed a release (no FAULT
+        since, no quarantine, no other unknown job), the release is no longer needed."""
         for eid, jid in list(self._offline_job.items()):
             if jid == job_id:
                 del self._offline_job[eid]
-        if self._unknown.pop(job_id, None) is not None:
-            self._alarm_since.pop((AlarmKind.UNKNOWN_OUTCOME, job_id), None)
+        eid = self._unknown.pop(job_id, None)
+        if eid is None:
+            return
+        self._alarm_since.pop((AlarmKind.UNKNOWN_OUTCOME, job_id), None)
+        if (
+            self._release_cause.get(eid) == _UNKNOWN_CAUSE
+            and eid not in self._faulted
+            and eid not in self._quarantined
+            and eid not in self._unknown.values()
+        ):
+            log.info("late outcome of %s: %s no longer needs a release", job_id, eid)
+            self._clear_release(eid)
 
     def _raise(self, kind: AlarmKind, key: str) -> None:
         self._alarm_since.setdefault((kind, key), self.port.now())
 
+    def _need_release(self, eid: str, cause: str) -> None:
+        self._raise(AlarmKind.NEEDS_RELEASE, eid)
+        self._needs_release.add(eid)
+        self._release_cause.setdefault(eid, cause)
+
     def _clear_release(self, eid: str) -> None:
         self._needs_release.discard(eid)
         self._release_cause.pop(eid, None)
+        self._faulted.discard(eid)
         self._alarm_since.pop((AlarmKind.NEEDS_RELEASE, eid), None)
+
+    def _quarantine(self, agv: str, cid: str, why: str) -> None:
+        """``agv`` may still carry ``cid``'s box: no jobs until an operator release()."""
+        log.error("quarantining %s: it may still carry %s (%s)", agv, cid, why)
+        self._quarantined.add(agv)
+        self._need_release(agv, _QUARANTINE_CAUSE)
+        self._release_cause[agv] = _QUARANTINE_CAUSE  # the most urgent cause wins
 
     def _replan(self, rec: OrderRecord, eid: str, reason: str, *, streak: bool = False) -> None:
         """Roll the order back to its last stable stage; it keeps its TOS position.
@@ -717,7 +789,10 @@ class Dispatcher:
 
     def _fail_order(self, rec: OrderRecord, reason: str) -> None:
         # A failed order's box may physically stay on the TP; free the TP anyway so the
-        # block keeps working (the failure is logged and counted).
+        # block keeps working (the failure is logged and counted). A box that may still
+        # be on its AGV quarantines that AGV instead of handing it to the next order.
+        if rec.stage in BOX_ON_AGV and rec.agv_id is not None and rec.agv_id not in self._quarantined:
+            self._quarantine(rec.agv_id, rec.cid, reason)
         self._clear_tp(rec)
         rec.fail_reason = reason
         rec.agv_id = None
@@ -734,8 +809,7 @@ class Dispatcher:
         except Exception:
             log.exception("on_transfer(%s, %s, %s) raised; failing order", kind, eid, rec.cid)
             if agv is not None:
-                log.error("quarantining %s: it may still carry %s", agv, rec.cid)
-                self._quarantined.add(agv)
+                self._quarantine(agv, rec.cid, "TRANSFER_ERROR")
             self._fail_order(rec, "TRANSFER_ERROR")
             return False
         return True

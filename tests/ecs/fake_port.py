@@ -15,6 +15,7 @@ class FakePort:
         self._pos = {eid: pos for eid, (_, pos) in equipment.items()}
         self._state = {eid: State.IDLE for eid in equipment}
         self._job: dict[str, Job | None] = {eid: None for eid in equipment}
+        self._last: dict[str, tuple[str | None, str | None]] = {eid: (None, None) for eid in equipment}
         self._subs: list[Callable[[EquipmentEvent], None]] = []
         self._now = 0.0
         self.calls: list[tuple[str, Job]] = []
@@ -35,7 +36,7 @@ class FakePort:
             position=self._pos[equipment_id],
             current_job_id=job.job_id if job else None,
             energy_kwh=0.0,
-            extra={},
+            extra={"last_job_id": self._last[equipment_id][0], "last_job_outcome": self._last[equipment_id][1]},
         )
 
     def assign_job(self, equipment_id: str, job: Job) -> bool:
@@ -67,12 +68,25 @@ class FakePort:
     def set_position(self, equipment_id: str, pos: Position) -> None:
         self._pos[equipment_id] = pos
 
+    def set_last_job(self, equipment_id: str, job_id: str | None, outcome: str | None) -> None:
+        """What the device reports as its most recent ended job ("COMPLETED" | "FAILED")."""
+        self._last[equipment_id] = (job_id, outcome)
+
+    def finish_silently(self, equipment_id: str, outcome: str = "COMPLETED") -> Job:
+        """The running job ends without an event (e.g. during a link outage); the device
+        goes IDLE and reports it as its last job."""
+        job = self._finish(equipment_id)
+        self.set_last_job(equipment_id, job.job_id, outcome)
+        return job
+
     def complete(self, equipment_id: str) -> None:
         job = self._finish(equipment_id)
+        self.set_last_job(equipment_id, job.job_id, "COMPLETED")
         self._emit(EquipmentEvent(EventKind.JOB_COMPLETED, equipment_id, self._now, job_id=job.job_id))
 
     def fail(self, equipment_id: str, reason: str) -> None:
         job = self._finish(equipment_id)
+        self.set_last_job(equipment_id, job.job_id, "FAILED")
         self._emit(
             EquipmentEvent(EventKind.JOB_FAILED, equipment_id, self._now, job_id=job.job_id, reason=reason)
         )
@@ -124,6 +138,6 @@ def make_port(n_agv: int = 2) -> FakePort:
 
 def make_dispatcher(port: FakePort, slots: FakeSlots | None = None, **kw) -> Dispatcher:
     """Dispatcher for the pre-B2d dispatcher tests: ``auto_release=True`` (FAULT -> IDLE
-    re-admits the device, unknown outcomes count as completed), i.e. the behaviour they pin."""
+    re-admits the device, truly unknown outcomes count as failed), i.e. the behaviour they pin."""
     kw.setdefault("auto_release", True)
     return Dispatcher(port, slots if slots is not None else FakeSlots(), **kw)

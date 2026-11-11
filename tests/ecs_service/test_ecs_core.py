@@ -211,7 +211,7 @@ async def test_status_kpis_equipment_when_connected():
         "position": {"x": 10, "y": 50},
         "current_job_id": None,
         "energy_kwh": 0.0,
-        "extra": {},
+        "extra": {"last_job_id": None, "last_job_outcome": None},
     }
 
 
