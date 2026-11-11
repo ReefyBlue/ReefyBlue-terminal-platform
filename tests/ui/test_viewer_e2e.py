@@ -78,3 +78,18 @@ def test_canvas_click_selects_equipment(page, viewer_url):
     page.wait_for_selector("#selection dd")
     text = page.inner_text("#selection")
     assert "STS-01" in text and "STS" in text and "IDLE" in text
+
+
+def test_cut_shows_offline_and_dims_then_recovers(page, proxied):
+    url, link = proxied  # LinkProxy between the ECS service and the gateway
+    page.goto(url + "/ui/")
+    page.wait_for_function("window.__viewer && window.__viewer.ready", timeout=15_000)
+    link.cut()
+    page.wait_for_selector("#alarms li[data-key^='LINK_LOST|']", timeout=30_000)
+    assert "verbroken" in page.inner_text("#banner").lower()
+    assert page.evaluate("[...window.__viewer.state.equipment.values()].every(e => e.state === 'OFFLINE')")
+    assert page.evaluate("window.__viewer.state.equipment.size") == 12  # last positions kept (Review Focus 2)
+    link.restore()
+    page.wait_for_function("document.querySelectorAll(\"#alarms li[data-key^='LINK_LOST|']\").length === 0",
+                           timeout=60_000)
+    assert "verbonden" in page.inner_text("#banner").lower()

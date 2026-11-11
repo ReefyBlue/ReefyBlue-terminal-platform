@@ -75,6 +75,89 @@ const api = {
   resolve: (jobId, outcome) => request("POST", `/jobs/${encodeURIComponent(jobId)}/resolve`, { outcome }),
 };
 
+// ---------------------------------------------------------------------------- stream
+
+const WS_RETRY_MIN_MS = 1000;
+const WS_RETRY_MAX_MS = 10000;
+
+const stream = {
+  /** Keep a WebSocket on same-origin /events open: every message goes to `onMessage`;
+   * `state.link.ws` follows the socket; a close reconnects after 1 s, doubling to at most
+   * 10 s, reset on open. `onOpen()` runs on every (re)open, to resync what a gap missed. */
+  start(state, onMessage, onOpen = () => {}) {
+    const url = (location.protocol === "https:" ? "wss" : "ws") + "://" + location.host + "/events";
+    let delay = WS_RETRY_MIN_MS;
+    const connect = () => {
+      const ws = new WebSocket(url);
+      ws.onopen = () => {
+        delay = WS_RETRY_MIN_MS;
+        state.link.ws = true;
+        state.dirty = true;
+        onOpen();
+      };
+      ws.onmessage = (ev) => {
+        let message;
+        try {
+          message = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        onMessage(message);
+      };
+      ws.onclose = () => {
+        state.link.ws = false;
+        state.dirty = true;
+        setTimeout(connect, delay);
+        delay = Math.min(delay * 2, WS_RETRY_MAX_MS);
+      };
+    };
+    connect();
+  },
+};
+
+// ---------------------------------------------------------------------------- poll
+
+const POLL_MS = 1000;
+const POLL_RETRY_MS = 5000;
+
+const poll = {
+  /** One `GET /equipment`: a 200 sets `state.link.ecs` true and replaces the equipment
+   * snapshot, keeping the state of a device whose WS state change arrived while the request
+   * was out (the snapshot may predate it); anything else sets `state.link.ecs` false and
+   * rejects. */
+  async refresh(state) {
+    const epoch = state.equipmentEpoch;
+    let items;
+    try {
+      items = await api.equipment();
+    } catch (e) {
+      state.link.ecs = false;
+      state.dirty = true;
+      throw e;
+    }
+    state.link.ecs = true;
+    for (const it of items) {
+      const old = state.equipment.get(it.equipment_id);
+      if (old && (state.stateEpoch.get(it.equipment_id) ?? 0) > epoch) it.state = old.state;
+    }
+    model.setEquipment(state, items);
+  },
+
+  /** `poll.refresh` every 1000 ms (a `setTimeout` chain), 5000 ms after a failure. */
+  start(state) {
+    const tick = async () => {
+      let next = POLL_MS;
+      try {
+        await poll.refresh(state);
+      } catch {
+        next = POLL_RETRY_MS;
+      }
+      setTimeout(tick, next);
+    };
+    setTimeout(tick, POLL_MS);
+  },
+};
+
 // ---------------------------------------------------------------------------- model
 
 const EVENT_RING = 50;
@@ -85,6 +168,8 @@ const model = {
     return {
       layout: null,
       equipment: new Map(),
+      equipmentEpoch: 0, // counts WS state changes
+      stateEpoch: new Map(), // equipment id -> equipmentEpoch of its last WS state change
       alarms: [], // oldest first
       status: null,
       kpis: null,
@@ -135,7 +220,11 @@ const model = {
       case "equipment": {
         pushEvent(state, message);
         const item = state.equipment.get(message.equipment_id);
-        if (item && message.new_state) item.state = message.new_state;
+        if (message.new_state) {
+          if (item) item.state = message.new_state;
+          state.equipmentEpoch += 1;
+          state.stateEpoch.set(message.equipment_id, state.equipmentEpoch);
+        }
         break;
       }
       case "job":
@@ -312,7 +401,7 @@ const map = {
 
     ctx.save();
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-    if (state.link.ecs === false) ctx.globalAlpha = 0.5;
+    if (state.link.ecs === false || state.link.connected === false) ctx.globalAlpha = 0.5;
 
     // light grid
     ctx.strokeStyle = GRID_COLOR;
@@ -565,7 +654,7 @@ function drawNotice(ctx, text) {
 
 function main() {
   const state = model.initial();
-  const viewer = { state, model, map, panel, api, ready: false };
+  const viewer = { state, model, map, panel, api, stream, poll, ready: false };
   window.__viewer = viewer;
 
   const canvas = document.getElementById("map");
@@ -660,7 +749,20 @@ function main() {
     model.setEquipment(state, items);
     state.link.ecs = true;
     await Promise.all([refreshAlarms(), refreshStatus(), refreshKpis()]);
+    // live from here: events over the WS, positions by polling. Every (re)open resyncs what
+    // the gap missed (equipment too: state changes sent before the socket was registered);
+    // `ready` waits for the first resync, so a test acting after it is not overwritten by it.
+    let live;
+    const first = new Promise((resolve) => { live = resolve; });
+    stream.start(state, (m) => viewer.onMessage(m), async () => {
+      await Promise.all([refreshAlarms(), refreshStatus(), refreshKpis(),
+                         poll.refresh(state).catch(() => {})]);
+      live();
+    });
+    poll.start(state);
+    await first;
     booted = true;
+    state.dirty = true;
   })();
 }
 

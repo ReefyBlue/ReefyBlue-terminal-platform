@@ -20,7 +20,7 @@ import pytest
 from playwright.sync_api import Browser, Error, Page, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "e2e"))
-from opcua_procs import ROOT, ecs_service, sim_and_gateway
+from opcua_procs import ROOT, LinkProxy, ecs_service, free_port, sim_and_gateway
 
 SCENARIO = ROOT / "scenarios" / "baseline.yaml"  # 2 STS + 6 AGV, the full terminal.yaml fleet
 FAULTS_FAST = Path(__file__).resolve().parent / "faults_fast.yaml"  # AGV mtbf 600 s / mttr 120 s sim
@@ -89,6 +89,65 @@ def fault_agv(tmp_path_factory) -> Iterator[str]:
         raise out["error"]
     try:
         yield out["url"]
+    finally:
+        stop.set()
+        proc_thread.join(60)
+
+
+@pytest.fixture(scope="module")
+def proxied(tmp_path_factory) -> Iterator[tuple[str, LinkProxy]]:
+    """``(url, proxy)``: an ECS service (``auto_release=False``) over its own sim + gateway
+    running ``baseline.yaml``, connected to the gateway through a one-route ``LinkProxy``
+    (as in ``tests/e2e/test_blip_during_run.py`` (b)). ``proxy.cut()`` drops the ECS's whole
+    equipment link (every device OFFLINE via LINK_LOST, ``GET /equipment`` 503) while its
+    HTTP API and WS /events keep running; ``proxy.restore()`` lets it reconnect.
+
+    The runner runs in a daemon thread (direct to the gateway) so the sim clock goes and the
+    WS carries ``equipment`` messages; processes live in a thread of their own for the same
+    ``asyncio.run()`` reason as ``fault_agv``."""
+    from terminal_runner.run import run_once_http
+    from terminal_sim.layout import load_layout
+    from terminal_sim.scenario import load_scenario
+
+    log_dir = tmp_path_factory.mktemp("viewer_link")
+    scenario = load_scenario(SCENARIO)
+    ready = threading.Event()
+    stop = threading.Event()
+    out: dict = {}
+
+    def run(url: str, gateway: str) -> None:
+        try:
+            out["kpis"] = run_once_http(scenario, load_layout(ROOT / "terminal.yaml"), scenario.seed,
+                                        ecs=url, gateway=gateway)
+        except BaseException as e:  # noqa: BLE001 - the run outlives the test; ends at teardown
+            out["run_error"] = e
+
+    def lifetime() -> None:
+        try:
+            with sim_and_gateway(SCENARIO, n_sts=2, n_agv=6, log_dir=log_dir) as procs:
+                gw_port = int(procs["endpoint"].rsplit(":", 1)[1])
+                proxy = LinkProxy({(listen := free_port()): gw_port}).start()
+                try:
+                    with ecs_service(f"opc.tcp://127.0.0.1:{listen}", log_dir=log_dir,
+                                     auto_release=False) as ecs:
+                        threading.Thread(target=run, args=(ecs["url"], procs["endpoint"]), daemon=True).start()
+                        out["value"] = (ecs["url"], proxy)
+                        ready.set()
+                        stop.wait()
+                finally:
+                    proxy.stop()
+        except BaseException as e:  # noqa: BLE001 - re-raised in the test thread
+            out["error"] = e
+        finally:
+            ready.set()
+
+    proc_thread = threading.Thread(target=lifetime, daemon=True)
+    proc_thread.start()
+    ready.wait()
+    if "error" in out:
+        raise out["error"]
+    try:
+        yield out["value"]
     finally:
         stop.set()
         proc_thread.join(60)
