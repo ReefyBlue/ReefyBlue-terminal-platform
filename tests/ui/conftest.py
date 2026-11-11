@@ -99,8 +99,8 @@ def proxied(tmp_path_factory) -> Iterator[tuple[str, LinkProxy]]:
     """``(url, proxy)``: an ECS service (``auto_release=False``) over its own sim + gateway
     running ``baseline.yaml``, connected to the gateway through a one-route ``LinkProxy``
     (as in ``tests/e2e/test_blip_during_run.py`` (b)). ``proxy.cut()`` drops the ECS's whole
-    equipment link (every device OFFLINE via LINK_LOST, ``GET /equipment`` 503) while its
-    HTTP API and WS /events keep running; ``proxy.restore()`` lets it reconnect.
+    equipment link (every device OFFLINE via LINK_LOST; ``GET /equipment`` still answers 200
+    from the cache, every device OFFLINE) while its HTTP API and WS /events keep running; ``proxy.restore()`` lets it reconnect.
 
     The runner runs in a daemon thread (direct to the gateway) so the sim clock goes and the
     WS carries ``equipment`` messages; processes live in a thread of their own for the same

@@ -170,6 +170,8 @@ const model = {
       equipment: new Map(),
       equipmentEpoch: 0, // counts WS state changes
       stateEpoch: new Map(), // equipment id -> equipmentEpoch of its last WS state change
+      alarmEpoch: 0, // counts WS alarm messages
+      alarmLog: [], // the last ALARM_LOG WS alarm messages as {epoch, message}
       alarms: [], // oldest first
       status: null,
       kpis: null,
@@ -192,6 +194,18 @@ const model = {
     state.dirty = true;
   },
 
+  /** Take the GET /alarms list `items` requested when `state.alarmEpoch` was `epoch`: the
+   * WS alarm messages that arrived while the request was out are applied again on top, so
+   * a snapshot older than them neither drops a raised alarm nor brings back a cleared one.
+   * If the log no longer reaches back to `epoch`, the snapshot is dropped. */
+  mergeAlarms(state, items, epoch) {
+    const later = state.alarmLog.filter((e) => e.epoch > epoch);
+    if (later.length !== state.alarmEpoch - epoch) return false;
+    model.setAlarms(state, items);
+    for (const e of later) applyAlarm(state, e.message);
+    return true;
+  },
+
   /** Store a status (GET /status body or WS `status` message without its `type`). */
   setStatus(state, status) {
     const { type, ...rest } = status;
@@ -208,20 +222,19 @@ const model = {
   /** Apply one WS /events message. */
   apply(state, message) {
     switch (message.type) {
-      case "alarm": {
-        const key = model.alarmKey(message);
-        const rest = state.alarms.filter((a) => model.alarmKey(a) !== key);
-        state.alarms = message.action === "raised" ? sortAlarms([...rest, alarmOf(message)]) : rest;
+      case "alarm":
+        applyAlarm(state, message);
+        state.alarmEpoch += 1;
+        state.alarmLog = [...state.alarmLog, { epoch: state.alarmEpoch, message }].slice(-ALARM_LOG);
         break;
-      }
       case "status":
         model.setStatus(state, message);
         break;
       case "equipment": {
         pushEvent(state, message);
         const item = state.equipment.get(message.equipment_id);
-        if (message.new_state) {
-          if (item) item.state = message.new_state;
+        if (item && message.new_state) {
+          item.state = message.new_state;
           state.equipmentEpoch += 1;
           state.stateEpoch.set(message.equipment_id, state.equipmentEpoch);
         }
@@ -257,6 +270,14 @@ const model = {
     state.dirty = true;
   },
 };
+
+const ALARM_LOG = 200;
+
+function applyAlarm(state, message) {
+  const key = model.alarmKey(message);
+  const rest = state.alarms.filter((a) => model.alarmKey(a) !== key);
+  state.alarms = message.action === "raised" ? sortAlarms([...rest, alarmOf(message)]) : rest;
+}
 
 function alarmOf(a) {
   return { kind: a.kind, equipment_id: a.equipment_id, job_id: a.job_id ?? null,
@@ -689,7 +710,11 @@ function main() {
   requestAnimationFrame(frame);
 
   // initial snapshots (and the resync after an action); a failure leaves the old value
-  const refreshAlarms = () => api.alarms().then((items) => model.setAlarms(state, items), () => {});
+  const refreshAlarms = () => {
+    const epoch = state.alarmEpoch;
+    return api.alarms().then((items) => { model.mergeAlarms(state, items, epoch); }, () => {});
+  };
+  viewer.refreshAlarms = refreshAlarms;
   const refreshStatus = () => api.status().then((st) => model.setStatus(state, st), () => {});
   const refreshKpis = () => api.kpis().then((k) => model.setKpis(state, k), () => {});
 

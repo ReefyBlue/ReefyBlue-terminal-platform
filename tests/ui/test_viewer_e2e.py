@@ -87,9 +87,38 @@ def test_cut_shows_offline_and_dims_then_recovers(page, proxied):
     link.cut()
     page.wait_for_selector("#alarms li[data-key^='LINK_LOST|']", timeout=30_000)
     assert "verbroken" in page.inner_text("#banner").lower()
+    assert page.evaluate("window.__viewer.state.link.connected") is False  # map dimmed
     assert page.evaluate("[...window.__viewer.state.equipment.values()].every(e => e.state === 'OFFLINE')")
     assert page.evaluate("window.__viewer.state.equipment.size") == 12  # last positions kept (Review Focus 2)
     link.restore()
     page.wait_for_function("document.querySelectorAll(\"#alarms li[data-key^='LINK_LOST|']\").length === 0",
                            timeout=60_000)
     assert "verbonden" in page.inner_text("#banner").lower()
+
+
+def test_equipment_503_marks_ecs_link_down_until_200(page, viewer_url):
+    page.goto(viewer_url + "/ui/")
+    page.wait_for_function("window.__viewer && window.__viewer.ready", timeout=15_000)
+    page.route("**/equipment", lambda route: route.fulfill(status=503, json={"detail": "not connected"}))
+    page.wait_for_function("window.__viewer.state.link.ecs === false", timeout=5_000)
+    page.unroute("**/equipment")
+    page.wait_for_function("window.__viewer.state.link.ecs === true", timeout=10_000)  # retry after 5 s
+
+
+def test_alarm_message_during_alarms_refresh_survives(page, viewer_url):
+    page.goto(viewer_url + "/ui/")
+    page.wait_for_function("window.__viewer && window.__viewer.ready", timeout=15_000)
+    held = []
+    page.route("**/alarms", lambda route: held.append(route))  # hold the response back
+    page.evaluate("() => { window.__refresh = window.__viewer.refreshAlarms(); }")
+    deadline = time.monotonic() + 5
+    while not held and time.monotonic() < deadline:
+        page.wait_for_timeout(50)
+    assert held, "GET /alarms was not requested"
+    page.evaluate("""() => { const v = window.__viewer;
+        v.model.apply(v.state, {type:'alarm', action:'raised', kind:'NEEDS_RELEASE', equipment_id:'XX-42', job_id:null, since_sim_time:1, detail:'', sim_time:1}); }""")
+    held[0].fulfill(status=200, json=[])  # stale snapshot without the alarm
+    page.evaluate("() => window.__refresh")
+    page.unroute("**/alarms")
+    keys = page.evaluate("window.__viewer.state.alarms.map((a) => window.__viewer.model.alarmKey(a))")
+    assert "NEEDS_RELEASE|XX-42|" in keys
