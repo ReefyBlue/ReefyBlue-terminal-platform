@@ -1,0 +1,13 @@
+name: faults_fast
+seed: 1
+n_sts: 2
+n_agv: 6
+n_containers: 60
+share_40ft: 0.6
+discharge_share: 1.0
+speed_factor: 50
+duration_s: 7200
+faults:
+  sts: {mtbf_s: 0, mttr_s: 600}
+  agv: {mtbf_s: 600, mttr_s: 120}
+  asc: {mtbf_s: 0, mttr_s: 900}

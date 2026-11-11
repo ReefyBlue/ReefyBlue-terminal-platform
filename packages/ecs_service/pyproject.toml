@@ -18,12 +18,16 @@ dependencies = [
     "anyio>=4",
 ]
 
+[project.optional-dependencies]
+viewer = ["terminal-viewer"]
+
 [tool.uv.sources]
 terminal-model = { workspace = true }
 terminal-ecs = { workspace = true }
 terminal-opcua = { workspace = true }
 terminal-kpi = { workspace = true }
 terminal-tos-stub = { workspace = true }
+terminal-viewer = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terminal_ecs_service"]

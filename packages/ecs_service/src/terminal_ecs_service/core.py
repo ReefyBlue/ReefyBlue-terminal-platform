@@ -42,8 +42,22 @@ _EMPTY_STATUS = {"pending": 0, "open": 0, "active_jobs": 0, "done": 0, "failed":
                  "replans": 0, "stuck": 0, "bound": 0}
 
 
+class _PositionLike(Protocol):
+    x: float
+    y: float
+
+
+class _StsLike(Protocol):
+    equipment_id: str
+    position: _PositionLike
+    lane_cells: Sequence[Sequence[int]]
+
+
 class _BlockLike(Protocol):
     block: str
+    asc_id: str
+    tp_ws: _PositionLike
+    tp_ws_cell: Sequence[int]
     bays: int
     rows: int
     tiers: int
@@ -53,7 +67,13 @@ class LayoutLike(Protocol):
     """The part of ``terminal_sim.layout.Layout`` the service needs (duck-typed: the
     service must not import the simulator)."""
 
+    quay_length_m: float
+    grid_cell_m: float
+    grid_cols: int
+    grid_rows: int
+    sts: Sequence[_StsLike]
     blocks: Sequence[_BlockLike]
+    agv_start_cells: Sequence[Sequence[int]]
 
 
 class EcsCore:
@@ -65,6 +85,7 @@ class EcsCore:
         broadcaster: Broadcaster | None = None,
         auto_release: bool = False,
     ) -> None:
+        self.layout = layout  # static geometry, served by GET /layout
         self.auto_release = auto_release
         self._last_alarms: dict[tuple[str, str, str | None], dict] = {}
         self._connect = connect  # returns a connected port or raises ConnectionError

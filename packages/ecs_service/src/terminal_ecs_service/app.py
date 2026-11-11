@@ -15,13 +15,15 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any, TypeVar
 
 import anyio
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from terminal_ecs.alarms import ReleaseRefused
 from terminal_ecs.workorders import WorkOrder, WorkOrderError
 from terminal_model.locations import SlotLoc, parse_location
@@ -31,11 +33,15 @@ from terminal_ecs_service.core import EcsCore
 from terminal_ecs_service.schemas import (
     AcceptedOut,
     AlarmOut,
+    BlockOut,
     HealthOut,
+    LayoutOut,
+    PositionOut,
     RefusedOut,
     ReleaseOut,
     ResolveIn,
     ResolveOut,
+    StsOut,
     WorkOrderErrorOut,
     WorkOrderErrorsOut,
     WorkOrderIn,
@@ -49,6 +55,15 @@ T = TypeVar("T")
 
 _NOT_CONNECTED = {"detail": "not connected to the equipment"}
 _503 = {"description": "Not connected to the equipment"}
+
+
+def _viewer_dir() -> Path | None:
+    """Static viewer directory, or None when ``terminal_viewer`` is not installed."""
+    try:
+        from terminal_viewer import static_dir
+    except ImportError:
+        return None
+    return static_dir()
 
 
 def _refused(code: str, message: str, status: int) -> JSONResponse:
@@ -226,6 +241,29 @@ def create_app(core: EcsCore, *, run_loop: bool = True) -> FastAPI:
                                 status_code=503)
         return HealthOut(connected=True, sim_time=core.port.now())
 
+    @app.get("/layout", response_model=LayoutOut)
+    async def get_layout() -> LayoutOut:
+        """Static terminal geometry; needs no equipment link."""
+        lo = core.layout
+        return LayoutOut(
+            quay_length_m=lo.quay_length_m,
+            grid_cell_m=lo.grid_cell_m,
+            grid_cols=lo.grid_cols,
+            grid_rows=lo.grid_rows,
+            sts=[
+                StsOut(equipment_id=s.equipment_id, x=s.position.x, y=s.position.y,
+                       lane_cells=(tuple(s.lane_cells[0]), tuple(s.lane_cells[1])))
+                for s in lo.sts
+            ],
+            blocks=[
+                BlockOut(block=b.block, asc_id=b.asc_id,
+                         tp_ws=PositionOut(x=b.tp_ws.x, y=b.tp_ws.y), tp_ws_cell=tuple(b.tp_ws_cell),
+                         bays=b.bays, rows=b.rows, tiers=b.tiers)
+                for b in lo.blocks
+            ],
+            agv_start_cells=[tuple(c) for c in lo.agv_start_cells],
+        )
+
     @app.websocket("/events")
     async def events(ws: WebSocket) -> None:
         await ws.accept()
@@ -259,5 +297,16 @@ def create_app(core: EcsCore, *, run_loop: bool = True) -> FastAPI:
             pass
         finally:
             core.broadcaster.unregister(q)
+
+    if (viewer := _viewer_dir()) is not None:
+        app.mount("/ui", StaticFiles(directory=str(viewer), html=True), name="ui")
+
+        @app.get("/", include_in_schema=False)
+        async def root() -> RedirectResponse:
+            return RedirectResponse("/ui/", status_code=307)
+
+        log.info("viewer mounted at /ui from %s", viewer)
+    else:
+        log.info("terminal_viewer not installed; no /ui")
 
     return app

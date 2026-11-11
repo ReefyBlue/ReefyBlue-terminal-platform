@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Terminal viewer</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+  <header><h1>Terminal viewer</h1></header>
+  <main>
+    <canvas id="map"></canvas>
+    <aside id="panel">
+      <div id="banner" class="lost" role="status">Viewer ↔ ECS verbroken</div>
+      <h2>Alarmen</h2>
+      <ul id="alarms"></ul>
+      <h2>KPI's</h2>
+      <table id="kpis"></table>
+      <h2>Selectie</h2>
+      <dl id="selection"></dl>
+      <h2>Legenda</h2>
+      <ul id="legend">
+        <li><span class="swatch state idle"></span>IDLE (vrij)</li>
+        <li><span class="swatch state busy"></span>BUSY (aan het werk)</li>
+        <li><span class="swatch state fault"></span>FAULT (storing)</li>
+        <li><span class="swatch state offline"></span>OFFLINE (geen verbinding)</li>
+        <li><span class="swatch state maintenance"></span>MAINTENANCE (onderhoud)</li>
+        <li><span class="swatch agv"><span></span></span>AGV met container</li>
+        <li><span class="swatch berth"></span>Kade (berth)</li>
+        <li><span class="swatch path"></span>Rijpaden (internal path)</li>
+        <li><span class="swatch yard"></span>Stack (yard)</li>
+      </ul>
+      <h2>Events</h2>
+      <ol id="events"></ol>
+    </aside>
+  </main>
+  <script type="module" src="viewer.js"></script>
+</body>
+</html>

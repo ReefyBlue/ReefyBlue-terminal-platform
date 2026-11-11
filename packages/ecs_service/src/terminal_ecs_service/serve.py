@@ -23,10 +23,25 @@ import yaml
 from terminal_model.logging import configure_json_logging
 from terminal_opcua.port import OpcUaEquipmentPort
 
-from terminal_ecs_service.app import create_app
+from terminal_ecs_service.app import _viewer_dir, create_app
 from terminal_ecs_service.core import EcsCore
 
-__all__ = ["Block", "Layout", "load_layout", "main", "port_factory"]
+__all__ = ["Block", "Layout", "Position", "Sts", "load_layout", "main", "port_factory"]
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Position:
+    x: float
+    y: float
+
+
+@dataclass(frozen=True)
+class Sts:
+    equipment_id: str
+    position: Position
+    lane_cells: tuple[tuple[int, int], tuple[int, int]]
 
 
 @dataclass(frozen=True)
@@ -35,20 +50,47 @@ class Block:
     bays: int
     rows: int
     tiers: int
+    asc_id: str
+    tp_ws: Position
+    tp_ws_cell: tuple[int, int]
 
 
 @dataclass(frozen=True)
 class Layout:
-    """The part of ``terminal.yaml`` the service needs (``core.LayoutLike``); read here
-    because the service may not import ``terminal_sim``."""
+    """The part of ``terminal.yaml`` the service needs (``core.LayoutLike``): the allocator's
+    blocks and the geometry served by ``GET /layout``; read here because the service may not
+    import ``terminal_sim``."""
 
     blocks: list[Block]
+    quay_length_m: float
+    grid_cell_m: float
+    grid_cols: int
+    grid_rows: int
+    sts: list[Sts]
+    agv_start_cells: list[tuple[int, int]]
+
+
+def _cell(c) -> tuple[int, int]:
+    return int(c[0]), int(c[1])
 
 
 def load_layout(path: str | Path) -> Layout:
     raw = yaml.safe_load(Path(path).read_text())
-    return Layout([Block(str(b["block"]), int(b["bays"]), int(b["rows"]), int(b["tiers"]))
-                   for b in raw["blocks"]])
+    return Layout(
+        blocks=[Block(str(b["block"]), int(b["bays"]), int(b["rows"]), int(b["tiers"]),
+                      asc_id=str(b["asc_id"]),
+                      tp_ws=Position(float(b["tp_ws"]["x"]), float(b["tp_ws"]["y"])),
+                      tp_ws_cell=_cell(b["tp_ws_cell"]))
+                for b in raw["blocks"]],
+        quay_length_m=float(raw["quay"]["length_m"]),
+        grid_cell_m=float(raw["grid"]["cell_m"]),
+        grid_cols=int(raw["grid"]["cols"]),
+        grid_rows=int(raw["grid"]["rows"]),
+        sts=[Sts(str(s["id"]), Position(float(s["x"]), float(s["y"])),
+                 (_cell(s["lane_cells"][0]), _cell(s["lane_cells"][1])))
+             for s in raw["sts"]],
+        agv_start_cells=[_cell(c) for c in raw["agv_start_cells"]],
+    )
 
 
 def port_factory(gateway: str) -> Callable[[], OpcUaEquipmentPort]:
@@ -81,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
     # uvicorn restores the pre-run() handler and re-raises the captured signal into it after its
     # graceful shutdown; with the default SIGTERM handler that would exit -15, so exit 0 instead.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    if _viewer_dir() is not None:
+        log.info("viewer at http://%s:%d/ui/", args.host, args.port)
+    else:
+        log.info("viewer package terminal_viewer absent; no /ui/ (install the 'viewer' extra)")
     uvicorn.run(create_app(core), host=args.host, port=args.port, log_config=None, log_level=args.log_level)
     return 0
 

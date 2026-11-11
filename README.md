@@ -217,6 +217,52 @@ Herhaalde mislukkingen: een order waarvan de jobs 5 keer achter elkaar mislukken
 
 **Onbemande runs:** `terminal_ecs_service.serve --auto-release` (standaard uit) geeft een apparaat na FAULT → IDLE direct weer vrij. Een uitkomst die het apparaat zelf als laatste job meldt, wordt in beide modi gewoon verwerkt; een echt onbekende uitkomst (het apparaat meldt een andere laatste job) telt met `--auto-release` direct als `failed` (de order wordt herpland, geen alarm; de cap op herhaalde mislukkingen begrenst een lus). Een AGV in quarantaine blijft ook met `--auto-release` wachten op `release`. Zonder `--auto-release` beslist de operator via `resolve`. De runner draait in-process standaard met auto-release; `terminal_runner.run --no-auto-release` schakelt het uit (dan blijven FAULT-apparaten uitgesloten en onbekende uitkomsten open). Met `--port http` heeft die vlag geen effect: daar beslist de service (`--auto-release`). Let op: ook met `--auto-release` wordt een AGV in quarantaine nooit automatisch vrijgegeven; een onbemande run kan dan stilvallen tot een operator hem met `release` vrijgeeft.
 
+## Webviewer (B2b)
+
+Ontwerp: `docs/superpowers/specs/2026-11-11-plan-b2b-viewer-design.md`. De ECS-service serveert zelf een webviewer (package `terminal_viewer`, alleen statische bestanden: geen build-stap, geen Node, geen CDN; werkt offline op de NAS).
+
+**Openen:** `http://<nas>:8000/ui/` (`/` stuurt door naar `/ui/`). Bij het starten logt de service één regel `viewer at http://<host>:<port>/ui/`, of dat `terminal_viewer` ontbreekt (dan geen `/ui/`; installeer de extra `viewer`).
+
+**Plattegrond** (bovenaanzicht, kade boven, stack onder, schaal uit `GET /layout`):
+
+| Vorm | Betekenis |
+|---|---|
+| lichtblauwe strook met donkerblauwe lijn | ligplaats (berth) en kaderand |
+| donkerblauwe verticale balk met id (`STS-01`) | STS-kraan over kade en handover-lane; het vierkantje op de kaderand heeft de toestandskleur |
+| blauw gearceerde cellen onder een STS | handover-lane bezet (`handover_lane_occupied`) |
+| rechthoek met id (`AGV-03`) | AGV in toestandskleur; wit blokje erin = container aan boord (`loaded_container_id`); dunne blauwe lijn = resterende route |
+| grijs blok met `Blok A` | stackblok; de cel `TP` erboven is het transferpunt (gearceerd als `ws_tp_occupied`) |
+| smalle balk over het blok met id eronder (`ASC-A`) | ASC op `gantry_position_m`, in toestandskleur |
+
+**Toestandskleuren:** IDLE grijs-groen `#5b8c5a`, BUSY groen `#2e7d32`, FAULT rood `#c62828`, OFFLINE paars-grijs `#6d5f8a` met gestreepte rand, MAINTENANCE oranje `#ef6c00`; grijs = nog niet gemeld. Klik op een apparaat voor zijn details (paneel "Selectie"). Is de verbinding weg, dan blijft de laatste stand staan, half doorzichtig.
+
+**Paneel rechts:** koppelingsbanner (groen "ECS ↔ gateway verbonden", rood "Gateway verbroken sinds t=…", grijs "Viewer ↔ ECS verbroken"), alarmen (oudste boven), KPI's (`/status` + `/kpis`), selectie, legenda, de laatste 50 events.
+
+**Operatoracties** (één klik, geen bevestiging; dezelfde endpoints als in B2d):
+
+| Knop | Op alarm | Aanroep | Fout |
+|---|---|---|---|
+| **Vrijgeven** | `NEEDS_RELEASE` of `LINK_LOST` (één knop per apparaat) | `POST /equipment/{id}/release` | 404 onbekend apparaat (`UNKNOWN_EQUIPMENT`), 409 `RELEASE_REFUSED` (apparaat nog FAULT/OFFLINE of onbekende uitkomst open), 503 niet verbonden |
+| **Voltooid** / **Mislukt** | `UNKNOWN_OUTCOME` | `POST /jobs/{id}/resolve` met `completed` / `failed` | 404 `UNKNOWN_JOB` (geen onbekende uitkomst), 422 ongeldige outcome, 503 niet verbonden |
+
+Een fout staat 5 s als `code: message` in de alarmregel; de knop wordt weer actief. Bij succes verdwijnt het alarm via het volgende `alarm cleared`-bericht.
+
+**Tests:** de browsertests hebben de marker `e2e_ui` en draaien standaard niet mee.
+
+```bash
+uv run playwright install chromium            # eenmalig, op de ontwikkelmachine (niet op de NAS)
+uv run pytest -m e2e_ui tests/ui -q
+VIEWER_BROWSER=/usr/bin/google-chrome uv run pytest -m e2e_ui tests/ui -q   # als de chromium-download niet kan: eigen Chrome/Chromium
+```
+
+Visuele check: `uv run python tests/ui/render_check.py docs/superpowers/reports/plan-b2b/screenshot.png` start sim + gateway + service met `tests/ui/faults_fast.yaml`, laat de runner een paar sim-minuten werken (tot er AGV's rijden en meestal één alarm staat), opent `/ui/` op 1400×800 en schrijft een PNG. Beoordeel die met het oog tegen `docs/superpowers/references/b2b-viewer/` (geen pixel-diff). Ook hier geldt `VIEWER_BROWSER`.
+
+**Beperkingen:**
+
+- Geen authenticatie: iedereen op het netwerk kan vrijgeven en afhandelen. Zet de NAS dus niet open naar buiten.
+- Posities worden 1× per seconde gepolld (`GET /equipment`); events (toestand, alarmen, jobs) komen direct via `WS /events`.
+- Met een operator achter de viewer is `--auto-release` niet meer nodig: FAULT-apparaten en onbekende uitkomsten handel je hier af. Een AGV in quarantaine vraagt sowieso een mens (box eraf halen, dan **Vrijgeven**).
+
 ## Verder
 
 Ontwerp: `docs/superpowers/specs/2026-11-10-terminal-platform-fase1-design.md` en `docs/superpowers/specs/2026-11-10-plan-b1-opcua-design.md`. Plan B2 (ECS-service, viewer, Docker) en B3 (eigen DataTypes, beveiliging, vendor-adapters) volgen.

@@ -3,6 +3,7 @@ plus a guard that ``terminal_ecs`` is byte-identical to Plan A (``master``)."""
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import re
 import sys
@@ -11,19 +12,21 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGES = ["model", "sim", "ecs", "tos_stub", "runner", "gateway", "opcua", "kpi", "ecs_service"]
+PACKAGES = ["model", "sim", "ecs", "tos_stub", "runner", "gateway", "opcua", "kpi", "ecs_service", "viewer"]
 ECS_HASH_FIXTURE = ROOT / "tests" / "fixtures" / "ecs_sources.sha256"
 
 # Workspace packages each package may import (besides itself); runner may import all.
 ALLOWED = {
     "model": set(),
+    "viewer": set(),
     "opcua": {"terminal_model"},
     "ecs": {"terminal_model"},
     "sim": {"terminal_model", "terminal_opcua"},
     "gateway": {"terminal_model", "terminal_opcua"},
     "tos_stub": {"terminal_model", "terminal_ecs"},
     "kpi": {"terminal_model", "terminal_ecs"},
-    "ecs_service": {"terminal_model", "terminal_ecs", "terminal_opcua", "terminal_kpi", "terminal_tos_stub"},
+    "ecs_service": {"terminal_model", "terminal_ecs", "terminal_opcua", "terminal_kpi", "terminal_tos_stub",
+                    "terminal_viewer"},
 }
 _TERMINAL = re.compile(r"^\s*(?:from|import)\s+(terminal_\w+)", re.MULTILINE)
 
@@ -135,3 +138,64 @@ def test_guard_detects_a_real_import_but_not_a_docstring(tmp_path, monkeypatch):
     assert _imports("ecs", ["terminal_sim"]) == []
     (pkg / "bad.py").write_text("from terminal_sim.world import World\n")
     assert len(_imports("ecs", ["terminal_sim"])) == 1
+
+
+def test_viewer_has_no_python_logic():
+    pkg = ROOT / "packages" / "viewer" / "src" / "terminal_viewer"
+    assert [p.name for p in pkg.rglob("*.py")] == ["__init__.py"]
+    for name in ("index.html", "viewer.js", "viewer.css"):
+        assert (pkg / "static" / name).is_file()
+
+
+def _viewer_imports_outside(path: Path) -> list[str]:
+    """``terminal_viewer`` imports in ``path`` that are not inside a function ``_viewer_dir``."""
+    tree = ast.parse(path.read_text())
+    allowed: set[int] = set()
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef) and fn.name == "_viewer_dir":
+            allowed |= {id(n) for n in ast.walk(fn)}
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        else:
+            continue
+        if any(n.split(".")[0] == "terminal_viewer" for n in names) and id(node) not in allowed:
+            hits.append(f"{path.name}:{node.lineno}")
+    return hits
+
+
+def test_ecs_service_imports_viewer_only_in_viewer_dir():
+    src = ROOT / "packages" / "ecs_service" / "src" / "terminal_ecs_service"
+    files = sorted(src.rglob("*.py"))
+    assert files
+    assert [h for p in files for h in _viewer_imports_outside(p)] == []
+    app = src / "app.py"
+    assert "terminal_viewer" in app.read_text()  # the one allowed import exists (no vacuous pass)
+
+
+def test_viewer_import_guard_flags_a_module_level_import(tmp_path):
+    f = tmp_path / "m.py"
+    f.write_text("from terminal_viewer import static_dir\n\ndef _viewer_dir():\n    import terminal_viewer\n")
+    assert _viewer_imports_outside(f) == ["m.py:1"]
+
+
+_URL = re.compile(r"https?://|(?<![:\w])//[A-Za-z0-9.-]+\.[A-Za-z]")
+
+
+def test_viewer_static_files_reference_no_external_url():
+    static = ROOT / "packages" / "viewer" / "src" / "terminal_viewer" / "static"
+    hits = []
+    for name in ("index.html", "viewer.js", "viewer.css"):
+        for i, line in enumerate((static / name).read_text().splitlines(), 1):
+            if _URL.search(line):
+                hits.append(f"{name}:{i}: {line.strip()}")
+    assert hits == []
+
+
+@pytest.mark.parametrize("line", ['<script src="https://cdn.example.com/x.js">', "@import url(http://a.b/c.css);",
+                                  '<link href="//fonts.example.com/f.css">', "// see https://example.org"])
+def test_external_url_pattern_matches(line):
+    assert _URL.search(line)

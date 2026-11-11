@@ -60,3 +60,37 @@ class RefusedOut(BaseModel):
 
     code: str
     message: str
+
+
+class PositionOut(BaseModel):
+    x: float
+    y: float
+
+
+class StsOut(BaseModel):
+    equipment_id: str
+    x: float
+    y: float
+    lane_cells: tuple[tuple[int, int], tuple[int, int]]
+
+
+class BlockOut(BaseModel):
+    block: str
+    asc_id: str
+    tp_ws: PositionOut
+    tp_ws_cell: tuple[int, int]
+    bays: int
+    rows: int
+    tiers: int
+
+
+class LayoutOut(BaseModel):
+    """Static terminal geometry for the viewer (``GET /layout``)."""
+
+    quay_length_m: float
+    grid_cell_m: float
+    grid_cols: int
+    grid_rows: int
+    sts: list[StsOut]
+    blocks: list[BlockOut]
+    agv_start_cells: list[tuple[int, int]]
