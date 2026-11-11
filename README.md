@@ -179,14 +179,14 @@ Ontwerp: `docs/superpowers/specs/2026-11-10-plan-b2d-link-loss-design.md`.
 | `FAULT` | storing gemeld door het apparaat | lopende job wordt herpland; apparaat uitgesloten en `needs_release` |
 | `OFFLINE` | verbinding weg (gateway↔apparaat: reden `UPSTREAM_DISCONNECTED`; ECS↔gateway: `LINK_LOST`) | **geen** herplanning, order blijft in zijn stage, geen nieuwe jobs, watchdog bevroren |
 
-Komt een apparaat terug (`UPSTREAM_RECONNECTED` / `LINK_RESTORED`) als `BUSY`, dan loopt de job gewoon door. Komt het terug als `IDLE` terwijl er een job liep waarvan geen `JOB_COMPLETED`/`JOB_FAILED` binnenkwam, dan is de uitkomst **onbekend**. Terug als `FAULT`: zoals hierboven.
+Komt een apparaat terug (`UPSTREAM_RECONNECTED` / `LINK_RESTORED`) als `BUSY`, dan loopt de job gewoon door. Komt het terug als `IDLE` terwijl er een job liep waarvan geen `JOB_COMPLETED`/`JOB_FAILED` binnenkwam, dan kijkt de dispatcher naar de laatste job die het apparaat zelf meldt (OPC UA-variabelen `LastJobId` / `LastJobOutcome`): is dat deze job, dan wordt de gemiste uitkomst alsnog verwerkt (`COMPLETED` → de order gaat verder; `FAILED`, bv. een storing die tijdens de onderbreking ook weer verholpen werd → herplannen), zonder alarm. Anders is de uitkomst **onbekend**. Terug als `FAULT`: zoals hierboven.
 
 **Alarmen** (`GET /alarms`, gesorteerd op `since_sim_time`; WS-bericht `{"type":"alarm","action":"raised"|"cleared",…}`):
 
 | `kind` | Wanneer | Opgeheven door |
 |---|---|---|
 | `LINK_LOST` | per apparaat dat OFFLINE is | herstel van de verbinding |
-| `NEEDS_RELEASE` | na een FAULT of een onbekende uitkomst | `POST /equipment/{id}/release` |
+| `NEEDS_RELEASE` | na een FAULT, een onbekende uitkomst of een quarantaine (`quarantined: box may be on board`) | `POST /equipment/{id}/release` (een laat binnenkomende uitkomst heft het op als die de enige oorzaak was) |
 | `UNKNOWN_OUTCOME` | job liep tijdens OFFLINE, apparaat kwam IDLE terug | `POST /jobs/{job_id}/resolve` |
 
 `GET /status` telt mee: `offline`, `needs_release`, `unknown_outcomes`.
@@ -205,16 +205,17 @@ curl -s -X POST http://localhost:8000/equipment/STS-01/release
 # 200 {"released":"STS-01"}; 404 onbekend; 409 {"code":"RELEASE_REFUSED","message":…}; 503 niet verbonden
 ```
 
-Herhaalde mislukkingen: een order waarvan de jobs 5 keer achter elkaar mislukken (JOB_FAILED of een FAULT-herplanning, zonder voltooide job ertussen; watchdog-annuleringen en `resolve … failed` tellen niet mee) wordt niet eindeloos opnieuw uitgegeven maar gefaald met reden `REPLAN_STREAK`. De operator ziet dat als `failed` in `GET /status` / KPI `containers_failed` en een ERROR `replan streak: <container> failed 5 times in a row on <apparaat> (<reden>); order failed` in de log; TP en AGV van de order komen vrij.
+Herhaalde mislukkingen: een order waarvan de jobs 5 keer achter elkaar mislukken (JOB_FAILED of een FAULT-herplanning, zonder voltooide job ertussen; watchdog-annuleringen en `resolve … failed` tellen niet mee) wordt niet eindeloos opnieuw uitgegeven maar gefaald met reden `REPLAN_STREAK`. De operator ziet dat als `failed` in `GET /status` / KPI `containers_failed` en een ERROR `replan streak: <container> failed 5 times in a row on <apparaat> (<reden>); order failed` in de log; de TP komt vrij. Staat de box van de order nog op zijn AGV (onderweg naar de TP of de kraan, of wachtend bij een van beide), dan gaat die AGV in **quarantaine**: hij krijgt geen jobs meer en staat als `NEEDS_RELEASE` met `quarantined: box may be on board` in `/alarms`, ook met `--auto-release`. Hetzelfde geldt voor de AGV van een mislukte overdracht. Haal de box eraf en geef de AGV vrij met `release`.
 
 `release` wordt geweigerd (409) zolang het apparaat `FAULT` of `OFFLINE` meldt of er voor dat apparaat nog een onbekende uitkomst openstaat (`"resolve job <id> first"`).
 
 **Wat doet de operator?**
 
+- *Na een quarantaine:* de order is gefaald, de box staat mogelijk nog op de AGV. Haal hem eraf, dan `POST /equipment/{id}/release`.
 - *Na een FAULT:* de job is al herpland. Controleer het apparaat ter plaatse; zodra het weer `IDLE` meldt: `POST /equipment/{id}/release`. Zonder vrijgave krijgt het geen jobs meer.
 - *Na een onbekende uitkomst:* kijk wat er werkelijk gebeurd is (staat de container op de AGV / in de stack / nog onder de kraan?). Gebeurd → `resolve` met `"completed"` (de order gaat door alsof `JOB_COMPLETED` binnenkwam); niet gebeurd → `"failed"` (de order wordt herpland). Daarna `release` van het apparaat.
 
-**Onbemande runs:** `terminal_ecs_service.serve --auto-release` (standaard uit) geeft een apparaat na FAULT → IDLE direct weer vrij en telt een onbekende uitkomst direct als `completed` (geen alarm): bij OFFLINE werkt het apparaat door, dus een job die al liep kan alleen voltooien of in een FAULT eindigen (en dan meldt het apparaat zich FAULT, niet IDLE). Zonder `--auto-release` beslist de operator via `resolve`. De runner draait in-process standaard met auto-release; `terminal_runner.run --no-auto-release` schakelt het uit (dan blijven FAULT-apparaten uitgesloten en onbekende uitkomsten open). Met `--port http` heeft die vlag geen effect: daar beslist de service (`--auto-release`).
+**Onbemande runs:** `terminal_ecs_service.serve --auto-release` (standaard uit) geeft een apparaat na FAULT → IDLE direct weer vrij. Een uitkomst die het apparaat zelf als laatste job meldt, wordt in beide modi gewoon verwerkt; een echt onbekende uitkomst (het apparaat meldt een andere laatste job) telt met `--auto-release` direct als `failed` (de order wordt herpland, geen alarm; de cap op herhaalde mislukkingen begrenst een lus). Een AGV in quarantaine blijft ook met `--auto-release` wachten op `release`. Zonder `--auto-release` beslist de operator via `resolve`. De runner draait in-process standaard met auto-release; `terminal_runner.run --no-auto-release` schakelt het uit (dan blijven FAULT-apparaten uitgesloten en onbekende uitkomsten open). Met `--port http` heeft die vlag geen effect: daar beslist de service (`--auto-release`).
 
 ## Verder
 

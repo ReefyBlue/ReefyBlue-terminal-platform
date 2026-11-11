@@ -20,6 +20,7 @@ De ECS-dispatcher wordt bewust gewijzigd; de hash-fixture `tests/fixtures/ecs_so
 - `State` krijgt `OFFLINE = "OFFLINE"`.
 - Redenen op `STATE_CHANGED` (veld `reason`): `LINK_LOST`, `LINK_RESTORED` (ECS↔gateway, gezet door `ReconnectingPort`), `UPSTREAM_DISCONNECTED`, `UPSTREAM_RECONNECTED` (gateway↔apparaat, bestaand). Constanten in `terminal_model.port` als `LinkReason` (StrEnum).
 - `EquipmentPort`-protocol ongewijzigd.
+- Elk apparaat meldt de uitkomst van zijn laatst beëindigde job in `snapshot().extra`: `last_job_id: str | None` en `last_job_outcome: "COMPLETED" | "FAILED" | None` (bijgewerkt bij elke voltooiing en mislukking, ook annulering → `FAILED`). In OPC UA zijn dat de EquipmentType-variabelen `LastJobId` en `LastJobOutcome` (String, `""` = geen; alle soorten), door `write_snapshot` geschreven en door de gateway als gewone variabelen gespiegeld; de ECS-port leest ze via `Extra`.
 
 ## 3. Gateway (`terminal_gateway.mirror`)
 
@@ -45,16 +46,22 @@ Nieuwe constructor-parameter `auto_release: bool = False`. Nieuwe interne verzam
 - `STATE_CHANGED → OFFLINE`: apparaat in `_offline`; lopende job (uit `_job_eq`) onthouden in `_offline_job`; **geen** herplanning, order blijft in zijn stage; apparaat krijgt geen nieuwe jobs (`_available` is False voor `_offline`); watchdog: voor offline AGV's wordt `_last_progress` bij elke tick op `now` gezet (tijd bevriest).
 - `STATE_CHANGED` met reden `LINK_RESTORED` of `UPSTREAM_RECONNECTED` voor een apparaat in `_offline`:
   - `BUSY`: apparaat uit `_offline`; als `_offline_job` nog in `_job_eq` staat loopt de job gewoon door.
-  - `IDLE`: apparaat uit `_offline`; was er een `_offline_job` die nog in `_job_eq` staat en is er sindsdien geen `JOB_COMPLETED`/`JOB_FAILED` voor gezien, dan `_unknown[job_id] = eid` en `eid` in `_needs_release` (bij `auto_release=True`: direct `resolve_job(job_id, "completed")` en geen `needs_release` — een job die al liep toen de verbinding wegviel kan alleen in `JOB_COMPLETED` of in een FAULT eindigen; faalt het apparaat, dan meldt het FAULT en niet IDLE). Zonder lopende job: apparaat is weer inzetbaar (tenzij in `_needs_release`).
+  - `IDLE`: apparaat uit `_offline`; was er een `_offline_job` die nog in `_job_eq` staat en is er sindsdien geen `JOB_COMPLETED`/`JOB_FAILED` voor gezien, dan beslist de laatste-job-melding van het apparaat (§2):
+    - `extra.last_job_id == job_id`: de gemiste uitkomst wordt gesynthetiseerd en als normaal event verwerkt — `COMPLETED` → `JOB_COMPLETED`, `FAILED` → `JOB_FAILED` met reden `FAULT_DURING_OUTAGE` (gewone herplanning; een FAULT die tijdens de onderbreking ook weer verholpen is, eindigt zo). Beide modi, geen alarm, geen `needs_release`; INFO-log `reconciled <job> on <eid> from equipment: <outcome>`.
+    - anders is de uitkomst echt onbekend: `_unknown[job_id] = eid` en `eid` in `_needs_release` (operator: `resolve_job`); bij `auto_release=True` direct `resolve_job(job_id, "failed")` (veilige standaard: herplannen; de replan-streak-cap van §5.3a begrenst een lus) en geen `needs_release`.
+    Zonder lopende job: apparaat is weer inzetbaar (tenzij in `_needs_release`).
   - `FAULT`: apparaat uit `_offline`, verder als §5.2.
   - `OFFLINE` (gateway meldt nog steeds offline): blijft in `_offline`.
 - Een `JOB_COMPLETED`/`JOB_FAILED` dat tijdens OFFLINE tóch binnenkomt (kan niet via de port, wel in tests) wordt normaal verwerkt en wist `_offline_job`.
 
 ### 5.2 FAULT en vrijgave
 
-- `STATE_CHANGED → FAULT`: zoals nu herplannen (`_replan(..., "FAULT")`) en apparaat in `_excluded`; nieuw: ook in `_needs_release`.
+- `STATE_CHANGED → FAULT`: zoals nu herplannen (`_replan(..., "FAULT")`) en apparaat in `_excluded`; nieuw: ook in `_needs_release`. Een FAULT herplant geen job met onbekende uitkomst (die wacht op `resolve_job`).
+- Een order die faalt (`_fail_order`, elke reden) terwijl zijn box op zijn AGV staat (stages `TO_YARD`, `AWAIT_TP`, `TO_STS`, `AT_STS_LOAD`, `LOADING`), en de AGV van een mislukte overdracht (`TRANSFER_ERROR`), zet die AGV in quarantaine: geen jobs, `needs_release` met oorzaak `quarantined: box may be on board`, ERROR-log. `auto_release` heft een quarantaine niet op; alleen `release`.
+- Apparaten die bij de constructie van de Dispatcher al `OFFLINE` melden, staan meteen in `_offline` (LINK_LOST-alarm, `since` = constructietijd).
 - `STATE_CHANGED → IDLE`: heft `_excluded` **alleen** op als het apparaat niet in `_needs_release` zit — of als `auto_release=True` (dan ook `_needs_release` wissen). Dit is de enige gedragswijziging voor runs zonder operator: met `auto_release=True` is het gedrag identiek aan nu.
-- `release(equipment_id) -> None`: `KeyError` bij onbekend apparaat; `ReleaseRefused(reason)` als het apparaat nu `FAULT` of `OFFLINE` meldt (`port.snapshot`) of als er nog een `_unknown`-job voor dit apparaat openstaat (eerst `resolve_job`); anders uit `_needs_release` en `_excluded`, daarna `tick()`.
+- `release(equipment_id) -> None`: `KeyError` bij onbekend apparaat; `ReleaseRefused(reason)` als het apparaat nu `FAULT` of `OFFLINE` meldt (`port.snapshot`) of als er nog een `_unknown`-job voor dit apparaat openstaat (eerst `resolve_job`); anders uit `_needs_release`, `_excluded` en `_quarantined`, daarna `tick()`.
+- Een laat `JOB_COMPLETED`/`JOB_FAILED` voor een job in `_unknown` haalt die uit `_unknown` en wist ook `needs_release` als "unknown outcome" daarvan de enige oorzaak was (geen FAULT sinds, geen quarantaine, geen andere onbekende job).
 
 ### 5.3 Onbekende uitkomst
 
@@ -88,8 +95,11 @@ CLI: `terminal_ecs_service.serve --auto-release` (standaard uit); `terminal_runn
 | `release` met openstaande onbekende uitkomst | 409 `"resolve job <id> first"` |
 | `resolve` met ongeldige outcome | 422 |
 | OFFLINE-event voor onbekend apparaat | genegeerd met warning |
-| Reconnect met andere vloot | bestaande `_check_fleet`-melding (runner); service logt ERROR en blijft op de oude vloot |
-| `auto_release=True` en onbekende uitkomst | direct `completed` → order gaat verder, geen alarm |
+| Reconnect met andere vloot | niet afgehandeld: ECS-service herstarten; de runner weigert via `_fleet_mismatch` |
+| IDLE na OFFLINE, apparaat meldt de lopende job als laatste job | gemiste uitkomst gesynthetiseerd (`COMPLETED` → order gaat verder; `FAILED` → herplannen, reden `FAULT_DURING_OUTAGE`), geen alarm, beide modi |
+| `auto_release=True` en echt onbekende uitkomst | direct `failed` → herplannen, geen alarm |
+| order faalt met box op de AGV | AGV in quarantaine, `needs_release` (ook bij `auto_release`) tot `release` |
+| `release`/`resolve` waarbij de tick erna de verbinding verliest | 200 (de wijziging is doorgevoerd); `on_link_lost()`, `/health` 503; herhaling 503, na herverbinden 200/404 per nieuwe toestand |
 
 ## 8. Tests
 
