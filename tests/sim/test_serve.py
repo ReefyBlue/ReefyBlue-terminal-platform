@@ -215,7 +215,7 @@ def test_control_slot_follows_the_fleet(tmp_path):
     mv_small = load_layout(ROOT / "terminal_mv_small.yaml")
     big = SimService(replace(load_scenario(_scenario(tmp_path)), n_sts=3, n_agv=12), mv_small,
                      base_port=30000)
-    assert big.control.port == 30019
+    assert big.control.port == 30023  # 3 STS + 12 AGV + 4 blocks x 2 ASCs (WS, LS)
 
 
 def test_sigterm_exits_cleanly(tmp_path):

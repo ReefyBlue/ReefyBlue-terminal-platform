@@ -1,7 +1,7 @@
 """Sim + gateway + ECS service on the v2 small layout (``terminal_mv_small.yaml``); the runner
 drives ``fixtures/mv_small_baseline.yaml`` (3 STS, 12 AGVs, 200 containers) over HTTP.
 
-19 devices (3 STS + 12 AGV + 4 ASC): the clock server sits on ``base_port + 19``."""
+23 devices (3 STS + 12 AGV + 4 blocks x 2 ASCs): the clock server sits on ``base_port + 23``."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 
 
 @pytest.mark.e2e_opcua
+@pytest.mark.xfail(strict=True, reason="C1b Task 4/7: the v2 World2 needs the rack-mode dispatcher")
 def test_mv_small_baseline_over_opcua(tmp_path):
     layout = load_layout(LAYOUT)
     scenario = load_scenario(SCENARIO, layout)

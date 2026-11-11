@@ -22,7 +22,7 @@ from terminal_opcua.port import OpcUaEquipmentPort
 from terminal_sim.layout import load_layout
 from terminal_sim.opcua_servers import ControlServer, EquipmentServer
 from terminal_sim.scenario import load_scenario
-from terminal_sim.world import World
+from terminal_sim.world import make_world
 from terminal_tos_stub.allocator import SimpleSlotAllocator
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gateway"))
@@ -37,7 +37,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="module")
 async def test_dispatcher_uses_agv_again_after_link_blip():
     layout = load_layout(ROOT / "terminal.yaml")
     scenario = replace(load_scenario(ROOT / "scenarios/baseline.yaml"), n_sts=1, n_agv=1)
-    world = World(layout, scenario)
+    world = make_world(layout, scenario)
     port_base = base._free_base_port()
     servers: dict[str, EquipmentServer] = {}
     proxy = None

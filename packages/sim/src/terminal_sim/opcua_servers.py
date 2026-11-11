@@ -144,7 +144,7 @@ class ControlServer:
                 yard.occupy(loc, cid)
                 placed.append(loc)
         except (ValueError, KeyError) as e:
-            for loc in placed:
+            for loc in reversed(placed):  # top first: a v2 stack only releases tops
                 yard.release(loc)
             log.warning("PrefillYard rejected: %r", e)
             return False

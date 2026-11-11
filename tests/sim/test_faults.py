@@ -6,10 +6,10 @@ from terminal_model.port import EventKind
 from terminal_model.types import Job, JobType, Kind, State
 from terminal_sim.layout import load_layout
 from terminal_sim.scenario import FaultParams, load_scenario
-from terminal_sim.world import World
+from terminal_sim.world import make_world
 
 
-def _world(agv: FaultParams) -> World:
+def _world(agv: FaultParams):
     scenario = load_scenario(Path("scenarios/baseline.yaml"))
     scenario = replace(
         scenario,
@@ -19,7 +19,7 @@ def _world(agv: FaultParams) -> World:
             Kind.ASC: FaultParams(0, 0),
         },
     )
-    return World(load_layout(Path("terminal.yaml")), scenario)
+    return make_world(load_layout(Path("terminal.yaml")), scenario)
 
 
 def test_fault_cycle():
@@ -68,7 +68,7 @@ def test_fault_fails_running_job():
 
 
 def test_no_injector_when_mtbf_zero():
-    world = World(
+    world = make_world(
         load_layout(Path("terminal.yaml")),
         load_scenario(Path("scenarios/baseline.yaml")),
     )

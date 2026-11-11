@@ -324,3 +324,12 @@ class World:
         cid = agv.unload()
         self.handover.put_on_tp(agv.cell, cid)
         return cid
+
+
+def make_world(layout: Layout, scenario: Scenario):
+    """``World2`` for a v2 layout (``layout.terminal`` set), else the legacy ``World``."""
+    if layout.terminal is not None:
+        from terminal_sim.world2 import World2  # world2 imports this module
+
+        return World2(layout, scenario)
+    return World(layout, scenario)

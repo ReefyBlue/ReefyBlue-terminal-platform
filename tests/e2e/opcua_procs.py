@@ -113,12 +113,14 @@ def sim_and_gateway(
     ``extra_sim_args`` are appended to the sim's command line (e.g. ``["--autostart"]``).
 
     ``layout`` is passed to the sim (``--layout``) and the gateway (``--config``); the fleet
-    the gateway mirrors is ``n_sts``/``n_agv`` plus one ASC per block of that layout, and
+    the gateway mirrors is ``n_sts``/``n_agv`` plus one ASC per block of that layout (two on a
+    v2 layout: WS and LS), and
     sim and gateway put the clock server on ``base + n_equipment``.
 
     On exit both get SIGTERM; their exit codes land in ``returncodes`` (sim, gateway).
     """
-    n_equipment = n_sts + n_agv + len(load_layout(layout).blocks)  # 1 ASC/block
+    lay = load_layout(layout)
+    n_equipment = n_sts + n_agv + len(lay.blocks) * (1 if lay.terminal is None else 2)
     n_slots = n_equipment + 1  # + the clock server
     base = free_base_port(n_slots)
     gw_base = base

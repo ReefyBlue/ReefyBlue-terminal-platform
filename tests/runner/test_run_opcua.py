@@ -102,10 +102,10 @@ class FakeOpcPort:
 def _fake(monkeypatch, scenario, **world_overrides):
     from dataclasses import replace
 
-    from terminal_sim.world import World
+    from terminal_sim.world import make_world
 
     layout = load_layout(ROOT / "terminal.yaml")
-    fake = FakeOpcPort(World(layout, replace(scenario, **world_overrides)))
+    fake = FakeOpcPort(make_world(layout, replace(scenario, **world_overrides)))
     monkeypatch.setattr(run, "_connect", lambda gateway: fake)
     return fake, layout
 

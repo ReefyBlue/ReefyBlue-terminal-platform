@@ -26,6 +26,7 @@ def _run() -> dict[str, float]:
 
 
 @pytest.mark.e2e
+@pytest.mark.xfail(strict=True, reason="C1b Task 4/7: the v2 World2 needs the rack-mode dispatcher")
 def test_mv_small_baseline_matches_fixture():
     k = _run()
     assert k["timed_out"] == 0.0

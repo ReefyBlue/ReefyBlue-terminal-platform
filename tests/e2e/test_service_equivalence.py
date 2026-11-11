@@ -14,7 +14,7 @@ from terminal_ecs_service.core import EcsCore
 from terminal_runner.run import make_allocator, make_workorders, prefill
 from terminal_sim.layout import load_layout
 from terminal_sim.scenario import load_scenario
-from terminal_sim.world import World
+from terminal_sim.world import make_world
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = Path(__file__).parent / "fixtures" / "plan_a_baseline_seed1.json"
@@ -28,7 +28,7 @@ def test_service_loop_matches_plan_a_reference():
     scenario = load_scenario(ROOT / "scenarios/baseline.yaml")
     layout = load_layout(ROOT / "terminal.yaml")
     assert scenario.seed == 1
-    world = World(layout, scenario)
+    world = make_world(layout, scenario)
     orders = make_workorders(scenario, layout, make_allocator(layout), random.Random(1))
     core = EcsCore(layout, connect=lambda: world.port)
     app = create_app(core, run_loop=False)

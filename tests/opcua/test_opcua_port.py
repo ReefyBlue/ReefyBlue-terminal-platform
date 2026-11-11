@@ -24,7 +24,7 @@ from terminal_opcua.port import OpcUaEquipmentPort
 from terminal_sim.layout import load_layout
 from terminal_sim.opcua_servers import ControlServer, EquipmentServer
 from terminal_sim.scenario import load_scenario
-from terminal_sim.world import World
+from terminal_sim.world import make_world
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -81,7 +81,7 @@ async def _start_rig() -> Rig:
     r = Rig()
     layout = load_layout(ROOT / "terminal.yaml")
     scenario = replace(load_scenario(ROOT / "scenarios/baseline.yaml"), n_sts=1, n_agv=2)
-    r.world = World(layout, scenario)
+    r.world = make_world(layout, scenario)
     base = _free_base_port()
     r.servers = {
         eid: EquipmentServer(eq, port=base + i, host="127.0.0.1")

@@ -6,12 +6,12 @@ from terminal_model.port import EquipmentPort, EventKind
 from terminal_model.types import Job, JobType, Position, State
 from terminal_sim.layout import load_layout
 from terminal_sim.scenario import load_scenario
-from terminal_sim.world import World
+from terminal_sim.world import make_world
 
 
 @pytest.fixture
 def world():
-    return World(
+    return make_world(
         load_layout(Path("terminal.yaml")),
         load_scenario(Path("scenarios/baseline.yaml")),
     )

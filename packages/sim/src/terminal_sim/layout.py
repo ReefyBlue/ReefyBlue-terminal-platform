@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-from terminal_model.layout import is_v2, load_terminal
+from terminal_model.layout import TerminalLayout, is_v2, load_terminal
 from terminal_model.layout_grid import grid_view
 from terminal_model.types import Position
 
@@ -40,6 +40,9 @@ class Layout:
     agv_start_cells: list[Cell]
     opcua_base_port: int = 48400
     opcua_host: str = "localhost"
+    # The metre layout behind a v2 file (None for a legacy grid file); ``make_world`` builds a
+    # ``World2`` when it is set.
+    terminal: TerminalLayout | None = None
 
 
 def _cell(v) -> Cell:
@@ -65,6 +68,7 @@ def _from_v2(path: Path) -> Layout:
         agv_start_cells=list(g.agv_start_cells),
         opcua_base_port=t.opcua.base_port,
         opcua_host=t.opcua.host,
+        terminal=t,
     )
 
 

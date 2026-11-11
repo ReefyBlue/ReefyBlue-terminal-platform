@@ -33,7 +33,7 @@ from terminal_model.types import JobType, Kind, State
 from terminal_opcua.port import OpcUaEquipmentPort
 from terminal_sim.layout import Layout, load_layout
 from terminal_sim.scenario import Scenario, load_scenario
-from terminal_sim.world import World
+from terminal_sim.world import make_world
 from terminal_sim.yard import Yard
 from terminal_tos_stub.allocator import SimpleSlotAllocator
 from terminal_tos_stub.client import EcsClient
@@ -52,6 +52,11 @@ _sleep = time.sleep  # patched in tests
 _clock = time.monotonic  # patched in tests
 
 RunFn = Callable[[Scenario, Layout, int], dict[str, float]]
+
+
+def n_asc(layout: Layout) -> int:
+    """ASCs of the layout: one per block, two (WS + LS) per block of a v2 layout."""
+    return len(layout.blocks) * (1 if layout.terminal is None else 2)
 
 
 def make_allocator(layout: Layout) -> SimpleSlotAllocator:
@@ -84,7 +89,7 @@ def run_once(scenario: Scenario, layout: Layout, seed: int, *, auto_release: boo
     (default: unattended) goes to the Dispatcher; without it a faulted device stays out
     until an operator releases it, which no one does in a runner run."""
     scenario = replace(scenario, seed=seed)
-    world = World(layout, scenario)
+    world = make_world(layout, scenario)
     allocator = make_allocator(layout)
     orders = make_workorders(scenario, layout, allocator, random.Random(seed))
     dispatcher = Dispatcher(world.port, allocator, auto_release=auto_release)
@@ -149,7 +154,7 @@ def _fleet_mismatch(got: dict[Kind, int], scenario: Scenario, layout: Layout) ->
     """The error message when the fleet counts ``got`` do not match the scenario, else
     ``None``: the gateway derives its upstream port table from ``--n-sts/--n-agv``, so a
     mismatch silently shifts ports."""
-    want = {Kind.STS: scenario.n_sts, Kind.AGV: scenario.n_agv, Kind.ASC: len(layout.blocks)}
+    want = {Kind.STS: scenario.n_sts, Kind.AGV: scenario.n_agv, Kind.ASC: n_asc(layout)}
     if all(got.get(k, 0) == n for k, n in want.items()):
         return None
     have = ", ".join(f"{k.value} {got.get(k, 0)}" for k in want)

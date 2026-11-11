@@ -40,14 +40,14 @@ class GatewayLayout:
 def load_gateway_layout(path: Path) -> GatewayLayout:
     """The equipment ids and ``opcua`` block of a layout file (no simulator import).
 
-    A v2 (metre) layout gives the same ids as the simulator's grid view: one ASC per block,
-    its waterside ASC (``asc_ws_id``)."""
+    A v2 (metre) layout gives the ids of the simulator's ``World2``: two ASCs per block, the
+    waterside (``asc_ws_id``) then the landside one (``asc_ls_id``)."""
     raw = yaml.safe_load(Path(path).read_text())
     if isinstance(raw, dict) and is_v2(raw):
         t = load_terminal(path)
         return GatewayLayout(
             sts=[_Sts(s.id) for s in t.sts],
-            blocks=[_Block(b.id, b.asc_ws_id) for b in t.blocks],
+            blocks=[_Block(b.id, a) for b in t.blocks for a in (b.asc_ws_id, b.asc_ls_id)],
             opcua_base_port=t.opcua.base_port,
             opcua_host=t.opcua.host,
         )

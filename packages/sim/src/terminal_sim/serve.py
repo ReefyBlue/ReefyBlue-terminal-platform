@@ -20,7 +20,7 @@ from terminal_model.port import EquipmentEvent
 from terminal_sim.layout import Layout, load_layout
 from terminal_sim.opcua_servers import ControlServer, EquipmentServer
 from terminal_sim.scenario import Scenario, load_scenario
-from terminal_sim.world import World
+from terminal_sim.world import make_world
 
 SIM_TICK_S = 1.0
 LAG_WARN_S = 5.0
@@ -34,10 +34,10 @@ class SimService:
         autostart: bool = False,
     ) -> None:
         self.scenario = scenario
-        self.world = World(layout, scenario)
+        self.world = make_world(layout, scenario)
         # Ports: equipment i (World order STS, AGV, ASC) on base_port + i, the clock server on
-        # base_port + n_equipment (n_sts + n_agv + one ASC per block; the gateway derives the
-        # same). The legacy fleet 2 + 6 + 4 keeps base_port + 12.
+        # base_port + n_equipment (n_sts + n_agv + one ASC per block, two - WS and LS - on a v2
+        # layout; the gateway derives the same). The legacy fleet 2 + 6 + 4 keeps base_port + 12.
         self.servers: dict[str, EquipmentServer] = {
             eid: EquipmentServer(eq, port=base_port + i, host=host)
             for i, (eid, eq) in enumerate(self.world.equipment.items())
