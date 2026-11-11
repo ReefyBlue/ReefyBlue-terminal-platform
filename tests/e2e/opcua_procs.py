@@ -30,13 +30,14 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def free_base_port() -> int:
-    """A base port whose 13 successors are free right now (best effort)."""
+def free_base_port(n_slots: int = 13) -> int:
+    """A base port whose ``n_slots`` successors (equipment + clock server) are free right now
+    (best effort)."""
     for _ in range(50):
         base = free_port() % 20000 + 20000
         try:
             socks = []
-            for p in range(base, base + 13):
+            for p in range(base, base + n_slots):
                 s = socket.socket()
                 socks.append(s)
                 s.bind(("127.0.0.1", p))
@@ -51,7 +52,10 @@ def free_base_port() -> int:
 
 async def _gateway_ready(endpoint: str, n_equipment: int) -> bool:
     """True once the gateway answers and mirrors ``n_equipment`` devices, none FAULT or
-    OFFLINE (OFFLINE: the gateway's placeholder before its first upstream connection)."""
+    OFFLINE (OFFLINE: the gateway's placeholder before its first upstream connection), and its
+    clock link to the sim's control server is up (``Clock/SpeedFactor`` stays 0.0 until the
+    gateway has read it from the sim, whose speed factor is > 0). Without the clock check a
+    ``Start`` right after readiness can be dropped ("Start not forwarded")."""
     client = Client(endpoint, timeout=2.0)
     try:
         await asyncio.wait_for(client.connect(), 2.0)
@@ -71,7 +75,10 @@ async def _gateway_ready(endpoint: str, n_equipment: int) -> bool:
                 elif name not in ("Clock",) and (await child.read_node_class()).name == "Object":
                     stack.append(child)
         down = {State.FAULT.value, State.OFFLINE.value}
-        return len(states) == n_equipment and not any(s in down for s in states)
+        if len(states) != n_equipment or any(s in down for s in states):
+            return False
+        clock = await terminal.get_child(f"{idx}:Clock")
+        return await (await clock.get_child(f"{idx}:SpeedFactor")).read_value() > 0
     except Exception:
         return False
     finally:
@@ -98,25 +105,29 @@ def sim_and_gateway(
     """Start sim then gateway on free ports; yield ``{"endpoint", "returncodes"}``.
 
     ``proxied_sts``: the gateway's upstream links run through a ``LinkProxy`` (gateway base
-    port P, every slot ``P+i -> B+i`` of the sim's base port B, control slot included);
+    port P, every slot ``P+i -> B+i`` of the sim's base port B, control slot
+    ``n_equipment`` included);
     ``info["proxy"]`` is it and ``info["sts_port"]`` the proxy port of STS-01 (slot 0), so
     ``proxy.cut([sts_port])`` drops only the gateway's link to STS-01.
 
     ``extra_sim_args`` are appended to the sim's command line (e.g. ``["--autostart"]``).
 
     ``layout`` is passed to the sim (``--layout``) and the gateway (``--config``); the fleet
-    the gateway mirrors is ``n_sts``/``n_agv`` plus one ASC per block of that layout.
+    the gateway mirrors is ``n_sts``/``n_agv`` plus one ASC per block of that layout, and
+    sim and gateway put the clock server on ``base + n_equipment``.
 
     On exit both get SIGTERM; their exit codes land in ``returncodes`` (sim, gateway).
     """
-    base = free_base_port()
+    n_equipment = n_sts + n_agv + len(load_layout(layout).blocks)  # 1 ASC/block
+    n_slots = n_equipment + 1  # + the clock server
+    base = free_base_port(n_slots)
     gw_base = base
     proxy = None
     if proxied_sts:
-        gw_base = free_base_port()
-        while abs(gw_base - base) < 13:
-            gw_base = free_base_port()
-        proxy = LinkProxy({gw_base + i: base + i for i in range(13)}).start()
+        gw_base = free_base_port(n_slots)
+        while abs(gw_base - base) < n_slots:
+            gw_base = free_base_port(n_slots)
+        proxy = LinkProxy({gw_base + i: base + i for i in range(n_slots)}).start()
     gw_port = free_port()
     sim_log = (log_dir / "sim.log").open("w")
     gw_log = (log_dir / "gateway.log").open("w")
@@ -134,7 +145,6 @@ def sim_and_gateway(
             "proxy": proxy, "sts_port": gw_base if proxy else None}
     try:
         deadline = time.monotonic() + READY_TIMEOUT_S
-        n_equipment = n_sts + n_agv + len(load_layout(layout).blocks)  # 1 ASC/block
         while not asyncio.run(_gateway_ready(endpoint, n_equipment)):
             if sim.poll() is not None or gw.poll() is not None:
                 raise RuntimeError(f"process died during startup; see {info['logs']}")

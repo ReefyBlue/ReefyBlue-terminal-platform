@@ -16,7 +16,6 @@ from terminal_gateway.mirror import RECONNECT_S, ControlMirror, EquipmentMirror
 
 log = logging.getLogger(__name__)
 
-CONTROL_PORT_OFFSET = 12  # same fixed slot as the simulator
 
 
 class _StsLike(Protocol):
@@ -53,8 +52,6 @@ def upstream_table(layout: LayoutLike, *, base_port: int, n_sts: int, n_agv: int
         table.append(Upstream(f"AGV-{i:02d}", Kind.AGV, base_port + len(table)))
     for b in layout.blocks:
         table.append(Upstream(b.asc_id, Kind.ASC, base_port + len(table), block=b.block))
-    if len(table) > CONTROL_PORT_OFFSET:
-        raise ValueError(f"{len(table)} equipment exceeds the {CONTROL_PORT_OFFSET} port slots")
     return table
 
 
@@ -70,6 +67,8 @@ class Gateway:
         self.reconnect_s = reconnect_s
         self.endpoint = f"opc.tcp://{host}:{port}/terminal/gateway"
         self.table = upstream_table(layout, base_port=base_port, n_sts=n_sts, n_agv=n_agv)
+        # The simulator's clock server: the slot after its equipment (base_port + n_equipment).
+        self.control_port = base_port + len(self.table)
         self.mirrors: dict[str, EquipmentMirror] = {}
         self.control: ControlMirror | None = None
         self._server: Server | None = None
@@ -125,7 +124,7 @@ class Gateway:
             self.mirrors[u.equipment_id] = m
         self.control = ControlMirror(
             server, idx, types, folders["Terminal"],
-            endpoint=self._url(self.base_port + CONTROL_PORT_OFFSET, "control"),
+            endpoint=self._url(self.control_port, "control"),
             on_sim_time=self._on_sim_time, reconnect_s=self.reconnect_s)
         await self.control.start()
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from terminal_gateway.gateway import upstream_table
+from terminal_gateway.gateway import Gateway, upstream_table
 from terminal_gateway.serve import load_gateway_layout
 from terminal_sim.layout import load_layout
 
@@ -32,3 +32,12 @@ def test_v2_small_upstream_table():
     ids = [u.equipment_id for u in upstream_table(g, base_port=0, n_sts=3, n_agv=5)]
     assert ids[:3] == ["STS-01", "STS-02", "STS-03"]
     assert ids[-4:] == [b.asc_id for b in g.blocks]
+
+
+def test_control_slot_follows_the_fleet():
+    """Clock server at ``base_port + n_equipment``, as in the simulator."""
+    legacy = load_gateway_layout(ROOT / "terminal.yaml")
+    small = load_gateway_layout(ROOT / "terminal_mv_small.yaml")
+    assert Gateway(legacy, upstream_host="h", base_port=30000).control_port == 30012  # 2 + 6 + 4
+    assert Gateway(legacy, upstream_host="h", base_port=30000, n_sts=1, n_agv=0).control_port == 30005
+    assert Gateway(small, upstream_host="h", base_port=30000, n_sts=3, n_agv=12).control_port == 30019

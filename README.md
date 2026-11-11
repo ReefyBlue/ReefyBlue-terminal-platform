@@ -81,7 +81,7 @@ Drie processen, elk met een eigen CLI (`--host` is overal het bindadres, default
 
 | Proces | CLI | Poorten |
 |---|---|---|
-| sim | `uv run python -m terminal_sim.serve scenarios/baseline.yaml [--layout terminal.yaml] [--base-port 48400] [--host 0.0.0.0] [--autostart]` | equipment-servers op `base-port + i` (max. 12, `opc.tcp://host:poort/terminal/<id>`), klokserver op `base-port + 12` (`/terminal/control`) |
+| sim | `uv run python -m terminal_sim.serve scenarios/baseline.yaml [--layout terminal.yaml] [--base-port 48400] [--host 0.0.0.0] [--autostart]` | equipment-servers op `base-port + i` (STS, AGV, ASC; `opc.tcp://host:poort/terminal/<id>`), klokserver op `base-port + n_equipment` (`/terminal/control`; n_sts + n_agv + 1 ASC per blok, bij 2 + 6 + 4 dus `base-port + 12`) |
 | gateway | `uv run python -m terminal_gateway.serve [--config terminal.yaml] [--port 4840] [--host 0.0.0.0] [--upstream-host H] [--base-port P] [--n-sts 2] [--n-agv 6]` | `4840`; `--upstream-host`/`--base-port` default uit `opcua.host`/`opcua.base_port` in `terminal.yaml`; `--n-sts`/`--n-agv` moeten bij het scenario van de sim passen |
 | runner | `uv run python -m terminal_runner.run scenarios/baseline.yaml --port opcua [--gateway opc.tcp://localhost:4840] [--out out/]` | client |
 
@@ -369,7 +369,7 @@ Twee bestanden worden door `scripts/gen_layouts.py` gegenereerd uit `terminal_mo
 uv run python -m terminal_runner.run tests/e2e/fixtures/mv_small_baseline.yaml --layout terminal_mv_small.yaml
 ```
 
-**Beperking:** de OPC UA-stack (sim + gateway) heeft 12 equipment-poorten met de klokserver vast op `base_port + 12`; `terminal_mv_small.yaml` met 3 STS + 12 AGV's + 4 ASC's (19 apparaten) past daar niet in, dus de v2-layouts draaien voorlopig alleen in-process.
+**OPC UA:** sim en gateway leiden het aantal poorten af uit de vloot (`n_sts + n_agv` + 1 ASC per blok); de klokserver staat op `base_port + n_equipment`. Op `terminal_mv_small.yaml` met 3 STS + 12 AGV's + 4 ASC's is dat `base_port + 19`; geef de gateway dan `--config terminal_mv_small.yaml --n-sts 3 --n-agv 12` (`tests/e2e/test_mv_small_opcua.py`).
 
 **Wat volgt.** C1b voegt kinematica toe (versnellen/rijden/afremmen, kraanassen), Lift-AGV's met racks en het ASC-paar per blok (waterzijde/landzijde op één spoor). C3 tekent de layout op schaal in de viewer uit `GET /layout`.
 

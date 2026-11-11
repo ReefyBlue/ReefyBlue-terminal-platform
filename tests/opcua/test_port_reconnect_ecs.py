@@ -49,7 +49,7 @@ async def test_dispatcher_uses_agv_again_after_link_blip():
             servers[eid] = EquipmentServer(eq, port=port_base + i, host="127.0.0.1")
     assert proxy is not None
     world.port.subscribe(lambda ev: servers[ev.equipment_id].on_emit(ev))
-    control = ControlServer(world, port=port_base + base.CONTROL_PORT_OFFSET,
+    control = ControlServer(world, port=port_base + len(world.equipment),
                             on_stop=lambda: None, host="127.0.0.1", on_start=lambda: True)
     await proxy.start()
     await asyncio.gather(*(s.start() for s in servers.values()), control.start())

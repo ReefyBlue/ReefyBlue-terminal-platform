@@ -1,11 +1,7 @@
 """Sim + gateway + ECS service on the v2 small layout (``terminal_mv_small.yaml``); the runner
 drives ``fixtures/mv_small_baseline.yaml`` (3 STS, 12 AGVs, 200 containers) over HTTP.
 
-Expected to fail until the OPC UA port layout grows: sim and gateway have 12 equipment slots
-with the clock server fixed at ``base_port + 12`` (Plan B1 spec), and this fleet is 19 devices
-(3 STS + 12 AGV + 4 ASC); the sim exits at startup. With the slot limit raised (experiment:
-32) it passes (200 done, 0 failed). ``strict``: an unexpected pass fails, so drop the marker
-together with the limit change."""
+19 devices (3 STS + 12 AGV + 4 ASC): the clock server sits on ``base_port + 19``."""
 
 from __future__ import annotations
 
@@ -27,8 +23,6 @@ log = logging.getLogger(__name__)
 
 
 @pytest.mark.e2e_opcua
-@pytest.mark.xfail(strict=True, raises=RuntimeError,
-                   reason="19 devices exceed the 12 OPC UA port slots (control fixed at base_port + 12)")
 def test_mv_small_baseline_over_opcua(tmp_path):
     layout = load_layout(LAYOUT)
     scenario = load_scenario(SCENARIO, layout)

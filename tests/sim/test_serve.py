@@ -30,7 +30,7 @@ duration_s: 1000
 def _free_base_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1] % 20000 + 20000  # base..base+12 stay below 40000
+        return s.getsockname()[1] % 20000 + 20000  # base..base+n_equipment stay below 40000
 
 
 def _scenario(tmp_path):
@@ -39,8 +39,11 @@ def _scenario(tmp_path):
     return p
 
 
+CONTROL_OFFSET = 7  # SCENARIO's fleet on terminal.yaml: 1 STS + 2 AGV + 4 ASC
+
+
 async def _control(port):
-    c = Client(f"opc.tcp://127.0.0.1:{port + 12}/terminal/control")
+    c = Client(f"opc.tcp://127.0.0.1:{port + CONTROL_OFFSET}/terminal/control")
     await c.connect()
     idx = await c.get_namespace_index("urn:terminal:model")
     obj = await c.nodes.objects.get_child([f"{idx}:Terminal", f"{idx}:Clock"])
@@ -199,12 +202,20 @@ def test_speed_factor_flag_overrides_scenario(monkeypatch, tmp_path):
         serve.main([str(_scenario(tmp_path)), "--speed-factor", "0"])
 
 
-def test_too_many_equipment_raises(tmp_path, monkeypatch):
-    from terminal_sim import serve
-    monkeypatch.setattr(serve, "MAX_EQUIPMENT", 2)
-    import pytest
-    with pytest.raises(ValueError):
-        SimService(load_scenario(_scenario(tmp_path)), load_layout(ROOT / "terminal.yaml"))
+def test_control_slot_follows_the_fleet(tmp_path):
+    """Clock server at ``base_port + n_equipment`` (n_sts + n_agv + one ASC per block)."""
+    from dataclasses import replace
+    legacy = load_layout(ROOT / "terminal.yaml")
+    small = SimService(load_scenario(_scenario(tmp_path)), legacy, base_port=30000)  # 1 + 2 + 4
+    assert small.control.port == 30007
+    assert [s.port for s in small.servers.values()] == list(range(30000, 30007))
+    full = SimService(replace(load_scenario(_scenario(tmp_path)), n_sts=2, n_agv=6), legacy,
+                      base_port=30000)
+    assert full.control.port == 30012  # the legacy fleet keeps base_port + 12
+    mv_small = load_layout(ROOT / "terminal_mv_small.yaml")
+    big = SimService(replace(load_scenario(_scenario(tmp_path)), n_sts=3, n_agv=12), mv_small,
+                     base_port=30000)
+    assert big.control.port == 30019
 
 
 def test_sigterm_exits_cleanly(tmp_path):
@@ -219,7 +230,7 @@ def test_sigterm_exits_cleanly(tmp_path):
         deadline = time.monotonic() + 45  # 13 servers start in ~15 s
         while time.monotonic() < deadline:
             try:
-                socket.create_connection(("127.0.0.1", port + 12), timeout=0.5).close()
+                socket.create_connection(("127.0.0.1", port + CONTROL_OFFSET), timeout=0.5).close()
                 break
             except OSError:
                 time.sleep(0.2)
