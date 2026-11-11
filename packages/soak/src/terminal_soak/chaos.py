@@ -6,7 +6,6 @@ import argparse
 import json
 import logging
 import signal
-import socket
 import threading
 import time
 from collections.abc import Callable
@@ -59,7 +58,8 @@ class Schedule:
             wait(self.for_s)
             proxy.restore()
             on_event("restore")
-            next_cut += self.every_s  # period measured cut-to-cut, not restore-to-cut
+            # Period is cut-to-cut; clamp so a paused process doesn't fire catch-up cuts.
+            next_cut = max(next_cut + self.every_s, clock())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,8 +72,10 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     target_host, _, port = args.target.rpartition(":")
-    target_ip = socket.gethostbyname(target_host)  # resolved once at start
-    proxy = LinkProxy({args.listen: int(port)}, host=target_ip, bind=args.host).start()
+    if not target_host or not port.isdigit():
+        ap.error("--target must be HOST:PORT")
+    # Hostname is passed through so LinkProxy resolves it on every connect (survives container IP changes).
+    proxy = LinkProxy({args.listen: int(port)}, host=target_host, bind=args.host).start()
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())

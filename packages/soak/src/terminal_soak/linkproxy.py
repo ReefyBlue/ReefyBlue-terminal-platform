@@ -6,6 +6,7 @@ import contextlib
 import socket
 import struct
 import threading
+import time
 
 
 class LinkProxy:
@@ -63,7 +64,10 @@ class LinkProxy:
             except TimeoutError:
                 continue
             except OSError:
-                return
+                if self._closed.is_set():
+                    return
+                time.sleep(0.05)  # transient accept error: keep serving
+                continue
             conn.settimeout(None)
             if not self._up[port]:
                 _reset(conn)
