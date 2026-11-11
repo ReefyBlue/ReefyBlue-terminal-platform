@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -43,6 +44,7 @@ from terminal_ecs_service.schemas import (
     ResolveIn,
     ResolveOut,
     StsOut,
+    TerminalOut,
     WorkOrderErrorOut,
     WorkOrderErrorsOut,
     WorkOrderIn,
@@ -255,6 +257,7 @@ def create_app(core: EcsCore, *, run_loop: bool = True) -> FastAPI:
     async def get_layout() -> LayoutOut:
         """Static terminal geometry; needs no equipment link."""
         lo = core.layout
+        terminal = getattr(lo, "terminal", None)  # v2 model; absent on legacy layouts
         return LayoutOut(
             quay_length_m=lo.quay_length_m,
             grid_cell_m=lo.grid_cell_m,
@@ -272,6 +275,8 @@ def create_app(core: EcsCore, *, run_loop: bool = True) -> FastAPI:
                 for b in lo.blocks
             ],
             agv_start_cells=[tuple(c) for c in lo.agv_start_cells],
+            version=2 if terminal is not None else 1,
+            terminal=TerminalOut.model_validate(dataclasses.asdict(terminal)) if terminal is not None else None,
         )
 
     @app.websocket("/events")

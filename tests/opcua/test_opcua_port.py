@@ -27,7 +27,6 @@ from terminal_sim.scenario import load_scenario
 from terminal_sim.world import World
 
 ROOT = Path(__file__).resolve().parents[2]
-CONTROL_PORT_OFFSET = 12
 
 pytestmark = pytest.mark.asyncio(loop_scope="module")
 
@@ -38,10 +37,25 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _free_base_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1] % 20000 + 20000
+def _free_base_port(n_slots: int = 13) -> int:
+    """A base port whose ``n_slots`` successors are bindable right now (best effort)."""
+    for _ in range(50):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            base = s.getsockname()[1] % 20000 + 20000
+        socks = []
+        try:
+            for p in range(base, base + n_slots):
+                sock = socket.socket()
+                socks.append(sock)
+                sock.bind(("127.0.0.1", p))
+            return base
+        except OSError:
+            continue
+        finally:
+            for sock in socks:
+                sock.close()
+    raise RuntimeError("no free port range")
 
 
 async def _until(pred, timeout: float, step: float = 0.01) -> bool:
@@ -78,7 +92,7 @@ async def _start_rig() -> Rig:
     r.world.port.subscribe(lambda ev: r.servers[ev.equipment_id].on_emit(ev))
     r.started = []
     r.control = ControlServer(
-        r.world, port=base + CONTROL_PORT_OFFSET, on_stop=lambda: None, host="127.0.0.1",
+        r.world, port=base + len(r.world.equipment), on_stop=lambda: None, host="127.0.0.1",
         on_start=lambda: r.started.append(1) or True)
     await asyncio.gather(*(s.start() for s in r.servers.values()), r.control.start())
     await r.step(0.0)

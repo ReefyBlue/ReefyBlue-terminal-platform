@@ -1,0 +1,21 @@
+{
+  "moves_per_hour_total": 90.22556390977442,
+  "moves_per_hour_STS-01": 30.225563909774433,
+  "moves_per_hour_STS-02": 30.225563909774433,
+  "moves_per_hour_STS-03": 29.774436090225564,
+  "agv_wait_sts_s_mean": 183.93385893240858,
+  "agv_wait_tp_s_mean": 0.0,
+  "agv_travel_s_mean": 55.151666666666216,
+  "utilisation_STS": 0.9649122807017544,
+  "utilisation_AGV": 0.6428571428571429,
+  "utilisation_ASC": 0.22932330827067668,
+  "vessel_turnaround_s": 7664.950488610867,
+  "faults": 0.0,
+  "replans": 0.0,
+  "energy_kwh_per_move": 8.084519999999994,
+  "containers_done": 200.0,
+  "containers_failed": 0.0,
+  "containers_stuck": 0.0,
+  "sim_elapsed_s": 7980.0,
+  "timed_out": 0.0
+}

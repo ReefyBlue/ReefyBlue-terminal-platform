@@ -65,7 +65,7 @@ OFFLINE: zie Plan B2d-spec (`2026-11-10-plan-b2d-link-loss-design.md`) — extra
 
 ## 5. Equipment-servers (in het sim-proces)
 
-- Eén asyncua-server per apparaat: poort `base_port + index` in de volgorde van `World.equipment` (STS, AGV, ASC), controlserver (ControlType) op `base_port + 12`. Endpoint `opc.tcp://0.0.0.0:<poort>/terminal/<equipment_id>`.
+- Eén asyncua-server per apparaat: poort `base_port + index` in de volgorde van `World.equipment` (STS, AGV, ASC), controlserver (ControlType) op `base_port + 12`. *(Bijgesteld in Plan C1a: op `base_port + n_equipment` met n_equipment = n_sts + n_agv + 1 ASC per blok, aan sim- en gatewayzijde gelijk afgeleid; voor de legacy-vloot 2 + 6 + 4 blijft dat `+ 12`.)* Endpoint `opc.tcp://0.0.0.0:<poort>/terminal/<equipment_id>`.
 - Salabim en asyncio delen één thread: een asyncio-taak doet de pacing (§2) en roept `env.run(till=…)` aan; methode-aanroepen van clients komen via asyncua op dezelfde event loop binnen en worden direct op het Equipment uitgevoerd (de simloop staat op dat moment stil tussen twee ticks). Geen threads, geen locks.
 - `emit` van elk Equipment schrijft `LastEvent` en verhoogt `EventSeq`; daarna worden `State`, `CurrentJobId`, positie en `Extra` bijgewerkt. Variabelen worden na elke tick gesynchroniseerd vanuit `snapshot()` (niet per Salabim-stap).
 - `FaultInjector` blijft werken zoals in Plan A.

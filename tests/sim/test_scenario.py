@@ -2,9 +2,11 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from terminal_model.types import Kind
+from terminal_sim.layout import load_layout
 from terminal_sim.scenario import load_scenario
+
+ROOT = Path(__file__).resolve().parents[2]
 
 BASE = dict(
     name="t", seed=1, n_sts=2, n_agv=6, n_containers=200, share_40ft=0.6,
@@ -30,7 +32,7 @@ def test_agv4_and_faults_scenarios():
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("n_agv", 0), ("n_sts", 0), ("n_agv", 7), ("n_sts", 3),
+        ("n_agv", 0), ("n_sts", 0),
         ("n_containers", 0), ("share_40ft", 1.5), ("share_40ft", -0.1),
     ],
 )
@@ -39,6 +41,34 @@ def test_scenario_rejects(tmp_path, field, value):
     p.write_text(yaml.safe_dump({**BASE, field: value}))
     with pytest.raises(ValueError, match=field):
         load_scenario(p)
+
+
+def test_without_layout_only_lower_bounds(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump({**BASE, "n_sts": 3, "n_agv": 12}))
+    s = load_scenario(p)
+    assert (s.n_sts, s.n_agv) == (3, 12)
+
+
+@pytest.mark.parametrize(
+    "layout,field,value,limit",
+    [
+        ("terminal.yaml", "n_sts", 3, 2), ("terminal.yaml", "n_agv", 7, 6),
+        ("terminal_mv_small.yaml", "n_sts", 4, 3), ("terminal_mv_small.yaml", "n_agv", 13, 12),
+    ],
+)
+def test_layout_caps_fleet(tmp_path, layout, field, value, limit):
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump({**BASE, field: value}))
+    with pytest.raises(ValueError, match=rf"{field} must be 1\.\.{limit} for layout"):
+        load_scenario(p, load_layout(ROOT / layout))
+
+
+def test_layout_allows_its_full_fleet(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump({**BASE, "n_sts": 3, "n_agv": 12}))
+    s = load_scenario(p, load_layout(ROOT / "terminal_mv_small.yaml"))
+    assert (s.n_sts, s.n_agv) == (3, 12)
 
 
 @pytest.mark.parametrize(

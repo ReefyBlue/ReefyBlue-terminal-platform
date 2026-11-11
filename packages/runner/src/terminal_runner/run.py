@@ -393,8 +393,8 @@ def run_replications(
 ) -> Path:
     """Run ``replications`` seeds (``scenario.seed + i``); write ``<name>.csv`` and
     ``<name>-summary.json`` (per KPI mean / p5 / p95) to ``out_dir``. Returns the summary path."""
-    scenario = load_scenario(scenario_path)
     layout = load_layout(layout_path)
+    scenario = load_scenario(scenario_path, layout)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / f"{scenario.name}.csv"

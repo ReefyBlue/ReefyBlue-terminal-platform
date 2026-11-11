@@ -30,8 +30,8 @@ Tests: `uv run pytest -q` (inclusief de e2e-runs met 200 containers, marker `e2e
 |---|---|
 | `name` | naam; bepaalt de bestandsnamen van de uitvoer |
 | `seed` | startseed (replicatie i gebruikt `seed + i`) |
-| `n_sts` | aantal STS-kranen (1..2) |
-| `n_agv` | aantal AGV's (1..6) |
+| `n_sts` | aantal STS-kranen (1..aantal STS in de layout) |
+| `n_agv` | aantal AGV's (1..aantal startcellen in de layout: 6 in `terminal.yaml`, 12 in `terminal_mv_small.yaml`) |
 | `n_containers` | aantal containers (werkorders) |
 | `share_40ft` | aandeel 40ft-containers (0..1); niet gebruikt in Plan A (voorbereid) |
 | `discharge_share` | aandeel lossen (1.0 = alleen lossen, 0 = alleen laden) |
@@ -81,7 +81,7 @@ Drie processen, elk met een eigen CLI (`--host` is overal het bindadres, default
 
 | Proces | CLI | Poorten |
 |---|---|---|
-| sim | `uv run python -m terminal_sim.serve scenarios/baseline.yaml [--layout terminal.yaml] [--base-port 48400] [--host 0.0.0.0] [--autostart]` | equipment-servers op `base-port + i` (max. 12, `opc.tcp://host:poort/terminal/<id>`), klokserver op `base-port + 12` (`/terminal/control`) |
+| sim | `uv run python -m terminal_sim.serve scenarios/baseline.yaml [--layout terminal.yaml] [--base-port 48400] [--host 0.0.0.0] [--autostart]` | equipment-servers op `base-port + i` (STS, AGV, ASC; `opc.tcp://host:poort/terminal/<id>`), klokserver op `base-port + n_equipment` (`/terminal/control`; n_sts + n_agv + 1 ASC per blok, bij 2 + 6 + 4 dus `base-port + 12`) |
 | gateway | `uv run python -m terminal_gateway.serve [--config terminal.yaml] [--port 4840] [--host 0.0.0.0] [--upstream-host H] [--base-port P] [--n-sts 2] [--n-agv 6]` | `4840`; `--upstream-host`/`--base-port` default uit `opcua.host`/`opcua.base_port` in `terminal.yaml`; `--n-sts`/`--n-agv` moeten bij het scenario van de sim passen |
 | runner | `uv run python -m terminal_runner.run scenarios/baseline.yaml --port opcua [--gateway opc.tcp://localhost:4840] [--out out/]` | client |
 
@@ -337,6 +337,41 @@ Een kale `docker compose up -d` na het wijzigen van `.env` gaat mis: (a) compose
 - Scenario of `SPEED_FACTOR` wijzigen met alleen `docker compose up -d`: sim-tijd terug → ECS `sim_time_reversed`, `/health` 503 voor de rest van de run (healthcheck blijft groen), en een geëindigde `soak` voegt een tweede run toe aan `samples.jsonl`. Gebruik `down` → (`collect.sh`) → `down -v` → `up -d --build`, zie hierboven.
 - Een herstart van de NAS beëindigt de soak-run stil: `soak` heeft `restart: on-failure` en komt na een reboot niet terug (de andere services wel, `unless-stopped`). Draai daarna `./collect.sh`; het rapport beoordeelt het onvolledige venster niet.
 - Ontbreekt de container van een service bij `collect.sh`, dan staat die service niet in `restarts.json` en meldt het rapport criterium 1 als "niet gemeten" voor die service.
+
+## Layout in meters (C1a)
+
+Naast de legacy grid-layout `terminal.yaml` (geen `version`-sleutel; laadt precies als voorheen, alle bestaande tests en fixtures draaien erop) bestaat een **v2-layout in meters** (`version: 2`, `terminal_model.layout`). Oorsprong is de westhoek van de kade, x loopt langs de kade, y landinwaarts. Een v2-bestand beschrijft de kade met ligplaatsen, de STS-rails (y 10 / 40) en de STS'en met elk 3 transfer-lanes, de apron (rijbanen, kruisingen, AGV-buffers), per blok een transferzone met racks, de blokken (bays × rijen × tiers, pitch 6,5 / 2,9 / 2,9 m, ASC-paar `ASC-<blok>-WS`/`-LS`), de truckkoppen aan de landzijde, de zones en het `opcua`-blok. Het laden valideert overlap, ligging en id's. Mini-voorbeeld (ingekort):
+
+```yaml
+version: 2
+name: mv_small
+quay: {length_m: 400.0, berths: [{id: A, from_m: 0.0, to_m: 400.0}]}
+sts_rails: {y_ws_m: 10.0, y_ls_m: 40.0}
+sts:
+- id: STS-01
+  x0_m: 66.667
+  lanes: [{id: STS-01-L1, x_m: 63.167, y_m: 45.0, len_m: 16.0, width_m: 3.5}, ...]
+blocks:
+- {id: A, x0_m: 25.0, y0_m: 165.0, bays: 40, rows: 10, tiers: 5, asc_ws_id: ASC-A-WS, asc_ls_id: ASC-A-LS}
+# + apron, transfer_zones, landside, zones, opcua
+```
+
+Twee bestanden worden door `scripts/gen_layouts.py` gegenereerd uit `terminal_model.layout_builder` (niet met de hand wijzigen; `tests/model/test_layout_builder.py` controleert dat ze kloppen; opnieuw maken met `uv run python scripts/gen_layouts.py`):
+
+| Bestand | Inhoud | Gebruik |
+|---|---|---|
+| `terminal_mv_small.yaml` | 400 m kade, 3 STS, 4 blokken, 12 AGV-buffers, diepte 460 m (grid 20 × 23) | testlayout: snelle runs en e2e |
+| `terminal_mv.yaml` | 1 200 m kade, 2 ligplaatsen, 8 STS, 24 blokken (A–X), yard y 165–425, truckkop 425–460 | demo/soak |
+
+**Afgeleid grid.** De simulator, de gateway en de ECS-service werken in C1a nog op het 20 m-grid; dat wordt uit de meters berekend (`terminal_model.layout_grid`, een view, geen bron): `cols = ceil(kadelengte / 20)`, `rows = ceil(diepte / 20)` met diepte = de verste blok- of truckkop-rand. De twee **lane-cellen** van een STS zijn de cellen van zijn lane-middens (ontdubbeld, de eerste twee); de **tp-cel** van een blok is de cel van rack 1 in zijn transferzone en de legacy `asc_id` is de waterzijde-ASC; de **startcellen** van de AGV's zijn de buffercellen in STS-volgorde. `terminal_sim.layout.load_layout` en de gateway (`--config`) herkennen `version: 2` zelf; `GET /layout` geeft `version: 2` met het volledige model onder `terminal` naast de legacy grid-velden. Een scenario mag hoogstens zoveel STS'en en AGV's vragen als de layout heeft (`load_scenario(pad, layout)`), bijvoorbeeld `tests/e2e/fixtures/mv_small_baseline.yaml` (3 STS, 12 AGV's):
+
+```bash
+uv run python -m terminal_runner.run tests/e2e/fixtures/mv_small_baseline.yaml --layout terminal_mv_small.yaml
+```
+
+**OPC UA:** sim en gateway leiden het aantal poorten af uit de vloot (`n_sts + n_agv` + 1 ASC per blok); de klokserver staat op `base_port + n_equipment`. Op `terminal_mv_small.yaml` met 3 STS + 12 AGV's + 4 ASC's is dat `base_port + 19`; geef de gateway dan `--config terminal_mv_small.yaml --n-sts 3 --n-agv 12` (`tests/e2e/test_mv_small_opcua.py`).
+
+**Wat volgt.** C1b voegt kinematica toe (versnellen/rijden/afremmen, kraanassen), Lift-AGV's met racks en het ASC-paar per blok (waterzijde/landzijde op één spoor). C3 tekent de layout op schaal in de viewer uit `GET /layout`.
 
 ## Verder
 

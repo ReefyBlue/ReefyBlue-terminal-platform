@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class WorkOrderIn(BaseModel):
@@ -112,3 +112,132 @@ class LayoutOut(BaseModel):
     sts: list[StsOut]
     blocks: list[BlockOut]
     agv_start_cells: list[tuple[int, int]]
+    version: int = 1  # 1 = legacy terminal.yaml, 2 = v2 terminal model
+    terminal: TerminalOut | None = None  # the v2 model (zones inside); None for v1
+
+
+class _Strict(BaseModel):
+    """Base of the TerminalOut sub-models: unknown keys are an error, so a field added to a
+    ``terminal_model.layout`` dataclass fails loudly instead of being dropped silently."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class BerthOut(_Strict):
+    id: str
+    from_m: float
+    to_m: float
+
+
+class QuayOut(_Strict):
+    length_m: float
+    berths: list[BerthOut]
+
+
+class RailsOut(_Strict):
+    y_ws_m: float
+    y_ls_m: float
+
+
+class LaneOut(_Strict):
+    id: str
+    x_m: float
+    y_m: float
+    len_m: float
+    width_m: float
+
+
+class StsSpecOut(_Strict):
+    id: str
+    x0_m: float
+    min_gap_m: float
+    berth_ids: list[str]
+    lanes: list[LaneOut]
+
+
+class DriveLaneOut(_Strict):
+    id: str
+    y_m: float
+    direction: Literal["E", "W"]
+
+
+class BufferOut(_Strict):
+    id: str
+    x_m: float
+    y_m: float
+    sts_id: str
+
+
+class ApronOut(_Strict):
+    y_from_m: float
+    y_to_m: float
+    drive_lanes: list[DriveLaneOut]
+    crossings_every_m: float
+    buffers: list[BufferOut]
+
+
+class RackOut(_Strict):
+    id: str
+    x_m: float
+    y_m: float
+    size: Literal["20", "40", "45"]
+    reefer: bool = False
+
+
+class TransferZoneOut(_Strict):
+    block: str
+    racks: list[RackOut]
+    approach_lane_id: str
+
+
+class TerminalBlockOut(_Strict):
+    id: str
+    x0_m: float
+    y0_m: float
+    bays: int
+    rows: int
+    tiers: int
+    asc_ws_id: str
+    asc_ls_id: str
+    bay_pitch_m: float
+    row_pitch_m: float
+    tier_h_m: float
+    asc_min_gap_bays: int
+    maintenance_lane_side: Literal["E", "W"]
+    reefer_rows: list[int]
+
+
+class TruckHeadOut(_Strict):
+    block: str
+    lanes: int
+    y_m: float
+    len_m: float
+
+
+class ZoneOut(_Strict):
+    name: str
+    type: str
+    polygon: list[tuple[float, float]]
+
+
+class OpcUaOut(_Strict):
+    base_port: int
+    host: str
+
+
+class TerminalOut(_Strict):
+    """The v2 terminal model (mirrors ``terminal_model.layout.TerminalLayout``; metres)."""
+
+    name: str
+    quay: QuayOut
+    sts_rails: RailsOut
+    sts: list[StsSpecOut]
+    apron: ApronOut
+    transfer_zones: list[TransferZoneOut]
+    blocks: list[TerminalBlockOut]
+    landside: list[TruckHeadOut]
+    zones: list[ZoneOut]
+    opcua: OpcUaOut
+
+
+LayoutOut.model_rebuild()

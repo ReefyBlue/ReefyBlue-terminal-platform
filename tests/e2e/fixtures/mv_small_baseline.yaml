@@ -1,0 +1,10 @@
+# scenarios/baseline.yaml on terminal_mv_small.yaml: 3 STS, 12 AGVs (one per buffer).
+name: mv_small_baseline
+seed: 1
+n_sts: 3
+n_agv: 12
+n_containers: 200
+share_40ft: 0.6
+discharge_share: 1.0
+speed_factor: 50
+duration_s: 43200

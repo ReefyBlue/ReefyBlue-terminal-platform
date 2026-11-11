@@ -23,8 +23,6 @@ from terminal_sim.scenario import Scenario, load_scenario
 from terminal_sim.world import World
 
 SIM_TICK_S = 1.0
-MAX_EQUIPMENT = 12
-CONTROL_PORT_OFFSET = 12  # fixed by the spec
 LAG_WARN_S = 5.0
 
 log = logging.getLogger("terminal_sim.serve")
@@ -37,16 +35,15 @@ class SimService:
     ) -> None:
         self.scenario = scenario
         self.world = World(layout, scenario)
-        if len(self.world.equipment) > MAX_EQUIPMENT:
-            raise ValueError(
-                f"{len(self.world.equipment)} equipment exceeds the {MAX_EQUIPMENT} port slots"
-            )
+        # Ports: equipment i (World order STS, AGV, ASC) on base_port + i, the clock server on
+        # base_port + n_equipment (n_sts + n_agv + one ASC per block; the gateway derives the
+        # same). The legacy fleet 2 + 6 + 4 keeps base_port + 12.
         self.servers: dict[str, EquipmentServer] = {
             eid: EquipmentServer(eq, port=base_port + i, host=host)
             for i, (eid, eq) in enumerate(self.world.equipment.items())
         }
         self.control = ControlServer(
-            self.world, port=base_port + CONTROL_PORT_OFFSET, on_stop=self.stop, host=host,
+            self.world, port=base_port + len(self.world.equipment), on_stop=self.stop, host=host,
             on_start=self.start,
         )
         self.world.port.subscribe(self._route)
@@ -136,11 +133,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.speed_factor is not None and args.speed_factor <= 0:
         ap.error("--speed-factor must be > 0")
     configure_json_logging()
-    scenario = load_scenario(args.scenario)
+    layout = load_layout(args.layout)
+    scenario = load_scenario(args.scenario, layout)
     if args.speed_factor is not None:
         scenario = dataclasses.replace(scenario, speed_factor=args.speed_factor)
     service = SimService(
-        scenario, load_layout(args.layout),
+        scenario, layout,
         base_port=args.base_port, host=args.host, autostart=args.autostart,
     )
     asyncio.run(_amain(service))

@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "terminal-model"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["pyyaml>=6"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terminal_model"]

@@ -37,7 +37,7 @@ def _free_port() -> int:
 def _free_base_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1] % 20000 + 20000  # base..base+12 stay below 40000
+        return s.getsockname()[1] % 20000 + 20000  # base..base+n_equipment stay below 40000
 
 
 async def _wait_for(pred, timeout: float, step: float = 0.01):
@@ -200,7 +200,7 @@ async def test_prefill_forwarded(rig):
         now=lambda: 0.0, yard=Yard(rig.layout.blocks),
         scenario=SimpleNamespace(speed_factor=10.0))
     started = []
-    rig.control = ControlServer(world, port=rig.base + 12, on_stop=lambda: None, host="127.0.0.1",
+    rig.control = ControlServer(world, port=rig.gateway.control_port, on_stop=lambda: None, host="127.0.0.1",
                                 on_start=lambda: started.append(1) or True)
     await rig.control.start()
     await rig.control.sync()
