@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-
+from terminal_model.layout import is_v2, load_terminal
+from terminal_model.layout_grid import grid_view
 from terminal_model.types import Position
 
 Cell = tuple[int, int]  # (col, row)
@@ -45,8 +46,32 @@ def _cell(v) -> Cell:
     return (int(v[0]), int(v[1]))
 
 
+def _from_v2(path: Path) -> Layout:
+    """A v2 (metre) layout seen through its derived grid (``terminal_model.layout_grid``)."""
+    t = load_terminal(path)
+    g = grid_view(t)
+    return Layout(
+        quay_length_m=t.quay.length_m,
+        grid_cell_m=g.cell_m,
+        grid_cols=g.cols,
+        grid_rows=g.rows,
+        sts=[StsSpec(equipment_id=s.id, position=Position(s.x_m, s.y_m), lane_cells=s.lane_cells)
+             for s in g.sts],
+        blocks=[
+            BlockSpec(block=b.id, asc_id=b.asc_id, tp_ws=Position(*b.tp_ws_m),
+                      tp_ws_cell=b.tp_ws_cell, bays=b.bays, rows=b.rows, tiers=b.tiers)
+            for b in g.blocks
+        ],
+        agv_start_cells=list(g.agv_start_cells),
+        opcua_base_port=t.opcua.base_port,
+        opcua_host=t.opcua.host,
+    )
+
+
 def load_layout(path: Path) -> Layout:
     raw = yaml.safe_load(Path(path).read_text())
+    if isinstance(raw, dict) and is_v2(raw):
+        return _from_v2(path)
     sts = [
         StsSpec(
             equipment_id=s["id"],
