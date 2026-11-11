@@ -8,6 +8,8 @@ crane's extent is its claimed interval while it moves and its position otherwise
 - ``claim(asc, from, to, deadline_s)`` reserves the interval of a gantry move; False (and the
   wish is remembered) when it would come closer than the gap to the other crane's extent.
 - ``release(asc, at)`` ends the move at ``at``.
+- ``expire(now)``: a claim held past its ``deadline_s`` is dropped and its owner told
+  (``on_expire``; the ASC fails its job with ``TRACK_TIMEOUT``). The waiting partner calls it.
 - ``yield_request(from_asc, to_asc)`` asks the other crane to clear the last refused wish of
   ``from_asc``: it gets a target position (as far as needed, within the track limits) and its
   ``on_yield`` callback is called. Who honours it when is the cranes' business: an idle crane
@@ -35,15 +37,19 @@ class BlockTrack:
         self.wanted: dict[str, tuple[float, float]] = {}
         self.requests: dict[str, float] = {}
         self._on_yield: dict[str, Callable[[], None]] = {}
+        self._on_expire: dict[str, Callable[[], None]] = {}
 
     def register(self, asc_id: str, role: str, pos: float,
-                 on_yield: Callable[[], None] | None = None) -> None:
+                 on_yield: Callable[[], None] | None = None,
+                 on_expire: Callable[[], None] | None = None) -> None:
         if role not in (WS, LS) or role in self.role.values():
             raise ValueError(f"bad or duplicate role {role!r}")
         self.role[asc_id] = role
         self.pos[asc_id] = float(pos)
         if on_yield is not None:
             self._on_yield[asc_id] = on_yield
+        if on_expire is not None:
+            self._on_expire[asc_id] = on_expire
         if len(self.role) == 2 and self.separation() < self.gap - 1e-9:
             raise ValueError("cranes registered closer than the minimum gap")
 
@@ -90,6 +96,17 @@ class BlockTrack:
             self.pos[asc_id] = float(at)
         self.claims.pop(asc_id, None)
         self.deadlines.pop(asc_id, None)
+
+    def expire(self, now: float) -> list[str]:
+        """Drop every claim whose deadline has passed; the owner's ``on_expire`` is called first
+        (it stops the crane and releases at its actual position). Returns the expired ids."""
+        out = [a for a, d in self.deadlines.items() if a in self.claims and d < now]
+        for a in out:
+            cb = self._on_expire.get(a)
+            if cb is not None:
+                cb()
+            self.release(a)
+        return out
 
     def yield_request(self, from_asc: str, to_asc: str) -> float | None:
         """Target position for ``to_asc`` clearing ``from_asc``'s refused wish (None: no wish)."""

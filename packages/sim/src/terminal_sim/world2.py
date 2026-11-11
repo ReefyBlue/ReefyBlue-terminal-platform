@@ -132,6 +132,7 @@ class World2:
         self.vessels = {b.id: Vessel(b, bays=scenario.vessel_bays) for b in t.quay.berths}
         self.yard = StackYard(self.stack, t)
         self.points: dict[str, str] = {}  # lane/rack id -> AGV id
+        self.rack_res: dict[str, str] = {}  # rack id -> equipment id that will set a box on it
         self.port = SimEquipmentPort(self)
         self.equipment: dict[str, Equipment] = {}
         emit = self.port._dispatch
@@ -249,7 +250,8 @@ class World2:
         return None
 
     def lane_accepts(self, sts: Sts2, lane_id: str, cid: str) -> bool:
-        return self._waiting_agv(lane_id, cid) is not None or sts.lane_buffer[lane_id] is None
+        """A buffered box blocks its lane: nothing is set down there until it is fetched."""
+        return sts.lane_buffer[lane_id] is None
 
     def lane_has_box(self, sts: Sts2, lane_id: str, cid: str) -> bool:
         if sts.lane_buffer[lane_id] == cid:
@@ -263,21 +265,24 @@ class World2:
         agv = self._waiting_agv(lane_id, cid)
         if agv is not None:
             agv.load(cid)
+            sts.holding = None
             return agv.equipment_id
         if sts.lane_buffer[lane_id] is not None:
             raise ValueError(f"lane {lane_id} buffer holds {sts.lane_buffer[lane_id]}")
         sts.lane_buffer[lane_id] = cid
+        sts.holding = None
         return "BUFFER"
 
     def transfer_lane_to_sts(self, sts: Sts2, lane_id: str, cid: str) -> None:
         """LOAD: the STS takes ``cid`` from the lane buffer or the AGV in the lane."""
         if sts.lane_buffer[lane_id] == cid:
             sts.lane_buffer[lane_id] = None
-            return
-        agv = self.agv_at(lane_id)
-        if agv is None or not agv.carries(cid):
-            raise ValueError(f"{cid} is not in lane {lane_id}")
-        agv.unload(cid)
+        else:
+            agv = self.agv_at(lane_id)
+            if agv is None or not agv.carries(cid):
+                raise ValueError(f"{cid} is not in lane {lane_id}")
+            agv.unload(cid)
+        sts.holding = cid
 
     def transfer_lane_to_agv(self, agv: LiftAGV, lane_id: str, cid: str) -> None:
         sts = self._sts_of_lane(lane_id)
@@ -290,8 +295,28 @@ class World2:
     def rack_occupant(self, rack_id: str) -> str | None:
         return self.racks.occupant(rack_id)
 
-    def transfer_agv_to_rack(self, agv: LiftAGV, rack_id: str, cid: str) -> None:
+    def reserve_rack(self, rack_id: str, eid: str) -> bool:
+        """Book an empty rack for a set-down by ``eid`` (AGV or ASC); False if it holds a box
+        or is booked by someone else. Taken before the final approach, released on the put
+        (or by ``release_racks`` when the job ends early)."""
+        holder = self.rack_res.get(rack_id)
+        if self.racks.occupant(rack_id) is not None or (holder is not None and holder != eid):
+            return False
+        self.rack_res[rack_id] = eid
+        return True
+
+    def release_racks(self, eid: str) -> None:
+        for rack_id in [r for r, h in self.rack_res.items() if h == eid]:
+            del self.rack_res[rack_id]
+
+    def _put_rack(self, rack_id: str, cid: str, eid: str) -> None:
+        if self.rack_res.get(rack_id) != eid:
+            raise ValueError(f"rack {rack_id} not booked by {eid}")
         self.racks.put(rack_id, cid)
+        del self.rack_res[rack_id]
+
+    def transfer_agv_to_rack(self, agv: LiftAGV, rack_id: str, cid: str) -> None:
+        self._put_rack(rack_id, cid, agv.equipment_id)
         agv.unload(cid)
 
     def transfer_rack_to_agv(self, agv: LiftAGV, rack_id: str, cid: str) -> None:
@@ -307,7 +332,7 @@ class World2:
         asc.holding = cid
 
     def transfer_asc_to_rack(self, asc: Asc2, rack_id: str, cid: str) -> None:
-        self.racks.put(rack_id, cid)
+        self._put_rack(rack_id, cid, asc.equipment_id)
         asc.holding = None
 
 

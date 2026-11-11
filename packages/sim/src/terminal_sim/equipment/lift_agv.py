@@ -108,6 +108,7 @@ class LiftAGV(Equipment):
         return ok
 
     def _abort(self) -> None:
+        self.hub.release_racks(self.equipment_id)
         self.grid.set_waiting(self.equipment_id, None)
         if self._pending is not None:
             self.grid.release(self._pending, self.equipment_id)
@@ -238,19 +239,26 @@ class LiftAGV(Equipment):
                 while not self.hub.reserve_point(pid, self.equipment_id):
                     yield self.hold(RESERVE_RETRY_S)
                 self.point_res = pid
+                if kind == "RACK" and self.carries(job.container_id) and not self.hub.reserve_rack(
+                        pid, self.equipment_id):
+                    self.fail_job("RACK_OCCUPIED")  # before the final approach; box stays on board
+                    return
                 dist = self.position.distance_to(pxy)
                 yield from self._drive(self.kin.zone, dist, pxy)
                 self.at_point = pid
         cid = job.container_id
         if kind == "RACK":
             if self.carries(cid):
-                if self.hub.rack_occupant(pid) is not None:
+                if not self.hub.reserve_rack(pid, self.equipment_id):
                     self.fail_job("RACK_OCCUPIED")
                     return
                 yield from self._lift()
-                self.hub.transfer_agv_to_rack(self, pid, cid)
+                self.hub.transfer_agv_to_rack(self, pid, cid)  # booked: cannot be taken meanwhile
             elif self.free_slot() is not None and self.hub.rack_occupant(pid) == cid:
                 yield from self._lift()
+                if self.hub.rack_occupant(pid) != cid:  # an ASC lifted it meanwhile
+                    self.fail_job("RACK_EMPTY")
+                    return
                 self.hub.transfer_rack_to_agv(self, pid, cid)
             else:
                 self.fail_job("RACK_EMPTY")

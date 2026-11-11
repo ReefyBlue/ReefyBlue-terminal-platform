@@ -65,6 +65,8 @@ class Sts2(Equipment):
         self.wait_for_agv_s = 0.0  # of the current / last move
         self.wait_for_agv_total_s = 0.0
         self.moves = 0
+        self.holding: str | None = None  # box in the spreader (survives a failed job)
+        self.holding_type: JobType | None = None
 
     # --- acceptance ---------------------------------------------------------
     def _parse(self, job: Job) -> tuple[VesselLoc, LaneLoc] | None:
@@ -89,6 +91,9 @@ class Sts2(Equipment):
             self.vessels[v.berth].check(v.bay, v.row, v.tier)
         except ValueError:
             return False
+        if self.holding is not None and (job.container_id != self.holding
+                                         or job.type is not self.holding_type):
+            return False  # first set the held box down (re-issue its job)
         return ln.lane_id == "*" or ln.lane_id in self.lanes
 
     # --- abort ----------------------------------------------------------------
@@ -128,6 +133,21 @@ class Sts2(Equipment):
         yield from sampled_hold(self, seg.duration, upd)
         self.trolley_pos_m, self.hoist_pos_m = seg.trolley_to, seg.hoist_to
 
+    def _reposition(self, seg: Segment, *, laden: bool) -> Iterator:
+        """From the spreader's current trolley/hoist position to the start of ``seg`` (no jumps
+        between moves): hoist up if the trolley has to travel, trolley, then hoist."""
+        ax = self.kin.hoist_laden if laden else self.kin.hoist_empty
+        y, h = self.trolley_pos_m, self.hoist_pos_m
+        if abs(y - seg.trolley_from) > 1e-9:
+            if seg.hoist_from > h:
+                yield from self._segment(Segment("reposition_up", ax, y, y, h, seg.hoist_from))
+                h = seg.hoist_from
+            yield from self._segment(Segment("reposition_trolley", self.kin.trolley, y,
+                                             seg.trolley_from, h, h))
+            y = seg.trolley_from
+        if abs(h - seg.hoist_from) > 1e-9:
+            yield from self._segment(Segment("reposition_hoist", ax, y, y, h, seg.hoist_from))
+
     def _wait_agv(self, cond: Callable[[], bool]) -> Iterator:
         while not cond():
             yield self.hold(STS_POLL_S)
@@ -155,6 +175,7 @@ class Sts2(Equipment):
         if abs(target_x - self.x_m) > 1e-6:
             yield from self._gantry(target_x)
         discharge = job.type is JobType.DISCHARGE
+        held = self.holding == cid  # left in the spreader by a failed job: skip the pick
         if discharge:
             def ok(ln: str) -> bool:
                 return self.hub.lane_accepts(self, ln, cid)
@@ -169,26 +190,46 @@ class Sts2(Equipment):
                 chosen[:] = [ln]
             return ln is not None
 
-        yield from self._wait_agv(pick)
+        if held and not discharge:
+            chosen = [want.lane_id if want.lane_id != "*" else (self.lane_id or next(iter(self.lanes)))]
+        else:
+            yield from self._wait_agv(pick)
         lane = chosen[0]
         self.lane_id = lane
         lane_y = lane_point_y(self.lanes[lane])
         segs = vessel.move_segments(self.kin, v.row, v.tier, not discharge, lane_y_m=lane_y)
         if discharge:
-            for seg in segs[:-1]:
-                yield from self._segment(seg)
+            if held:
+                yield from self._reposition(segs[4], laden=True)
+            else:
+                yield from self._reposition(segs[0], laden=False)
+                for seg in segs[:2]:
+                    yield from self._segment(seg)
+                self.holding, self.holding_type = cid, JobType.DISCHARGE  # locked on the vessel
+                for seg in segs[2:4]:
+                    yield from self._segment(seg)
+            yield from self._segment(segs[4])
             yield self.hold(self.kin.twistlock_s)
             yield from self._wait_agv(lambda: ok(lane))
-            self.hub.transfer_sts_to_lane(self, lane, cid)
-            yield from self._segment(segs[-1])
+            self.hub.transfer_sts_to_lane(self, lane, cid)  # clears holding
+            yield from self._segment(segs[5])
         else:
-            yield from self._segment(segs[0])
-            yield self.hold(self.kin.twistlock_s)
-            yield from self._wait_agv(lambda: ok(lane))
-            self.hub.transfer_lane_to_sts(self, lane, cid)
-            for seg in segs[1:]:
+            if held:
+                yield from self._reposition(segs[2], laden=True)
+            else:
+                yield from self._reposition(segs[0], laden=False)
+                yield from self._segment(segs[0])
+                yield self.hold(self.kin.twistlock_s)
+                yield from self._wait_agv(lambda: ok(lane))
+                self.hub.transfer_lane_to_sts(self, lane, cid)  # sets holding
+                self.holding_type = JobType.LOAD
+                yield from self._segment(segs[1])
+            for seg in segs[2:4]:
                 yield from self._segment(seg)
-            vessel.loaded.append(cid)
+            vessel.loaded.append(cid)  # set down on board
+            self.holding = None
+            for seg in segs[4:]:
+                yield from self._segment(seg)
         self.energy_kwh += ENERGY_PER_MOVE_KWH
         self.moves += 1
         self.complete_job()
@@ -207,4 +248,5 @@ class Sts2(Equipment):
             "lane_buffer_count": sum(v is not None for v in self.lane_buffer.values()),
             "wait_for_agv_s": self.wait_for_agv_s,
             "wait_for_agv_total_s": self.wait_for_agv_total_s,
+            "holding": self.holding,
         }

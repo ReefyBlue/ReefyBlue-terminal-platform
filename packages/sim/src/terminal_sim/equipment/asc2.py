@@ -31,6 +31,7 @@ from terminal_sim.loc2 import RackLoc, SlotLoc2, TruckLoc, try_parse
 from terminal_sim.stack import Stack
 
 TRACK_POLL_S = 1.0
+TRACK_MARGIN_S = 30.0  # a gantry claim expires this long after its planned end
 RACK_H_M = 1.5
 TRUCK_H_M = 1.5
 TRUCK_CYCLE_S = 180.0
@@ -67,7 +68,8 @@ class Asc2(Equipment):
         self.tier: int | None = None
         self.holding: str | None = None
         self._yielding = False
-        track.register(equipment_id, role, self.gantry_bay, on_yield=self._on_yield)
+        track.register(equipment_id, role, self.gantry_bay, on_yield=self._on_yield,
+                       on_expire=self._on_expire)
 
     # --- geometry -------------------------------------------------------------
     def _xy(self) -> Position:
@@ -118,11 +120,24 @@ class Asc2(Equipment):
             JobType.STACK_MOVE: lambda: self._own_slot(src) and self._own_slot(dst),
             JobType.TRUCK_IN: lambda: self._own_truck(src) and self._own_slot(dst),
             JobType.TRUCK_OUT: lambda: self._own_slot(src) and self._own_truck(dst),
-        }[job.type]()
+        }[job.type]() and (self.holding is None or job.container_id == self.holding)
 
     # --- aborts / faults ------------------------------------------------------
     def _stop_motion(self) -> None:
         self.track.release(self.equipment_id, at=self.gantry_bay)
+        self.hub.release_racks(self.equipment_id)
+
+    def _on_expire(self) -> None:
+        """The track claim outlived its deadline: stop where the crane is and fail the job
+        (``TRACK_TIMEOUT``); an idle yield move just stops."""
+        if self.current_job is not None:
+            self.fail_job("TRACK_TIMEOUT")
+        elif self._yielding:
+            if self.env.current_component() is not self:
+                self.cancel()
+            self._yielding = False
+            self._stop_motion()
+            self.set_state(State.IDLE)
 
     def fail_job(self, reason: str) -> None:
         super().fail_job(reason)
@@ -168,7 +183,10 @@ class Asc2(Equipment):
         if target is None:
             return
         # Moving away from a waiting partner: the claim succeeds unless the partner moves.
-        while not self.track.claim(self.equipment_id, self.gantry_bay, target, self.env.now()):
+        while not self.track.claim(self.equipment_id, self.gantry_bay, target,
+                                   self.env.now() + self._move_time(target, self.trolley_m)
+                                   + TRACK_MARGIN_S):
+            self.track.expire(self.env.now())
             yield self.hold(TRACK_POLL_S)
         yield from self._move(target, self.trolley_m)
 
@@ -192,9 +210,14 @@ class Asc2(Equipment):
         self.position = self._xy()
         self.track.release(self.equipment_id, at=bay)
 
+    def _move_time(self, bay: float, trolley: float) -> float:
+        return max(self.kin.gantry.travel_time(abs(bay - self.gantry_bay) * self.block.bay_pitch_m),
+                   self.kin.trolley.travel_time(abs(trolley - self.trolley_m)))
+
     def _goto(self, bay: float, trolley: float) -> Iterator:
-        est = self.kin.gantry.travel_time(abs(bay - self.gantry_bay) * self.block.bay_pitch_m)
-        while not self.track.claim(self.equipment_id, self.gantry_bay, bay, self.env.now() + est):
+        while not self.track.claim(self.equipment_id, self.gantry_bay, bay,
+                                   self.env.now() + self._move_time(bay, trolley) + TRACK_MARGIN_S):
+            self.track.expire(self.env.now())
             self.track.yield_request(self.equipment_id, self.partner)
             if self.role == LS and self.track.pending_yield(self.equipment_id) is not None:
                 yield from self._yield_move()
@@ -215,11 +238,17 @@ class Asc2(Equipment):
 
     # --- process ------------------------------------------------------------------
     def _check(self, job: Job, src, dst) -> str | None:
-        """Failure reason, or None if the job can start."""
+        """Failure reason, or None if the job can start. A box held in the spreader (left there
+        by a failed job) is only accepted as the job's own box; then the pick is skipped."""
         cid = job.container_id
-        if isinstance(src, RackLoc) and self.hub.rack_occupant(src.rack_id) != cid:
+        if self.holding is not None and self.holding != cid:
+            return "HOLDING_BOX"
+        held = self.holding == cid
+        if held:
+            pass
+        elif isinstance(src, RackLoc) and self.hub.rack_occupant(src.rack_id) != cid:
             return "RACK_EMPTY"
-        if isinstance(src, SlotLoc2):
+        elif isinstance(src, SlotLoc2):
             loc = self.stack.locate(cid)
             if loc is None or loc[:3] != (src.block, src.bay, src.row):
                 return "SLOT_EMPTY"
@@ -227,16 +256,19 @@ class Asc2(Equipment):
                 return "SLOT_EMPTY"
             if self.stack.top(src.block, src.bay, src.row) != cid:
                 return "NOT_ON_TOP"
-        if isinstance(src, TruckLoc) and self.stack.locate(cid) is not None:
+        elif isinstance(src, TruckLoc) and self.stack.locate(cid) is not None:
             return "CONTAINER_PLACED"
         if isinstance(dst, SlotLoc2):
             h = self.stack.column_height(dst.block, dst.bay, dst.row)
-            if isinstance(src, SlotLoc2) and (src.bay, src.row) == (dst.bay, dst.row):
+            if (not held and isinstance(src, SlotLoc2)
+                    and (src.bay, src.row) == (dst.bay, dst.row)):
                 return "SAME_COLUMN"
             if h >= self.block.tiers:
                 return "COLUMN_FULL"
             if dst.tier is not None and dst.tier != h:
                 return "TIER_NOT_ON_TOP"
+        if isinstance(dst, RackLoc) and not self.hub.reserve_rack(dst.rack_id, self.equipment_id):
+            return "RACK_OCCUPIED"  # booked before the pick: the set-down cannot collide
         return None
 
     def _point(self, loc) -> tuple[float, float, float]:
@@ -262,27 +294,28 @@ class Asc2(Equipment):
         cid = self._cid = job.container_id
         start = self.env.now()
         kin = self.kin
-        bay, trolley, h = self._point(src)
-        yield from self._goto(bay, trolley)
-        yield from self._hoist(h, kin.hoist_empty)
-        yield self.hold(kin.spreader_lock_s)
-        if isinstance(src, RackLoc):
-            if self.hub.rack_occupant(src.rack_id) != cid:
-                self.fail_job("RACK_EMPTY")
-                return
-            self.hub.transfer_rack_to_asc(self, src.rack_id, cid)
-        elif isinstance(src, SlotLoc2):
-            self.tier = self.stack.take(cid)[3]
-            self.holding = cid
-        else:
-            self.holding = cid  # from the truck
+        if self.holding != cid:  # pick (skipped for a box already in the spreader)
+            bay, trolley, h = self._point(src)
+            yield from self._goto(bay, trolley)
+            yield from self._hoist(h, kin.hoist_empty)
+            yield self.hold(kin.spreader_lock_s)
+            if isinstance(src, RackLoc):
+                if self.hub.rack_occupant(src.rack_id) != cid:  # an AGV took it meanwhile
+                    self.fail_job("RACK_EMPTY")
+                    return
+                self.hub.transfer_rack_to_asc(self, src.rack_id, cid)
+            elif isinstance(src, SlotLoc2):
+                if self.stack.top(src.block, src.bay, src.row) != cid:
+                    self.fail_job("NOT_ON_TOP")
+                    return
+                self.tier = self.stack.take(cid)[3]
+                self.holding = cid
+            else:
+                self.holding = cid  # from the truck
         yield from self._hoist(self.travel_h, kin.hoist_laden)
         bay, trolley, h = self._point(dst)
         yield from self._goto(bay, trolley)
-        if isinstance(dst, RackLoc):
-            while self.hub.rack_occupant(dst.rack_id) is not None:
-                yield self.hold(TRACK_POLL_S)
-        elif isinstance(dst, SlotLoc2):
+        if isinstance(dst, SlotLoc2):
             _, _, h = self._point(dst)  # the column may have changed meanwhile
         yield from self._hoist(h, kin.hoist_laden)
         yield self.hold(kin.spreader_lock_s)

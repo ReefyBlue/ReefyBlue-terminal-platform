@@ -254,3 +254,32 @@ def test_asc_pair_never_closer_than_min_gap(make_world2):
     assert outcome["done"] == assigned  # no deadlock: everything finished
     assert min(seps) >= gap - 1e-9
     assert len(seps) > 1000
+
+
+def test_track_claim_expires_after_its_deadline():
+    t, _ = _track()
+    expired = []
+    t._on_expire["W"] = lambda: expired.append("W")
+    assert t.claim("W", 0, 20, 50.0)
+    assert t.expire(49.0) == []
+    assert t.expire(51.0) == ["W"] and expired == ["W"]
+    assert "W" not in t.claims
+
+
+def test_expired_claim_fails_the_job_with_track_timeout(world2, rec):
+    r = rec(world2)
+    ws = world2.equipment["ASC-A-WS"]
+    world2.racks.put("RK-A-1", "C1")
+    world2.port.assign_job("ASC-A-WS", _job("J1", JobType.STACK_IN, "C1", "RACK:RK-A-1", "SLOT:A:30:0"))
+    t = 0.0
+    while "ASC-A-WS" not in world2.tracks["A"].claims or ws.holding != "C1":
+        t += 0.5
+        world2.run(t)
+    world2.run(t + 5)  # moving towards bay 30
+    track = world2.tracks["A"]
+    assert track.expire(track.deadlines["ASC-A-WS"] + 1) == ["ASC-A-WS"]
+    assert r.failed("ASC-A-WS", "J1") == "TRACK_TIMEOUT"
+    assert track.extent("ASC-A-WS") == (ws.gantry_bay, ws.gantry_bay)
+    stop = ws.gantry_bay
+    world2.run(t + 100)
+    assert ws.gantry_bay == stop and ws.holding == "C1"

@@ -157,3 +157,157 @@ def test_sts_uses_lane_buffer_when_agv_late(world2):
     assert sts.lane_buffer == {"STS-01-L1": None, "STS-01-L2": "C2", "STS-01-L3": None}
     assert w.equipment["AGV-01"].loaded_container_id == "C1"
     assert done["T1"] > late
+
+
+# --- handover invariants (review fixes) ------------------------------------------------------
+def _where(w, cid):
+    """Every place a box can be in World2."""
+    places = []
+    if w.stack.locate(cid) is not None:
+        places.append("stack")
+    places += [f"rack:{r}" for r in w.rack_specs if w.racks.occupant(r) == cid]
+    places += [f"agv:{a.equipment_id}" for a in w.agvs.values() if a.carries(cid)]
+    for s in w.sts:
+        places += [f"lane:{ln}" for ln, c in s.lane_buffer.items() if c == cid]
+        if s.holding == cid:
+            places.append(f"sts:{s.equipment_id}")
+    places += [f"asc:{e.equipment_id}" for e in w.equipment.values()
+               if getattr(e, "role", None) and e.holding == cid]
+    places += ["vessel"] * sum(v.loaded.count(cid) for v in w.vessels.values())
+    return places
+
+
+def test_rack_booked_by_stack_out_refuses_the_agv_drop(make_world2, rec):
+    w = make_world2(n_agv=1)
+    r = rec(w)
+    w.stack.put("A", 0, 0, "C1")
+    w.equipment["AGV-01"].load("C2")
+    assert w.port.assign_job("ASC-A-WS", Job("S1", JobType.STACK_OUT, "C1", "SLOT:A:0:0", "RACK:RK-A-1"))
+    w.run(15)  # the AGV comes 15 s later, long before the crane sets C1 down
+    assert w.port.assign_job("AGV-01", Job("T1", JobType.TRANSPORT, "C2", "BUFFER:BUF-01-1", "RACK:RK-A-1"))
+    w.run(2000)  # must not raise out of the sim
+    assert r.failed("AGV-01", "T1") == "RACK_OCCUPIED"
+    assert r.done("ASC-A-WS", "S1") is not None
+    assert _where(w, "C1") == ["rack:RK-A-1"] and _where(w, "C2") == ["agv:AGV-01"]
+    assert w.rack_res == {}
+
+
+def test_rack_booked_by_the_agv_refuses_the_stack_out(make_world2, rec):
+    w = make_world2(n_agv=1)
+    r = rec(w)
+    w.stack.put("A", 0, 0, "C1")
+    w.equipment["AGV-01"].load("C2")
+    w.port.assign_job("AGV-01", Job("T1", JobType.TRANSPORT, "C2", "BUFFER:BUF-01-1", "RACK:RK-A-1"))
+    t = 0.0
+    while w.rack_res.get("RK-A-1") != "AGV-01":
+        t += 0.5
+        w.run(t)
+    w.port.assign_job("ASC-A-WS", Job("S1", JobType.STACK_OUT, "C1", "SLOT:A:0:0", "RACK:RK-A-1"))
+    w.run(t + 2000)
+    assert r.failed("ASC-A-WS", "S1") == "RACK_OCCUPIED"
+    assert r.done("AGV-01", "T1") is not None
+    assert _where(w, "C1") == ["stack"] and _where(w, "C2") == ["rack:RK-A-1"]
+
+
+def _fault(w, eid, until_cond, step=0.5, limit=3000.0):
+    eq = w.equipment[eid]
+    t = w.now()
+    while not until_cond(eq):
+        t += step
+        assert t < limit
+        w.run(t)
+    eq.set_state(State.FAULT)  # as FaultInjector does
+    eq.fail_job("FAULT")
+    w.run(t + 10)
+    eq.set_state(State.IDLE)
+    return eq
+
+
+def test_asc_fault_while_holding_keeps_the_box_and_the_rerun_skips_the_pick(world2, rec):
+    w, r = world2, rec(world2)
+    w.racks.put("RK-A-1", "C1")
+    job = Job("S1", JobType.STACK_IN, "C1", "RACK:RK-A-1", "SLOT:A:5:3")
+    w.port.assign_job("ASC-A-WS", job)
+    asc = _fault(w, "ASC-A-WS", lambda e: e.holding == "C1" and e.hoist_m > 5)
+    assert r.failed("ASC-A-WS", "S1") == "FAULT"
+    assert _where(w, "C1") == ["asc:ASC-A-WS"]
+    assert w.port.snapshot("ASC-A-WS").extra["holding"] == "C1"
+    w.racks.put("RK-A-2", "C2")  # no other pick while a box hangs in the spreader
+    assert not w.port.assign_job("ASC-A-WS", Job("S2", JobType.STACK_IN, "C2", "RACK:RK-A-2", "SLOT:A:6:3"))
+    assert w.port.assign_job("ASC-A-WS", Job("S3", JobType.STACK_IN, "C1", "RACK:RK-A-1", "SLOT:A:5:3"))
+    w.run(w.now() + 1000)
+    assert r.done("ASC-A-WS", "S3") is not None  # rack is empty: it did not pick again
+    assert _where(w, "C1") == ["stack"] and asc.holding is None
+
+
+def test_sts_load_fault_keeps_the_box_and_the_rerun_skips_the_pick(world2, rec):
+    w, r = world2, rec(world2)
+    agv = w.equipment["AGV-01"]
+    agv.load("C9")
+    w.port.assign_job("AGV-01", Job("T1", JobType.TRANSPORT, "C9", "BUFFER:BUF-01-1", "LANE:STS-01-L1"))
+    load = Job("L1", JobType.LOAD, "C9", "LANE:STS-01-L1", "VESSEL:A:6:11:12")
+    w.port.assign_job("STS-01", load)
+    sts = _fault(w, "STS-01", lambda e: e.holding == "C9" and e.trolley_pos_m < 20)
+    assert _where(w, "C9") == ["sts:STS-01"]
+    assert w.port.snapshot("STS-01").extra["holding"] == "C9"
+    assert not w.port.assign_job("STS-01", Job("D1", JobType.DISCHARGE, "C1", "VESSEL:A:6:0:12", "LANE:*"))
+    assert w.port.assign_job("STS-01", Job("L2", JobType.LOAD, "C9", "LANE:STS-01-L1", "VESSEL:A:6:11:12"))
+    w.run(w.now() + 300)
+    assert r.done("STS-01", "L2") is not None
+    assert _where(w, "C9") == ["vessel"] and sts.holding is None
+
+
+def test_sts_discharge_fault_keeps_the_box(world2, rec):
+    w, r = world2, rec(world2)
+    w.port.assign_job("STS-01", Job("D1", JobType.DISCHARGE, "C1", "VESSEL:A:6:11:12", "LANE:STS-01-L1"))
+    sts = _fault(w, "STS-01", lambda e: e.holding == "C1" and e.trolley_pos_m > 0)
+    assert _where(w, "C1") == ["sts:STS-01"]
+    w.port.assign_job("STS-01", Job("D2", JobType.DISCHARGE, "C1", "VESSEL:A:6:11:12", "LANE:STS-01-L1"))
+    w.run(w.now() + 300)
+    assert r.done("STS-01", "D2") is not None
+    assert _where(w, "C1") == ["lane:STS-01-L1"] and sts.holding is None
+
+
+def test_buffered_box_blocks_its_lane(world2, rec):
+    w, r = world2, rec(world2)
+    sts = w.equipment["STS-01"]
+    w.port.assign_job("STS-01", Job("D1", JobType.DISCHARGE, "X", "VESSEL:A:6:11:12", "LANE:STS-01-L1"))
+    w.run(150)
+    assert sts.lane_buffer["STS-01-L1"] == "X"
+    # an AGV for Y stands in the lane (it does not fetch X: its job is for Y)
+    w.port.assign_job("AGV-01", Job("T1", JobType.TRANSPORT, "Y", "BUFFER:BUF-01-1", "LANE:STS-01-L1"))
+    w.run(300)
+    assert r.done("AGV-01", "T1") is not None and w.equipment["AGV-01"].loaded_container_id is None
+    w.port.assign_job("STS-01", Job("D2", JobType.DISCHARGE, "Y", "VESSEL:A:6:11:12", "LANE:STS-01-L1"))
+    w.run(900)
+    assert r.done("STS-01", "D2") is None and sts.extra()["wait_for_agv_s"] > 0
+    assert _where(w, "Y") == []  # still on the vessel: the crane did not pick it
+    # the AGV in the lane fetches X; then Y may come down
+    w.port.assign_job("AGV-01", Job("T2", JobType.TRANSPORT, "X", "LANE:STS-01-L1", "LANE:STS-01-L1"))
+    w.run(1300)
+    assert _where(w, "X") == ["agv:AGV-01"]
+    assert r.done("STS-01", "D2") is not None
+    assert _where(w, "Y") == ["lane:STS-01-L1"]
+
+
+def test_sts_spreader_never_jumps_between_moves(world2):
+    w = world2
+    sts = w.equipment["STS-01"]
+    jobs = [Job(f"D{i}", JobType.DISCHARGE, f"C{i}", f"VESSEL:A:6:{row}:{tier}", "LANE:*")
+            for i, (row, tier) in enumerate([(0, 17), (21, 0), (5, 12)])]
+    kin = sts.kin
+    prev = (sts.trolley_pos_m, sts.hoist_pos_m)
+    t = 0.0
+    max_dh = max_dy = 0.0
+    while t < 1500:
+        if jobs and sts.state is State.IDLE:
+            w.port.assign_job("STS-01", jobs.pop(0))
+        t += 0.5
+        w.run(t)
+        cur = (sts.trolley_pos_m, sts.hoist_pos_m)
+        max_dy = max(max_dy, abs(cur[0] - prev[0]))
+        max_dh = max(max_dh, abs(cur[1] - prev[1]))
+        prev = cur
+    assert not jobs and sts.moves == 3
+    assert max_dh <= kin.hoist_empty.v_max * 0.5 + 1e-6
+    assert max_dy <= kin.trolley.v_max * 0.5 + 1e-6
