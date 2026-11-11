@@ -145,12 +145,15 @@ const poll = {
     model.setEquipment(state, items);
   },
 
-  /** `poll.refresh` every 1000 ms (a `setTimeout` chain), 5000 ms after a failure. */
-  start(state) {
+  /** `poll.refresh` every 1000 ms (a `setTimeout` chain), 5000 ms after a failure;
+   * `onRecover()` runs when `state.link.ecs` goes from false to true. */
+  start(state, onRecover = () => {}) {
     const tick = async () => {
       let next = POLL_MS;
       try {
+        const wasDown = state.link.ecs === false;
         await poll.refresh(state);
+        if (wasDown) onRecover();
       } catch {
         next = POLL_RETRY_MS;
       }
@@ -804,20 +807,30 @@ function main() {
   window.addEventListener("resize", resize);
   resize();
 
+  // the next frame is booked first and each step is guarded: one bad payload (a draw or
+  // render that throws) is logged and must not stop the map and panel for good
   const frame = () => {
-    if (state.dirty) {
-      state.dirty = false;
-      const dpr = window.devicePixelRatio || 1;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    requestAnimationFrame(frame);
+    if (!state.dirty) return;
+    state.dirty = false;
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    try {
       if (state.layout) {
         map.draw(ctx, state, map.fit(state.layout, canvas.clientWidth, canvas.clientHeight));
         if (booted) viewer.ready = true;
       } else {
         drawNotice(ctx, notice);
       }
-      panel.render(state);
+    } catch (e) {
+      canvas.width = canvas.width; // reset the context: the throw may have left saves open
+      console.error("viewer: map draw failed", e);
     }
-    requestAnimationFrame(frame);
+    try {
+      panel.render(state);
+    } catch (e) {
+      console.error("viewer: panel render failed", e);
+    }
   };
   requestAnimationFrame(frame);
 
@@ -828,7 +841,14 @@ function main() {
   };
   viewer.refreshAlarms = refreshAlarms;
   const refreshStatus = () => api.status().then((st) => model.setStatus(state, st), () => {});
-  const refreshKpis = () => api.kpis().then((k) => model.setKpis(state, k), () => {});
+  let kpisInFlight = null; // at most one GET /kpis out at a time
+  const refreshKpis = () => {
+    if (!kpisInFlight) {
+      kpisInFlight = api.kpis().then((k) => model.setKpis(state, k), () => {})
+        .finally(() => { kpisInFlight = null; });
+    }
+    return kpisInFlight;
+  };
 
   /** One WS /events message: apply it; a `status` also refetches the KPIs. */
   viewer.onMessage = (message) => {
@@ -896,7 +916,9 @@ function main() {
                          poll.refresh(state).catch(() => {})]);
       live();
     });
-    poll.start(state);
+    // a 200 after a failed poll (ECS link back) resyncs alarms, status and KPIs, in case the
+    // WS stayed half-open through the gap and missed messages
+    poll.start(state, () => Promise.all([refreshAlarms(), refreshStatus(), refreshKpis()]));
     await first;
     booted = true;
     state.dirty = true;

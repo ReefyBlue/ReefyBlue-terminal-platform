@@ -14,6 +14,10 @@ def test_map_draws_layout_and_fleet(page, viewer_url):
     assert n == 12  # 2 STS + 6 AGV + 4 ASC in terminal.yaml
     fit = page.evaluate("window.__viewer.map.fit(window.__viewer.state.layout, 1000, 600)")
     assert fit["worldW"] >= 400 and fit["worldH"] >= 120  # bounding box, not grid only  (Review Focus 1)
+    # an STS far beyond quay and grid widens the world: the fit is not grid-only
+    wide = page.evaluate("""window.__viewer.map.fit({quay_length_m:100, grid_cell_m:20, grid_cols:5, grid_rows:2,
+        sts:[{equipment_id:'S', x:900, y:0, lane_cells:[[0,0],[0,0]]}], blocks:[], agv_start_cells:[]}, 1000, 600)""")
+    assert wide["worldW"] >= 920
     assert page.evaluate("""() => { const v = window.__viewer; const s = structuredClone(v.state);
         s.equipment = new Map([["AGV-99", {equipment_id:"AGV-99", kind:"AGV", state:"IDLE", position:{x:1,y:1}, extra:{}}]]);
         const c = document.createElement('canvas'); c.width=100; c.height=100;
@@ -52,6 +56,36 @@ def test_resolve_buttons_only_for_unknown_outcome(page, viewer_url):
     assert page.locator("#alarms li[data-key='UNKNOWN_OUTCOME|AGV-02|J-7'] button.resolve").count() == 2
     assert page.locator("#alarms button.release[data-equipment='STS-01']").count() == 1
     assert page.locator("#alarms button.release[data-equipment='AGV-02']").count() == 0
+
+
+def test_one_release_button_per_equipment(page, viewer_url):
+    # LINK_LOST and NEEDS_RELEASE on one AGV: two rows, one Vrijgeven (Review Focus 4)
+    page.goto(viewer_url + "/ui/")
+    page.wait_for_function("window.__viewer && window.__viewer.ready", timeout=15_000)
+    page.evaluate("""() => { const v = window.__viewer;
+        v.model.apply(v.state, {type:'alarm', action:'raised', kind:'LINK_LOST', equipment_id:'AGV-09', job_id:null, since_sim_time:1, detail:'', sim_time:1});
+        v.model.apply(v.state, {type:'alarm', action:'raised', kind:'NEEDS_RELEASE', equipment_id:'AGV-09', job_id:null, since_sim_time:2, detail:'', sim_time:2}); }""")
+    page.wait_for_function("document.querySelectorAll(\"#alarms li[data-key*='|AGV-09|']\").length === 2",
+                           timeout=5_000)
+    assert page.locator("#alarms button.release[data-equipment='AGV-09']").count() == 1
+
+
+def test_draw_error_keeps_render_loop_alive(page, viewer_url):
+    # route cells as objects make map.draw throw; the loop must survive and keep rendering
+    page.goto(viewer_url + "/ui/")
+    page.wait_for_function("window.__viewer && window.__viewer.ready", timeout=15_000)
+    errors = []
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+    page.evaluate("""() => { const v = window.__viewer;
+        v.state.equipment.set('AGV-77', {equipment_id:'AGV-77', kind:'AGV', state:'IDLE',
+            position:{x:1, y:1}, extra:{route:[{x:1, y:1}]}});
+        v.state.dirty = true; }""")
+    page.evaluate("() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))")
+    page.evaluate("""() => { const v = window.__viewer;
+        v.model.apply(v.state, {type:'alarm', action:'raised', kind:'NEEDS_RELEASE', equipment_id:'XX-77', job_id:null, since_sim_time:1, detail:'', sim_time:1}); }""")
+    page.wait_for_selector("#alarms li[data-key='NEEDS_RELEASE|XX-77|']", timeout=5_000)
+    assert page.evaluate("window.__viewer.ready") is True
+    assert errors, "the draw error was not logged"
 
 
 def test_refused_action_shows_error_for_5_s(page, viewer_url):
@@ -101,8 +135,14 @@ def test_equipment_503_marks_ecs_link_down_until_200(page, viewer_url):
     page.wait_for_function("window.__viewer && window.__viewer.ready", timeout=15_000)
     page.route("**/equipment", lambda route: route.fulfill(status=503, json={"detail": "not connected"}))
     page.wait_for_function("window.__viewer.state.link.ecs === false", timeout=5_000)
+    resync = []
+    page.on("request", lambda r: resync.append(r.url) if r.url.endswith("/alarms") else None)
     page.unroute("**/equipment")
     page.wait_for_function("window.__viewer.state.link.ecs === true", timeout=10_000)  # retry after 5 s
+    deadline = time.monotonic() + 5  # the link coming back resyncs the alarms (WS may be half-dead)
+    while not resync and time.monotonic() < deadline:
+        page.wait_for_timeout(100)
+    assert resync, "no GET /alarms after the ECS link came back"
 
 
 def test_alarm_message_during_alarms_refresh_survives(page, viewer_url):
