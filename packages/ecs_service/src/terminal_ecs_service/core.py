@@ -243,18 +243,56 @@ class EcsCore:
         self.publish_alarms()
 
     def release(self, equipment_id: str) -> None:
-        """Operator release; ``KeyError``/``ReleaseRefused`` propagate from the Dispatcher."""
+        """Operator release. ``KeyError`` (unknown equipment) only from the membership
+        check, and ``ReleaseRefused`` / a ``ConnectionError`` reading the device state,
+        all before anything changed. Once released, a ``ConnectionError`` in the tick
+        that follows is handled as a lost link (``on_link_lost()``) and ``release``
+        returns normally (as ``submit``)."""
         if not self.connected or self.dispatcher is None:
             raise RuntimeError("not connected")
-        self.dispatcher.release(equipment_id)
-        self.publish_alarms()
-        self.publish_status()
+        d = self.dispatcher
+        if not d.has_equipment(equipment_id):
+            raise KeyError(equipment_id)
+        try:
+            d.release(equipment_id, tick=False)
+        except KeyError as e:  # never a 404: membership was checked above
+            raise RuntimeError(f"release({equipment_id}) failed internally: {e!r}") from e
+        self._tick_after_command(f"release of {equipment_id}")
 
     def resolve_job(self, job_id: str, outcome: str) -> None:
-        """Operator verdict on a job with unknown outcome; ``KeyError``/``ValueError`` propagate."""
+        """Operator verdict on a job with unknown outcome. ``KeyError`` (no such unknown
+        job) only from the membership check and ``ValueError`` (bad outcome), both before
+        anything changed. Once resolved, a ``ConnectionError`` (in the verdict's
+        follow-up or the tick) is handled as a lost link and ``resolve_job`` returns
+        normally."""
         if not self.connected or self.dispatcher is None:
             raise RuntimeError("not connected")
-        self.dispatcher.resolve_job(job_id, outcome)  # type: ignore[arg-type]
+        d = self.dispatcher
+        if outcome not in ("completed", "failed"):
+            raise ValueError(f"outcome must be 'completed' or 'failed', not {outcome!r}")
+        if job_id not in d.unknown_jobs():
+            raise KeyError(job_id)
+        try:
+            d.resolve_job(job_id, outcome, tick=False)  # type: ignore[arg-type]
+        except KeyError as e:  # never a 404: membership was checked above
+            raise RuntimeError(f"resolve_job({job_id}) failed internally: {e!r}") from e
+        except ConnectionError as e:
+            log.warning("equipment link failed after resolving %s: %s", job_id, e)
+            self.on_link_lost()
+            self.publish_new_jobs()
+            return
+        self._tick_after_command(f"resolve of {job_id}")
+
+    def _tick_after_command(self, what: str) -> None:
+        """Tick after an operator command took effect; a lost link does not undo it."""
+        try:
+            self.dispatcher.tick()  # type: ignore[union-attr]
+        except ConnectionError as e:
+            log.warning("equipment link failed after the %s: %s", what, e)
+            self.on_link_lost()  # publishes link + alarms
+            self.publish_new_jobs()
+            return
+        self.publish_new_jobs()
         self.publish_alarms()
         self.publish_status()
 

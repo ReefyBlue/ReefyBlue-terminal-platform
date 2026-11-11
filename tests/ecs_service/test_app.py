@@ -498,3 +498,100 @@ def test_serve_auto_release_flag(monkeypatch):
     assert serve.main(base) == 0
     assert serve.main([*base, "--auto-release"]) == 0
     assert [c.auto_release for c in cores] == [False, True]
+
+
+class CountdownPort(FakePort):
+    """Answers ``ok_snapshots`` more snapshot reads once armed, then the link is lost."""
+
+    ok_snapshots: int | None = None
+
+    def snapshot(self, equipment_id):
+        if self.ok_snapshots is not None:
+            if self.ok_snapshots <= 0:
+                raise ConnectionError("link lost")
+            self.ok_snapshots -= 1
+        return super().snapshot(equipment_id)
+
+    def close(self) -> None:
+        pass
+
+
+async def test_release_succeeds_when_the_following_tick_loses_the_link():
+    fake, core, client = _setup(_fake(CountdownPort))
+    async with client:
+        await core.connect_once()
+        fake.set_state("AGV-01", State.FAULT)
+        fake.set_state("AGV-01", State.IDLE)
+        assert core.status()["needs_release"] == 1
+        fake.ok_snapshots = 1  # the release check reads the state; the tick then fails
+        r = await client.post("/equipment/AGV-01/release")
+        assert r.status_code == 200 and r.json() == {"released": "AGV-01"}
+        assert core.connected is False
+        assert (await client.get("/health")).status_code == 503
+        assert core.dispatcher.status()["needs_release"] == 0  # the release took effect
+        # a retry while the link is down: 503, not a false 404
+        assert (await client.post("/equipment/AGV-01/release")).status_code == 503
+
+
+async def test_release_retry_after_reconnect():
+    first, second = _fake(CountdownPort), _fake()
+    ports = [first, second]
+    core = EcsCore(LAYOUT, connect=lambda: ports.pop(0))
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(core, run_loop=False)),
+                               base_url="http://t")
+    async with client:
+        await core.connect_once()
+        first.set_state("AGV-01", State.FAULT)
+        first.ok_snapshots = 1
+        r = await client.post("/equipment/AGV-01/release")
+        assert r.status_code == 409  # refused before any change; the tick never ran
+        assert core.connected is True
+        first.ok_snapshots = None
+        first.set_state("AGV-01", State.IDLE)
+        first.ok_snapshots = 1
+        assert (await client.post("/equipment/AGV-01/release")).status_code == 200
+        assert core.connected is False
+        assert await core.connect_once() is True
+        r = await client.post("/equipment/AGV-01/release")  # retry: already released, still fine
+        assert r.status_code == 200 and core.status()["needs_release"] == 0
+        r = await client.post("/equipment/AGV-99/release")
+        assert r.status_code == 404
+
+
+async def test_resolve_succeeds_when_the_following_tick_loses_the_link():
+    first, second, third = _fake(LosingPort), _fake(CountdownPort), _fake()
+    ports = [first, second, third]
+    core = EcsCore(LAYOUT, connect=lambda: ports.pop(0))
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(core, run_loop=False)),
+                               base_url="http://t")
+    await core.connect_once()
+    core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")])
+    job_id = first.calls[0][1].job_id
+    core.on_link_lost()
+    assert await core.connect_once() is True
+    assert core.status()["unknown_outcomes"] == 1
+    async with client:
+        second.ok_snapshots = 0  # the verdict needs no port read; the tick does
+        r = await client.post(f"/jobs/{job_id}/resolve", json={"outcome": "failed"})
+        assert r.status_code == 200 and r.json() == {"job_id": job_id, "outcome": "failed"}
+        assert core.connected is False
+        assert (await client.get("/health")).status_code == 503
+        assert core.dispatcher.unknown_jobs() == frozenset()
+        # retry while the link is down: 503; after reconnecting: 404 (already resolved)
+        assert (await client.post(f"/jobs/{job_id}/resolve", json={"outcome": "failed"})).status_code == 503
+        assert await core.connect_once() is True
+        r = await client.post(f"/jobs/{job_id}/resolve", json={"outcome": "failed"})
+        assert r.status_code == 404 and r.json()["code"] == "UNKNOWN_JOB"
+
+
+async def test_release_internal_keyerror_is_not_a_404(monkeypatch):
+    _, core, client = _setup()
+    async with client:
+        await core.connect_once()
+
+        def boom(*_a, **_k):
+            raise KeyError("internal")
+
+        monkeypatch.setattr(core.dispatcher, "release", boom)
+        with pytest.raises(RuntimeError):
+            await client.post("/equipment/AGV-01/release")

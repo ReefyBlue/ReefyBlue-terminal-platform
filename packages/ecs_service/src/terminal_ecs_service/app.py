@@ -3,7 +3,10 @@
 Every endpoint is ``async def`` and runs on the loop that owns ``EcsCore``, so the
 Dispatcher, KPI collector and allocator need no locks. A ``ConnectionError`` from
 the equipment link inside an endpoint is handled like one in the loop:
-``core.on_link_lost()`` and 503.
+``core.on_link_lost()`` and 503 — unless the command already took effect
+(work orders taken, release, resolve): then ``core`` handles the lost link and the
+endpoint answers with success (a retry then gets 503 while the link is down, and
+404/200 per the new state after reconnecting).
 """
 
 from __future__ import annotations
