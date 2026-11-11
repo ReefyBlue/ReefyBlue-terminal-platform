@@ -56,3 +56,16 @@ async def test_without_viewer_package_no_ui(monkeypatch):
     async with _client(layout) as c:
         assert (await c.get("/ui/")).status_code == 404
         assert (await c.get("/", follow_redirects=False)).status_code == 404
+
+
+async def test_layout_from_service_loader_matches_sim_loader():
+    """The service process loads terminal.yaml with its own ``serve.load_layout`` (it may not
+    import the simulator); GET /layout must answer the same as with the sim's loader."""
+    from terminal_ecs_service import serve
+
+    async with _client(load_layout(ROOT / "terminal.yaml")) as c:
+        want = (await c.get("/layout")).json()
+    async with _client(serve.load_layout(ROOT / "terminal.yaml")) as c:
+        r = await c.get("/layout")
+    assert r.status_code == 200
+    assert r.json() == want
