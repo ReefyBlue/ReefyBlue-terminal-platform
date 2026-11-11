@@ -136,11 +136,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.speed_factor is not None and args.speed_factor <= 0:
         ap.error("--speed-factor must be > 0")
     configure_json_logging()
-    scenario = load_scenario(args.scenario)
+    layout = load_layout(args.layout)
+    scenario = load_scenario(args.scenario, layout)
     if args.speed_factor is not None:
         scenario = dataclasses.replace(scenario, speed_factor=args.speed_factor)
     service = SimService(
-        scenario, load_layout(args.layout),
+        scenario, layout,
         base_port=args.base_port, host=args.host, autostart=args.autostart,
     )
     asyncio.run(_amain(service))

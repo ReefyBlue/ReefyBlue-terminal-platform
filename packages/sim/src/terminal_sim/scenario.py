@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
-
 from terminal_model.types import Kind
+
+if TYPE_CHECKING:
+    from terminal_sim.layout import Layout
 
 
 @dataclass(frozen=True)
@@ -28,7 +31,10 @@ class Scenario:
     duration_s: float
 
 
-def load_scenario(path: Path) -> Scenario:
+def load_scenario(path: Path, layout: Layout | None = None) -> Scenario:
+    """Load and validate a scenario. With ``layout`` the fleet is capped by it
+    (``n_sts <= len(layout.sts)``, ``n_agv <= len(layout.agv_start_cells)``); without one
+    only ``>= 1`` is checked."""
     raw = yaml.safe_load(Path(path).read_text())
     fault_raw = raw.get("faults") or {}
     kinds = {kind.value.lower() for kind in Kind}
@@ -67,10 +73,14 @@ def load_scenario(path: Path) -> Scenario:
         speed_factor=float(raw["speed_factor"]),
         duration_s=float(raw["duration_s"]),
     )
-    if not 1 <= s.n_sts <= 2:
-        raise ValueError(f"n_sts must be 1..2, got {s.n_sts}")
-    if not 1 <= s.n_agv <= 6:
-        raise ValueError(f"n_agv must be 1..6, got {s.n_agv}")
+    for field, value, limit in (
+        ("n_sts", s.n_sts, None if layout is None else len(layout.sts)),
+        ("n_agv", s.n_agv, None if layout is None else len(layout.agv_start_cells)),
+    ):
+        if value < 1:
+            raise ValueError(f"{field} must be >= 1, got {value}")
+        if limit is not None and value > limit:
+            raise ValueError(f"{field} must be 1..{limit} for layout, got {value}")
     if s.n_containers < 1:
         raise ValueError(f"n_containers must be >= 1, got {s.n_containers}")
     if not 0 <= s.share_40ft <= 1:
