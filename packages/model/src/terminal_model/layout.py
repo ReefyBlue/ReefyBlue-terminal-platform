@@ -24,11 +24,25 @@ LANE_SIDES = frozenset({"E", "W"})
 
 MIN_STS_GAP_M = 27.0
 RACK_X_MARGIN_M = 10.0
+# Racks stand side by side across the block width (x) and hold the container along y (the
+# bay direction, like the stack), so a rack's x-extent is the container width plus clearance,
+# whatever its size: x +/- (1.219 + 0.2) m.
+RACK_HALF_WIDTH_M = 2.438 / 2
+RACK_CLEARANCE_M = 0.2
 _EPS = 1e-6
 
 
 class LayoutError(ValueError):
     """Raised when a layout file is malformed or violates a layout rule."""
+
+
+def _strict_bool(v: object, what: str) -> bool:
+    """``True``/``False`` or the strings "true"/"false" (any case); anything else is an error."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str) and v.lower() in ("true", "false"):
+        return v.lower() == "true"
+    raise LayoutError(f"{what}: expected true/false, got {v!r}")
 
 
 @dataclass(frozen=True)
@@ -237,7 +251,7 @@ def _build(raw: dict) -> TerminalLayout:
                 block=str(z["block"]), approach_lane_id=str(z["approach_lane_id"]),
                 racks=tuple(
                     Rack(str(k["id"]), float(k["x_m"]), float(k["y_m"]), str(k["size"]),
-                         bool(k.get("reefer", False)))
+                         _strict_bool(k.get("reefer", False), f"rack '{k['id']}' reefer"))
                     for k in z.get("racks", ())),
             )
             for z in raw["transfer_zones"]
@@ -262,9 +276,17 @@ def _build(raw: dict) -> TerminalLayout:
             Zone(str(z["name"]), str(z["type"]),
                  tuple((float(p[0]), float(p[1])) for p in z["polygon"]))
             for z in raw.get("zones") or ()),
-        opcua=OpcUa(**{k: v for k, v in (raw.get("opcua") or {}).items()
-                       if k in ("base_port", "host")}),
+        opcua=_opcua(raw.get("opcua") or {}),
     )
+
+
+def _opcua(o: dict) -> OpcUa:
+    kw: dict = {}
+    if "base_port" in o:
+        kw["base_port"] = int(o["base_port"])
+    if "host" in o:
+        kw["host"] = str(o["host"])
+    return OpcUa(**kw)
 
 
 def load_terminal(path: Path) -> TerminalLayout:
@@ -273,6 +295,8 @@ def load_terminal(path: Path) -> TerminalLayout:
         raise LayoutError(f"{path}: not a v2 terminal layout (missing 'version: 2')")
     try:
         t = _build(raw)
+    except LayoutError as e:
+        raise LayoutError(f"{path}: {e}") from e
     except (KeyError, TypeError, ValueError, IndexError) as e:
         raise LayoutError(f"{path}: malformed layout: {type(e).__name__}: {e}") from e
     validate(t)
@@ -288,10 +312,20 @@ def _dupes(kind: str, ids: list[str], errs: list[str]) -> None:
             errs.append(f"duplicate {kind} id '{i}' ({n} times)")
 
 
+def _overlaps(kind: str, items: list[tuple[str, float, float]], errs: list[str]) -> None:
+    """1-D interval check on (id, lo, hi); touching intervals are allowed."""
+    for i, (a, a0, a1) in enumerate(items):
+        for b, b0, b1 in items[i + 1:]:
+            if a0 < b1 - _EPS and b0 < a1 - _EPS:
+                errs.append(f"{kind} '{a}' and '{b}' overlap")
+
+
 def validate(t: TerminalLayout) -> None:
     errs: list[str] = []
 
     # unique ids
+    _dupes("berth", [b.id for b in t.quay.berths], errs)
+    _dupes("drive lane", [d.id for d in t.apron.drive_lanes], errs)
     _dupes("STS", [s.id for s in t.sts], errs)
     _dupes("lane", [ln.id for s in t.sts for ln in s.lanes], errs)
     _dupes("rack", [k.id for z in t.transfer_zones for k in z.racks], errs)
@@ -299,6 +333,22 @@ def validate(t: TerminalLayout) -> None:
     _dupes("ASC", [i for b in t.blocks for i in (b.asc_ws_id, b.asc_ls_id)], errs)
     _dupes("buffer", [b.id for b in t.apron.buffers], errs)
     _dupes("zone", [z.name for z in t.zones], errs)
+
+    # positive dimensions
+    if t.quay.length_m <= 0:
+        errs.append(f"quay length_m {t.quay.length_m:g} must be > 0")
+    for b in t.blocks:
+        for attr in ("bays", "rows", "tiers"):
+            if getattr(b, attr) <= 0:
+                errs.append(f"block '{b.id}' {attr} {getattr(b, attr)} must be > 0")
+    for s in t.sts:
+        for ln in s.lanes:
+            for attr in ("len_m", "width_m"):
+                if getattr(ln, attr) <= 0:
+                    errs.append(f"lane '{ln.id}' {attr} {getattr(ln, attr):g} must be > 0")
+    for z in t.zones:
+        if len(z.polygon) < 3:
+            errs.append(f"zone '{z.name}' polygon has {len(z.polygon)} points (need >= 3)")
 
     # berths cover [0, quay length] without gaps/overlaps
     berths = sorted(t.quay.berths, key=lambda b: b.from_m)
@@ -330,6 +380,8 @@ def validate(t: TerminalLayout) -> None:
         for bid in s.berth_ids:
             if bid not in berth_ids:
                 errs.append(f"STS '{s.id}' references unknown berth '{bid}'")
+        _overlaps("lanes", [(ln.id, ln.x_m - ln.width_m / 2, ln.x_m + ln.width_m / 2)
+                            for ln in s.lanes], errs)
     sts_ids = {s.id for s in t.sts}
     for d in t.apron.drive_lanes:
         if d.direction not in DRIVE_DIRECTIONS:
@@ -369,15 +421,16 @@ def validate(t: TerminalLayout) -> None:
         for k in z.racks:
             if k.size not in RACK_SIZES:
                 errs.append(f"rack '{k.id}' size '{k.size}' not in 20/40/45")
-            # The zone lies between the STS rail area and the block head. (The brief names
-            # apron.y_to_m as the lower bound, but the demo apron ends at the block head
-            # (y 165) while the racks sit at y 110..160, so the apron start is used.)
+            # A rack lies between the landside STS rail area (apron.y_from_m) and the head
+            # of its block (block y0_m); the apron may extend up to the block head.
             if not t.apron.y_from_m <= k.y_m < b.y0_m:
                 errs.append(f"rack '{k.id}' y={k.y_m} outside zone of block '{b.id}' "
                             f"[{t.apron.y_from_m}, {b.y0_m})")
             if not b.x0_m - RACK_X_MARGIN_M <= k.x_m <= b.x1_m + RACK_X_MARGIN_M:
                 errs.append(f"rack '{k.id}' x={k.x_m} outside block '{b.id}' x-range "
                             f"[{b.x0_m}, {b.x1_m}] +/- {RACK_X_MARGIN_M}")
+        half = RACK_HALF_WIDTH_M + RACK_CLEARANCE_M
+        _overlaps("racks", [(k.id, k.x_m - half, k.x_m + half) for k in z.racks], errs)
 
     for h in t.landside:
         if h.block not in block_ids:

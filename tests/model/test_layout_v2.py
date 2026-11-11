@@ -107,7 +107,7 @@ def test_overlapping_blocks_rejected(tmp_path):
         raw["transfer_zones"].append({"block": "B", "approach_lane_id": "DL1", "racks": []})
     with pytest.raises(LayoutError) as e:
         load_terminal(_mutated(tmp_path, f))
-    assert "A" in str(e.value) and "B" in str(e.value) and "overlap" in str(e.value)
+    assert "blocks 'A' and 'B' overlap" in str(e.value)
 
 
 def test_missing_transfer_zone_rejected(tmp_path):
@@ -176,3 +176,87 @@ def test_is_v2_false_for_legacy():
     legacy = yaml.safe_load((Path(__file__).parents[2] / "terminal.yaml").read_text())
     assert is_v2(legacy) is False
     assert is_v2({"version": 2}) is True
+
+
+def test_overlapping_racks_rejected(tmp_path):
+    # racks hold the box along y, so their x-extent is the container width (+ clearance):
+    # 2 m apart overlaps, 3.5 m (MINI_V2) does not
+    def f(raw):
+        raw["transfer_zones"][0]["racks"][1]["x_m"] = 32.0
+    with pytest.raises(LayoutError, match="racks 'RK-A-1' and 'RK-A-2' overlap"):
+        load_terminal(_mutated(tmp_path, f))
+
+
+def test_overlapping_lanes_rejected(tmp_path):
+    def f(raw):
+        raw["sts"][0]["lanes"][1]["x_m"] = 72.0  # 2 m from L1, lanes 3.5 m wide
+    with pytest.raises(LayoutError, match="lanes 'STS-01-L1' and 'STS-01-L2' overlap"):
+        load_terminal(_mutated(tmp_path, f))
+
+
+def test_touching_lanes_allowed(tmp_path):
+    t = load_terminal(_mutated(tmp_path, lambda r: r["sts"][0]["lanes"][1].update(x_m=73.5)))
+    assert t.sts[0].lanes[1].x_m == 73.5
+
+
+def test_duplicate_berth_ids_rejected(tmp_path):
+    def f(raw):
+        raw["quay"]["berths"] = [{"id": "A", "from_m": 0, "to_m": 100},
+                                 {"id": "A", "from_m": 100, "to_m": 200}]
+    with pytest.raises(LayoutError, match="duplicate berth id 'A'"):
+        load_terminal(_mutated(tmp_path, f))
+
+
+def test_duplicate_drive_lane_ids_rejected(tmp_path):
+    def f(raw):
+        raw["apron"]["drive_lanes"].append({"id": "DL1", "y_m": 80, "direction": "W"})
+    with pytest.raises(LayoutError, match="duplicate drive lane id 'DL1'"):
+        load_terminal(_mutated(tmp_path, f))
+
+
+def test_opcua_values_coerced(tmp_path):
+    t = load_terminal(_mutated(tmp_path, lambda r: r.update(opcua={"base_port": "48500", "host": 127})))
+    assert t.opcua.base_port == 48500 and t.opcua.host == "127"
+
+
+@pytest.mark.parametrize("value, expected", [(True, True), (False, False), ("true", True),
+                                             ("FALSE", False), ("True", True)])
+def test_reefer_strict_bool_accepts(tmp_path, value, expected):
+    t = load_terminal(_mutated(
+        tmp_path, lambda r: r["transfer_zones"][0]["racks"][0].update(reefer=value)))
+    assert t.transfer_zone("A").racks[0].reefer is expected
+
+
+@pytest.mark.parametrize("value", ["yes", "no", 1, 0, "1", None])
+def test_reefer_non_bool_rejected(tmp_path, value):
+    with pytest.raises(LayoutError, match="reefer"):
+        load_terminal(_mutated(
+            tmp_path, lambda r: r["transfer_zones"][0]["racks"][0].update(reefer=value)))
+
+
+def test_non_positive_dimensions_rejected(tmp_path):
+    def f(raw):
+        raw["blocks"][0].update(bays=0, rows=-1, tiers=0, reefer_rows=[])
+        raw["sts"][0]["lanes"][0].update(len_m=0, width_m=-3.5)
+        raw["zones"][0]["polygon"] = [[0, 0], [10, 0]]
+    with pytest.raises(LayoutError) as e:
+        load_terminal(_mutated(tmp_path, f))
+    msg = str(e.value)
+    for frag in ("block 'A' bays 0", "block 'A' rows -1", "block 'A' tiers 0",
+                 "lane 'STS-01-L1' len_m 0", "lane 'STS-01-L1' width_m -3.5",
+                 "zone 'OOG' polygon has 2 points"):
+        assert frag in msg, frag
+
+
+def test_non_positive_quay_length_rejected(tmp_path):
+    def f(raw):
+        raw["quay"]["length_m"] = 0
+        raw["quay"]["berths"] = [{"id": "A", "from_m": 0, "to_m": 0}]
+    with pytest.raises(LayoutError, match="quay length_m 0"):
+        load_terminal(_mutated(tmp_path, f))
+
+
+@pytest.mark.parametrize("name", ["terminal_mv_small.yaml", "terminal_mv.yaml"])
+def test_shipped_layouts_validate(name):
+    t = load_terminal(Path(__file__).parents[2] / name)
+    assert t.blocks and t.transfer_zones

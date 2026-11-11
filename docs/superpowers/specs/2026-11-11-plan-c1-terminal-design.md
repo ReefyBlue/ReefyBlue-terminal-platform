@@ -9,7 +9,7 @@ De fictieve terminal gaat van een schematisch 20 m-grid met vier kleine blokken 
 Uitgangspunt is de **gebruiker-gekozen variant**: Lift-AGV met racks (ontkoppeld), scope **waterzijde + yard**; landzijde is een vaste in-/uitstroom aan de landzijdekop van elk blok zonder eigen equipment-model (volgt later, Plan C4).
 
 Succescriteria:
-1. `terminal.yaml` beschrijft de terminal volledig in meters (geen gridcellen meer als primaire eenheid); de bestaande `load_layout`-API blijft bestaan als afgeleide (het 20 m-grid wordt berekend uit de meter-layout voor de huidige AGV-router) tot Plan C2 de router vervangt.
+1. `terminal_mv*.yaml` beschrijven de terminal volledig in meters (`terminal.yaml` blijft de legacy v1-layout) (geen gridcellen meer als primaire eenheid); de bestaande `load_layout`-API blijft bestaan als afgeleide (het 20 m-grid wordt berekend uit de meter-layout voor de huidige AGV-router) tot Plan C2 de router vervangt.
 2. Elk equipment heeft een **kinematisch profiel** (max. snelheid, versnelling, vertraging; voor kranen per as) met Konecranes-ordegrootte defaults; cyclustijden komen uit de bewegingen, niet uit een getrokken driehoeksverdeling.
 3. STS-productiviteit in de baseline-run ligt tussen 25 en 35 moves/uur per kraan bij 5 Lift-AGV's per kraan (ordegrootte van echte ASC/AGV-terminals); de nieuwe KPI `sts_moves_per_hour` staat in `/kpis`.
 4. Alle bestaande tests blijven groen op de **oude layout** (`terminal.yaml` houdt zijn naam en blijft de legacy v1-grid-layout zonder `version`-sleutel; géén `terminal_legacy.yaml`; fixtures ongewijzigd); de nieuwe layout is `terminal_mv.yaml` (`version: 2`) en heeft eigen baseline-fixtures.

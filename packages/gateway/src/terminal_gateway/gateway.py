@@ -107,6 +107,7 @@ class Gateway:
             self.control = None
             raise
         log.info("gateway serving %s (%d equipment)", self.endpoint, len(self.table))
+        log.info("gateway control port %d", self.control_port)
 
     async def _create_mirrors(self, server: Server, idx: int, types, folders) -> None:
         for u in self.table:

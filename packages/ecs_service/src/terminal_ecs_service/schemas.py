@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class WorkOrderIn(BaseModel):
@@ -116,23 +116,30 @@ class LayoutOut(BaseModel):
     terminal: TerminalOut | None = None  # the v2 model (zones inside); None for v1
 
 
-class BerthOut(BaseModel):
+class _Strict(BaseModel):
+    """Base of the TerminalOut sub-models: unknown keys are an error, so a field added to a
+    ``terminal_model.layout`` dataclass fails loudly instead of being dropped silently."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class BerthOut(_Strict):
     id: str
     from_m: float
     to_m: float
 
 
-class QuayOut(BaseModel):
+class QuayOut(_Strict):
     length_m: float
     berths: list[BerthOut]
 
 
-class RailsOut(BaseModel):
+class RailsOut(_Strict):
     y_ws_m: float
     y_ls_m: float
 
 
-class LaneOut(BaseModel):
+class LaneOut(_Strict):
     id: str
     x_m: float
     y_m: float
@@ -140,7 +147,7 @@ class LaneOut(BaseModel):
     width_m: float
 
 
-class StsSpecOut(BaseModel):
+class StsSpecOut(_Strict):
     id: str
     x0_m: float
     min_gap_m: float
@@ -148,20 +155,20 @@ class StsSpecOut(BaseModel):
     lanes: list[LaneOut]
 
 
-class DriveLaneOut(BaseModel):
+class DriveLaneOut(_Strict):
     id: str
     y_m: float
     direction: Literal["E", "W"]
 
 
-class BufferOut(BaseModel):
+class BufferOut(_Strict):
     id: str
     x_m: float
     y_m: float
     sts_id: str
 
 
-class ApronOut(BaseModel):
+class ApronOut(_Strict):
     y_from_m: float
     y_to_m: float
     drive_lanes: list[DriveLaneOut]
@@ -169,7 +176,7 @@ class ApronOut(BaseModel):
     buffers: list[BufferOut]
 
 
-class RackOut(BaseModel):
+class RackOut(_Strict):
     id: str
     x_m: float
     y_m: float
@@ -177,13 +184,13 @@ class RackOut(BaseModel):
     reefer: bool = False
 
 
-class TransferZoneOut(BaseModel):
+class TransferZoneOut(_Strict):
     block: str
     racks: list[RackOut]
     approach_lane_id: str
 
 
-class TerminalBlockOut(BaseModel):
+class TerminalBlockOut(_Strict):
     id: str
     x0_m: float
     y0_m: float
@@ -200,25 +207,25 @@ class TerminalBlockOut(BaseModel):
     reefer_rows: list[int]
 
 
-class TruckHeadOut(BaseModel):
+class TruckHeadOut(_Strict):
     block: str
     lanes: int
     y_m: float
     len_m: float
 
 
-class ZoneOut(BaseModel):
+class ZoneOut(_Strict):
     name: str
     type: str
     polygon: list[tuple[float, float]]
 
 
-class OpcUaOut(BaseModel):
+class OpcUaOut(_Strict):
     base_port: int
     host: str
 
 
-class TerminalOut(BaseModel):
+class TerminalOut(_Strict):
     """The v2 terminal model (mirrors ``terminal_model.layout.TerminalLayout``; metres)."""
 
     name: str

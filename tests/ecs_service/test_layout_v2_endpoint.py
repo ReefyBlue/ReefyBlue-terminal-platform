@@ -55,3 +55,29 @@ async def test_layout_v2_has_terminal():
 async def test_layout_v1_has_no_terminal():
     body = await _body(ROOT / "terminal.yaml")
     assert body["version"] == 1 and body["terminal"] is None
+
+
+def test_terminal_out_mirrors_dataclasses():
+    """Drift guard: every TerminalOut sub-model has exactly the fields of its dataclass and
+    rejects unknown keys, so a new dataclass field cannot be dropped from ``GET /layout``."""
+    import dataclasses
+
+    import pydantic
+    import pytest
+    from terminal_ecs_service import schemas as s
+    from terminal_model import layout as m
+
+    pairs = [
+        (m.TerminalLayout, s.TerminalOut), (m.Quay, s.QuayOut), (m.Berth, s.BerthOut),
+        (m.Rails, s.RailsOut), (m.StsSpec, s.StsSpecOut), (m.Lane, s.LaneOut),
+        (m.Apron, s.ApronOut), (m.DriveLane, s.DriveLaneOut), (m.Buffer, s.BufferOut),
+        (m.TransferZone, s.TransferZoneOut), (m.Rack, s.RackOut),
+        (m.Block, s.TerminalBlockOut), (m.TruckHead, s.TruckHeadOut), (m.Zone, s.ZoneOut),
+        (m.OpcUa, s.OpcUaOut),
+    ]
+    for dc, model in pairs:
+        assert {f.name for f in dataclasses.fields(dc)} == set(model.model_fields), dc.__name__
+        assert model.model_config.get("extra") == "forbid", model.__name__
+    t = load_terminal(ROOT / "terminal_mv_small.yaml")
+    with pytest.raises(pydantic.ValidationError):
+        s.TerminalOut.model_validate({**dataclasses.asdict(t), "surprise": 1})

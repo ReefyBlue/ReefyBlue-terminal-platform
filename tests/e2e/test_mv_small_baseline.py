@@ -1,12 +1,13 @@
 """Baseline scenario on the v2 small layout (``terminal_mv_small.yaml``, via its 20 m grid view).
 
 The scenario is ``fixtures/mv_small_baseline.yaml``: ``scenarios/baseline.yaml`` with 3 STS
-and 12 AGVs (one per buffer), capped by the layout. The first run writes the fixture; later
-runs must match it exactly.
+and 12 AGVs (one per buffer), capped by the layout. Runs must match the committed fixture exactly;
+it is (re)written only with ``WRITE_FIXTURES=1``, never silently.
 """
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,8 @@ def test_mv_small_baseline_matches_fixture():
     assert k["timed_out"] == 0.0
     assert k["containers_done"] == 200 and k["containers_failed"] == 0
     assert k["containers_stuck"] == 0
-    if not FIXTURE.exists():
+    if os.environ.get("WRITE_FIXTURES") == "1":
         FIXTURE.write_text(json.dumps(k, indent=2) + "\n")
+    assert FIXTURE.exists(), (
+        f"missing fixture {FIXTURE.name}; regenerate deliberately with WRITE_FIXTURES=1")
     assert k == json.loads(FIXTURE.read_text())
