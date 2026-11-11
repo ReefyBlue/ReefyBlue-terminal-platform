@@ -145,7 +145,7 @@ class KpiCollector:
         kpis["replans"] = float(status["replans"])
         energy = sum(self.port.snapshot(eid).energy_kwh for eid in ids)
         kpis["energy_kwh_per_move"] = energy / total_moves if total_moves else 0.0
-        kpis["containers_done"] = float(len(self.dispatcher.completed))
+        kpis["containers_done"] = float(status["done"])  # cumulative (``completed`` may be pruned)
         kpis["containers_failed"] = float(status["failed"])
         kpis["containers_stuck"] = float(status["stuck"])
         kpis["sim_elapsed_s"] = duration_s

@@ -205,7 +205,7 @@ curl -s -X POST http://localhost:8000/equipment/STS-01/release
 # 200 {"released":"STS-01"}; 404 onbekend; 409 {"code":"RELEASE_REFUSED","message":…}; 503 niet verbonden
 ```
 
-Herhaalde mislukkingen: een order waarvan de jobs 5 keer achter elkaar mislukken (JOB_FAILED of een FAULT-herplanning, zonder voltooide job ertussen; watchdog-annuleringen en `resolve … failed` tellen niet mee) wordt niet eindeloos opnieuw uitgegeven maar gefaald met reden `REPLAN_STREAK`. De operator ziet dat als `failed` in `GET /status` / KPI `containers_failed` en een ERROR `replan streak: <container> failed 5 times in a row on <apparaat> (<reden>); order failed` in de log; de TP komt vrij. Staat de box van de order nog op zijn AGV (onderweg naar de TP of de kraan, of wachtend bij een van beide), dan gaat die AGV in **quarantaine**: hij krijgt geen jobs meer en staat als `NEEDS_RELEASE` met `quarantined: box may be on board` in `/alarms`, ook met `--auto-release`. Hetzelfde geldt voor de AGV van een mislukte overdracht. Haal de box eraf en geef de AGV vrij met `release`.
+Herhaalde mislukkingen: een order waarvan de jobs 5 keer achter elkaar mislukken (JOB_FAILED of een FAULT-herplanning, zonder voltooide job ertussen; watchdog-annuleringen en `resolve … failed` tellen niet mee) wordt niet eindeloos opnieuw uitgegeven maar gefaald met reden `REPLAN_STREAK`. De operator ziet dat als `failed` in `GET /status` / KPI `containers_failed` en een ERROR `replan streak: <container> failed 5 times in a row on <apparaat> (<reden>); order failed` in de log; de TP komt vrij. Staat de box van de order nog op zijn AGV (onderweg naar de TP of de kraan, of wachtend bij een van beide), dan gaat die AGV in **quarantaine**: hij krijgt geen jobs meer en staat als `NEEDS_RELEASE` met `quarantined: box may be on board` in `/alarms` (met `--auto-release` alleen zolang er een box aan boord is, zie *Onbemande runs*). Hetzelfde geldt voor de AGV van een mislukte overdracht. Haal de box eraf en geef de AGV vrij met `release`.
 
 `release` wordt geweigerd (409) zolang het apparaat `FAULT` of `OFFLINE` meldt of er voor dat apparaat nog een onbekende uitkomst openstaat (`"resolve job <id> first"`).
 
@@ -215,7 +215,7 @@ Herhaalde mislukkingen: een order waarvan de jobs 5 keer achter elkaar mislukken
 - *Na een FAULT:* de job is al herpland. Controleer het apparaat ter plaatse; zodra het weer `IDLE` meldt: `POST /equipment/{id}/release`. Zonder vrijgave krijgt het geen jobs meer.
 - *Na een onbekende uitkomst:* kijk wat er werkelijk gebeurd is (staat de container op de AGV / in de stack / nog onder de kraan?). Gebeurd → `resolve` met `"completed"` (de order gaat door alsof `JOB_COMPLETED` binnenkwam); niet gebeurd → `"failed"` (de order wordt herpland). Daarna `release` van het apparaat.
 
-**Onbemande runs:** `terminal_ecs_service.serve --auto-release` (standaard uit) geeft een apparaat na FAULT → IDLE direct weer vrij. Een uitkomst die het apparaat zelf als laatste job meldt, wordt in beide modi gewoon verwerkt; een echt onbekende uitkomst (het apparaat meldt een andere laatste job) telt met `--auto-release` direct als `failed` (de order wordt herpland, geen alarm; de cap op herhaalde mislukkingen begrenst een lus). Een AGV in quarantaine blijft ook met `--auto-release` wachten op `release`. Zonder `--auto-release` beslist de operator via `resolve`. De runner draait in-process standaard met auto-release; `terminal_runner.run --no-auto-release` schakelt het uit (dan blijven FAULT-apparaten uitgesloten en onbekende uitkomsten open). Met `--port http` heeft die vlag geen effect: daar beslist de service (`--auto-release`). Let op: ook met `--auto-release` wordt een AGV in quarantaine nooit automatisch vrijgegeven; een onbemande run kan dan stilvallen tot een operator hem met `release` vrijgeeft.
+**Onbemande runs:** `terminal_ecs_service.serve --auto-release` (standaard uit) geeft een apparaat na FAULT → IDLE direct weer vrij. Een uitkomst die het apparaat zelf als laatste job meldt, wordt in beide modi gewoon verwerkt; een echt onbekende uitkomst (het apparaat meldt een andere laatste job) telt met `--auto-release` direct als `failed` (de order wordt herpland, geen alarm; de cap op herhaalde mislukkingen begrenst een lus). Een AGV in quarantaine komt met `--auto-release` vrij zodra hij `IDLE` meldt zonder box aan boord (lege `loaded_container_id`); met een box aan boord blijft hij wachten op `release`. Zonder `--auto-release` beslist de operator via `resolve`. De runner draait in-process standaard met auto-release; `terminal_runner.run --no-auto-release` schakelt het uit (dan blijven FAULT-apparaten uitgesloten en onbekende uitkomsten open). Met `--port http` heeft die vlag geen effect: daar beslist de service (`--auto-release`). Let op: ook met `--auto-release` wordt een AGV in quarantaine met een box aan boord nooit automatisch vrijgegeven; een onbemande run kan dan stilvallen tot een operator hem met `release` vrijgeeft.
 
 ## Webviewer (B2b)
 
@@ -262,6 +262,81 @@ Visuele check: `uv run python tests/ui/render_check.py docs/superpowers/reports/
 - Geen authenticatie: iedereen op het netwerk kan vrijgeven en afhandelen. Zet de NAS dus niet open naar buiten.
 - Posities worden 1× per seconde gepolld (`GET /equipment`); events (toestand, alarmen, jobs) komen direct via `WS /events`.
 - Met een operator achter de viewer is `--auto-release` niet meer nodig: FAULT-apparaten en onbekende uitkomsten handel je hier af. Een AGV in quarantaine vraagt sowieso een mens (box eraf halen, dan **Vrijgeven**).
+
+## Draaien op de NAS (B2c)
+
+Ontwerp: `docs/superpowers/specs/2026-11-11-plan-b2c-deploy-soak-design.md`. De hele keten draait als één `docker compose`-stack (map `deploy/`) op de QNAP TS-473A (Container Station, x86-64): één image, vijf services.
+
+| service | wat | poort |
+|---|---|---|
+| `sim` | `terminal_sim.serve` met `deploy/scenarios/$SCENARIO`, `--autostart`, `--speed-factor $SPEED_FACTOR` | 48400–48412 intern |
+| `gateway` | `terminal_gateway.serve --upstream-host sim` | 4840 intern |
+| `chaos` | `terminal_soak.chaos`: proxy gateway ↔ ECS die elke `CUT_EVERY_S` de verbinding `CUT_FOR_S` lang verbreekt | 4840 intern |
+| `ecs` | `terminal_ecs_service.serve --gateway opc.tcp://chaos:4840` (+ `--auto-release` bij `AUTO_RELEASE=1`), met viewer | **8000:8000** (de enige gepubliceerde poort) |
+| `soak` | `terminal_soak.driver`: houdt het werk gaande (batches van `BATCH` zodra er minder dan `LOW_WATER` open zijn), elk uur een meetpunt in volume `soakdata` | – |
+
+Ze starten in de keten sim → gateway → chaos → ecs → soak (elk wacht tot de vorige healthy is). Alle services: `restart: unless-stopped`, behalve `soak` (`on-failure`: na een normaal einde van `SOAK_HOURS` blijft hij uit in plaats van een nieuw venster te beginnen). Logs: `json-file`, 5 × 20 MB per service. De healthcheck van `ecs` test alleen of poort 8000 open is: `GET /health` geeft 503 zolang de gatewaykoppeling weg is, en dat gebeurt bij elke cut; de container is dan niet kapot en mag niet "unhealthy" worden.
+
+**Instellingen** (`deploy/.env`, kopie van `deploy/.env.example`):
+
+| sleutel | standaard | betekenis |
+|---|---|---|
+| `SCENARIO` | `soak.yaml` | bestand in `deploy/scenarios/` (bind-mount: wisselen zonder rebuild; wel een nieuwe run, zie *Ander scenario of `SPEED_FACTOR`*) |
+| `SPEED_FACTOR` | `1` | overschrijft `speed_factor` van het scenario; 1 = echte tijd |
+| `SOAK_HOURS` | `72` | duur van de run |
+| `CUT_EVERY_S` / `CUT_FOR_S` | `14400` / `30` | verbindingscut elke 4 u, 30 s lang |
+| `AUTO_RELEASE` | `1` | `1` = storingen en onbekende uitkomsten komen vanzelf vrij; `0` (of leeg) = handmatig via de viewer |
+| `LOW_WATER` / `BATCH` | `40` / `60` | driver: nieuwe batch onder 40 open orders, 60 containers per batch |
+
+**Starten via SSH** (aanbevolen):
+
+```bash
+ssh admin@<nas>
+git clone <repo-url> terminal-platform && cd terminal-platform/deploy
+cp .env.example .env            # eventueel aanpassen
+docker compose up -d --build    # bouwt de image op de NAS (eenmalig een paar minuten)
+docker compose ps               # alle vijf "running", sim/gateway/chaos/ecs "healthy"
+```
+
+**Of via Container Station:** zet de repo op de NAS (bijv. `git clone` in een gedeelde map), maak `deploy/.env` aan, en kies *Applications → Create* met de inhoud van `deploy/docker-compose.yml`. Het build-context is `..` vanaf `deploy/`; Container Station moet de compose dus vanuit die map gebruiken (het pad van de applicatie = `…/terminal-platform/deploy`). Lukt dat niet, gebruik dan SSH.
+
+**Meekijken:**
+
+- Viewer: `http://<nas>:8000/ui/` (alarmen, koppelingsbanner; tijdens een cut kort rood).
+- `docker compose logs -f ecs` (JSON-regels; `equipment link lost` / `equipment link connected` rond elke cut), idem voor `chaos` (een JSON-regel per cut en herstel) en `soak`.
+- Meetpunten: `docker compose exec soak tail -f /data/soak/samples.jsonl` (één regel per uur).
+
+**Afronden:** na `SOAK_HOURS` stopt `soak` vanzelf (de rest blijft draaien). Dan in `deploy/`:
+
+```bash
+./collect.sh        # -> restarts.json, samples.jsonl en soak-report.md in deploy/
+docker compose down # pas daarna: na 'down' zijn de herstarttellers weg (het volume blijft)
+```
+
+`collect.sh` leest per service de `RestartCount` van Docker (criterium 1), zet die als `restarts.json` in het volume, haalt `samples.jsonl` eruit en draait `terminal_soak.report` in de image. Met `AUTO_RELEASE` anders dan `1` krijgt het rapport `--manual` (criterium 5 "handmatig"). Eerder stoppen kan: `docker compose stop soak` (de driver schrijft nog een laatste meetpunt), daarna `./collect.sh`; het rapport beoordeelt een onvolledig venster dan niet.
+
+**Ander scenario of `SPEED_FACTOR`:** dat is een nieuwe run en vraagt een schone stack, niet een losse `docker compose up -d`:
+
+```bash
+docker compose stop soak        # driver schrijft nog een laatste meetpunt
+./collect.sh                    # alleen als je de meetpunten van de vorige run wilt bewaren
+docker compose down -v          # -v: ook volume soakdata (samples.jsonl) weg
+docker compose up -d --build
+```
+
+Een kale `docker compose up -d` na het wijzigen van `.env` gaat mis: (a) compose maakt alleen `sim` opnieuw; de sim-tijd begint weer bij 0, de ECS ziet `sim_time_reversed` en `/health` blijft de rest van de run 503 terwijl de healthcheck (alleen TCP-poort 8000) groen blijft; (b) een al geëindigde `soak` start opnieuw en schrijft een tweede run achter de eerste in `samples.jsonl`.
+
+**Auto-release:** de NAS-stack draait standaard met `AUTO_RELEASE=1`, want zonder operator moeten storingen vanzelf vrijkomen (een AGV in quarantaine zonder box aan boord ook). Wil je het "handmatig oplossen" uit B2d testen, zet dan `AUTO_RELEASE=0` en handel alarmen af in de viewer; het rapport markeert criterium 5 dan als "handmatig". Een AGV in quarantaine *met* een box aan boord wacht in beide modi op **Vrijgeven**.
+
+**Bekende beperkingen:**
+
+- ECS-herstart midden in een run: de service kent de lopende jobs niet meer. Reconciliatie via `LastJobId` vangt afgeronde jobs, maar open orders uit de vorige ECS-instantie zijn weg. De driver gaat door met nieuwe batches; `restart_count` in het rapport maakt het zichtbaar. Volledig herstel van de ECS-toestand is B3.
+- Geen authenticatie; alleen voor het thuisnetwerk. CSRF op release/resolve (B2b-risico) blijft staan tot B3.
+- `speed_factor: 1` = echte tijd; 72 u ≈ 3 000 moves. Hoger zetten mag (`SPEED_FACTOR`; de ECS-service meet in sim-tijd), maar cuts en MTBF's zijn dan in sim-seconden.
+- De image is alleen `linux/amd64` (de TS-473A is x86-64; `platforms` in de compose).
+- Scenario of `SPEED_FACTOR` wijzigen met alleen `docker compose up -d`: sim-tijd terug → ECS `sim_time_reversed`, `/health` 503 voor de rest van de run (healthcheck blijft groen), en een geëindigde `soak` voegt een tweede run toe aan `samples.jsonl`. Gebruik `down` → (`collect.sh`) → `down -v` → `up -d --build`, zie hierboven.
+- Een herstart van de NAS beëindigt de soak-run stil: `soak` heeft `restart: on-failure` en komt na een reboot niet terug (de andere services wel, `unless-stopped`). Draai daarna `./collect.sh`; het rapport beoordeelt het onvolledige venster niet.
+- Ontbreekt de container van een service bij `collect.sh`, dan staat die service niet in `restarts.json` en meldt het rapport criterium 1 als "niet gemeten" voor die service.
 
 ## Verder
 

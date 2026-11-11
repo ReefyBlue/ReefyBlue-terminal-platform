@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import logging
 import signal
 import time
@@ -129,10 +130,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--autostart", action="store_true",
                     help="run the clock at once instead of waiting for Terminal/Clock.Start")
+    ap.add_argument("--speed-factor", type=float, default=None,
+                    help="override the scenario's speed_factor (sim seconds per wall second)")
     args = ap.parse_args(argv)
+    if args.speed_factor is not None and args.speed_factor <= 0:
+        ap.error("--speed-factor must be > 0")
     configure_json_logging()
+    scenario = load_scenario(args.scenario)
+    if args.speed_factor is not None:
+        scenario = dataclasses.replace(scenario, speed_factor=args.speed_factor)
     service = SimService(
-        load_scenario(args.scenario), load_layout(args.layout),
+        scenario, load_layout(args.layout),
         base_port=args.base_port, host=args.host, autostart=args.autostart,
     )
     asyncio.run(_amain(service))

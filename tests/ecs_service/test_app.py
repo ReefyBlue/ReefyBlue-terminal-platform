@@ -44,10 +44,11 @@ async def test_health_503_then_200():
     _, core, client = _setup()
     async with client:
         r = await client.get("/health")
-        assert r.status_code == 503 and r.json() == {"connected": False, "sim_time": None}
+        assert r.status_code == 503 and r.json().items() >= {"connected": False, "sim_time": None}.items()
         await core.connect_once()
         r = await client.get("/health")
-        assert r.status_code == 200 and r.json() == {"connected": True, "sim_time": 0.0}
+        assert r.status_code == 200 and r.json().items() >= {"connected": True, "sim_time": 0.0}.items()
+        assert "error" not in r.json() and set(r.json()) == {"connected", "sim_time", "rss_mb", "uptime_s"}
 
 
 async def test_workorders_accepted_202():
@@ -301,7 +302,7 @@ async def test_workorders_202_when_link_drops_after_take():
         fake.lost = True  # validation reads snapshots fine; the tick's assign_job fails
         r = await client.post("/workorders", json=[_order("C1"), _order("C2", "A/1/1/2")])
         assert r.status_code == 202 and r.json() == {"accepted": 2}
-        assert core.known_containers == {"C1", "C2"}
+        assert core.is_known("C1") and core.is_known("C2")
         assert core.dispatcher.status()["open"] == 2
         assert (await client.get("/health")).status_code == 503
         r = await client.post("/workorders", json=[_order("C1")])

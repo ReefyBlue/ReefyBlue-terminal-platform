@@ -69,7 +69,7 @@ Nieuwe constructor-parameter `auto_release: bool = False`. Nieuwe interne verzam
 
 ### 5.3a Herhaalde mislukkingen
 
-`OrderRecord.replan_streak` telt herplanningen door `JOB_FAILED` (generieke tak van `_on_failed`) en door `FAULT`; een `JOB_COMPLETED` van een job van de order zet hem op 0; watchdog-annuleringen en `resolve_job(…, "failed")` tellen niet mee en resetten niet. Bij `WATCHDOG_MAX_CANCELS` (5) op rij wordt de order gefaald met reden `REPLAN_STREAK` (`_fail_order`: TP vrij; de AGV ook, tenzij de box er nog op staat — dan gaat de AGV in quarantaine en heeft hij `release` nodig (§5.2); telt in `failed`/`containers_failed`) met ERROR-log `replan streak: <cid> failed <n> times in a row on <eid> (<reason>); order failed`. `stuck` houdt zijn watchdog-betekenis.
+`OrderRecord.replan_streak` telt herplanningen door `JOB_FAILED` (generieke tak van `_on_failed`) en door `FAULT`; een `JOB_COMPLETED` van een job van de order zet hem op 0; watchdog-annuleringen en `resolve_job(…, "failed")` tellen niet mee en resetten niet. Bij `WATCHDOG_MAX_CANCELS` (5) op rij wordt de order gefaald met reden `REPLAN_STREAK` (`_fail_order`: TP vrij; de AGV ook, tenzij de box er nog op staat — dan gaat de AGV in quarantaine en heeft hij `release` nodig (§5.2); telt in `failed`/`containers_failed`) met ERROR-log `replan streak: <cid> failed <n> times in a row on <eid> (<reason>); order failed`. `stuck` houdt zijn watchdog-betekenis. Aanvulling Plan B2c §4.2: met `auto_release=True` wordt een quarantaine opgeheven (als bij `release`) zodra de AGV IDLE meldt met een lege `extra.loaded_container_id` (aanwezig en `None`/`""`); met een box aan boord, of als de AGV zijn lading niet meldt, blijft hij staan.
 
 ### 5.4 Status en alarmen
 

@@ -13,6 +13,7 @@ members = [
     "terminal-platform",
     "terminal-runner",
     "terminal-sim",
+    "terminal-soak",
     "terminal-tos-stub",
     "terminal-viewer",
 ]
@@ -960,6 +961,7 @@ dev = [
     { name = "terminal-opcua" },
     { name = "terminal-runner" },
     { name = "terminal-sim" },
+    { name = "terminal-soak" },
     { name = "terminal-tos-stub" },
     { name = "terminal-viewer" },
 ]
@@ -980,6 +982,7 @@ dev = [
     { name = "terminal-opcua", editable = "packages/opcua" },
     { name = "terminal-runner", editable = "packages/runner" },
     { name = "terminal-sim", editable = "packages/sim" },
+    { name = "terminal-soak", editable = "packages/soak" },
     { name = "terminal-tos-stub", editable = "packages/tos_stub" },
     { name = "terminal-viewer", editable = "packages/viewer" },
 ]
@@ -1024,6 +1027,27 @@ requires-dist = [
     { name = "salabim", specifier = ">=25" },
     { name = "terminal-model", editable = "packages/model" },
     { name = "terminal-opcua", editable = "packages/opcua" },
+]
+
+[[package]]
+name = "terminal-soak"
+version = "0.1.0"
+source = { editable = "packages/soak" }
+dependencies = [
+    { name = "httpx" },
+    { name = "terminal-ecs" },
+    { name = "terminal-model" },
+    { name = "terminal-sim" },
+    { name = "terminal-tos-stub" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx" },
+    { name = "terminal-ecs", editable = "packages/ecs" },
+    { name = "terminal-model", editable = "packages/model" },
+    { name = "terminal-sim", editable = "packages/sim" },
+    { name = "terminal-tos-stub", editable = "packages/tos_stub" },
 ]
 
 [[package]]

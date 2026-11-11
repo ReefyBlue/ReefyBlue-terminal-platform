@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 import signal
 import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -18,6 +17,8 @@ import httpx
 from asyncua import Client
 from terminal_model.types import State
 from terminal_sim.layout import load_layout
+from terminal_soak.chaos import Schedule
+from terminal_soak.linkproxy import LinkProxy  # also re-exported for tests
 
 ROOT = Path(__file__).resolve().parents[2]
 READY_TIMEOUT_S = 60.0
@@ -78,102 +79,6 @@ async def _gateway_ready(endpoint: str, n_equipment: int) -> bool:
             await client.disconnect()
 
 
-class LinkProxy:
-    """Threaded TCP proxy (``listen port -> target port`` on ``host``) whose routes can be
-    cut and restored while both ends keep running; a sync twin of ``tests/gateway/tcp_proxy.py``
-    for e2e tests whose main thread blocks in the runner.
-
-    ``cut()`` resets every open connection of the given routes and refuses new ones (accept,
-    then reset) until ``restore()``; routes not named stay up."""
-
-    def __init__(self, routes: dict[int, int], host: str = "127.0.0.1") -> None:
-        self.routes = dict(routes)
-        self.host = host
-        self._up = dict.fromkeys(routes, True)
-        self._conns: dict[int, set[socket.socket]] = {p: set() for p in routes}
-        self._lock = threading.Lock()
-        self._closed = threading.Event()
-        self._listeners: list[socket.socket] = []
-
-    def start(self) -> LinkProxy:
-        for port in self.routes:
-            ls = socket.socket()
-            ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            ls.bind((self.host, port))
-            ls.listen(16)
-            ls.settimeout(0.2)
-            self._listeners.append(ls)
-            threading.Thread(target=self._accept, args=(ls, port), daemon=True).start()
-        return self
-
-    def stop(self) -> None:
-        self._closed.set()
-        self.cut()
-        for ls in self._listeners:
-            ls.close()
-
-    def cut(self, ports: list[int] | None = None) -> None:
-        for port in self.routes if ports is None else ports:
-            with self._lock:
-                self._up[port] = False
-                conns, self._conns[port] = self._conns[port], set()
-            for s in conns:
-                _reset(s)
-
-    def restore(self, ports: list[int] | None = None) -> None:
-        with self._lock:
-            for port in self.routes if ports is None else ports:
-                self._up[port] = True
-
-    def _accept(self, ls: socket.socket, port: int) -> None:
-        while not self._closed.is_set():
-            try:
-                conn, _ = ls.accept()
-            except TimeoutError:
-                continue
-            except OSError:
-                return
-            conn.settimeout(None)
-            if not self._up[port]:
-                _reset(conn)
-                continue
-            try:
-                up = socket.create_connection((self.host, self.routes[port]), timeout=2.0)
-            except OSError:
-                _reset(conn)
-                continue
-            up.settimeout(None)
-            with self._lock:
-                if not self._up[port]:  # cut while connecting
-                    _reset(conn)
-                    _reset(up)
-                    continue
-                self._conns[port] |= {conn, up}
-            for src, dst in ((conn, up), (up, conn)):
-                threading.Thread(target=self._pump, args=(src, dst), daemon=True).start()
-
-    @staticmethod
-    def _pump(src: socket.socket, dst: socket.socket) -> None:
-        try:
-            while data := src.recv(65536):
-                dst.sendall(data)
-        except OSError:
-            pass
-        finally:
-            _reset(src)
-            _reset(dst)
-
-
-def _reset(s: socket.socket) -> None:
-    """Close ``s`` with an RST (like ``transport.abort()``), waking threads blocked on it."""
-    with contextlib.suppress(OSError):
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
-    with contextlib.suppress(OSError):
-        s.shutdown(socket.SHUT_RDWR)
-    with contextlib.suppress(OSError):
-        s.close()
-
-
 def _stop(proc: subprocess.Popen) -> int:
     if proc.poll() is None:
         proc.send_signal(signal.SIGTERM)
@@ -188,6 +93,7 @@ def _stop(proc: subprocess.Popen) -> int:
 @contextlib.contextmanager
 def sim_and_gateway(
     scenario: Path, *, n_sts: int, n_agv: int, log_dir: Path, proxied_sts: bool = False,
+    extra_sim_args: list[str] | None = None,
 ) -> Iterator[dict]:
     """Start sim then gateway on free ports; yield ``{"endpoint", "returncodes"}``.
 
@@ -195,6 +101,8 @@ def sim_and_gateway(
     port P, every slot ``P+i -> B+i`` of the sim's base port B, control slot included);
     ``info["proxy"]`` is it and ``info["sts_port"]`` the proxy port of STS-01 (slot 0), so
     ``proxy.cut([sts_port])`` drops only the gateway's link to STS-01.
+
+    ``extra_sim_args`` are appended to the sim's command line (e.g. ``["--autostart"]``).
 
     On exit both get SIGTERM; their exit codes land in ``returncodes`` (sim, gateway).
     """
@@ -211,7 +119,7 @@ def sim_and_gateway(
     gw_log = (log_dir / "gateway.log").open("w")
     sim = subprocess.Popen(
         [sys.executable, "-m", "terminal_sim.serve", str(scenario), "--layout", str(ROOT / "terminal.yaml"),
-         "--base-port", str(base), "--host", "127.0.0.1"],
+         "--base-port", str(base), "--host", "127.0.0.1", *(extra_sim_args or [])],
         cwd=ROOT, stdout=sim_log, stderr=subprocess.STDOUT)
     gw = subprocess.Popen(
         [sys.executable, "-m", "terminal_gateway.serve", "--config", str(ROOT / "terminal.yaml"),
@@ -281,3 +189,32 @@ def ecs_service(gateway_endpoint: str, *, log_dir: Path, auto_release: bool = Fa
     finally:
         info["returncode"] = _stop(proc)
         log.close()
+
+
+@contextlib.contextmanager
+def chaos_proxy(target_port: int, every: float, for_s: float) -> Iterator[dict]:
+    """A ``LinkProxy`` on a free port in front of ``127.0.0.1:target_port`` whose link a
+    ``chaos.Schedule(every, for_s)`` cuts in a daemon thread (first cut ``every`` s after
+    entry). Yields ``{"endpoint", "proxy", "events", "stop_cuts"}``: ``endpoint`` is the
+    proxied ``opc.tcp://`` URL, ``events`` the ``(monotonic, "cut"|"restore")`` log and
+    ``stop_cuts()`` ends the schedule with the link up (a cut in progress is restored)
+    while the proxy keeps serving. On exit the schedule stops and the proxy closes."""
+    listen = free_port()
+    proxy = LinkProxy({listen: target_port}).start()
+    stop = threading.Event()
+    events: list[tuple[float, str]] = []
+    thread = threading.Thread(
+        target=Schedule(every, for_s).run, args=(proxy, stop),
+        kwargs={"on_event": lambda e: events.append((time.monotonic(), e))}, daemon=True)
+    thread.start()
+
+    def stop_cuts() -> None:
+        stop.set()
+        thread.join(timeout=for_s + 5.0)
+
+    try:
+        yield {"endpoint": f"opc.tcp://127.0.0.1:{listen}", "proxy": proxy, "events": events,
+               "stop_cuts": stop_cuts}
+    finally:
+        stop_cuts()
+        proxy.stop()

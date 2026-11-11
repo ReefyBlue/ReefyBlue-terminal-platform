@@ -11,13 +11,22 @@ The Dispatcher and KpiCollector are created at the first successful connection (
 Dispatcher reads the fleet in its constructor) against the ``ReconnectingPort``; a
 lost link unbinds and closes the connection, a later one is bound in its place and
 both keep their state.
+
+Memory stays bounded over a long run: on each sample boundary ``step()`` prunes the
+Dispatcher's finished orders beyond ``known_retention`` (``Dispatcher.prune_done``).
+``job`` messages come from ``Dispatcher.new_jobs_since_last_publish()`` (drained on
+every publish, so nothing accumulates); no ``status`` message is built while no
+event-stream client is connected.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import math
+import resource
+import sys
 import time
 from collections.abc import Callable, Sequence
 from typing import Protocol
@@ -31,15 +40,27 @@ from terminal_tos_stub.allocator import SimpleSlotAllocator
 from terminal_ecs_service.events import Broadcaster
 from terminal_ecs_service.port import ReconnectingPort
 
-__all__ = ["CONNECT_RETRY_S", "DRAIN_POLL_S", "SAMPLE_INTERVAL_S", "EcsCore", "LayoutLike"]
+__all__ = ["CONNECT_RETRY_S", "DRAIN_POLL_S", "KNOWN_RETENTION", "RECONNECT_LOG_EVERY_S", "SAMPLE_INTERVAL_S",
+           "EcsCore", "LayoutLike", "rss_mb"]
 
 log = logging.getLogger(__name__)
 
 DRAIN_POLL_S = 0.005
 CONNECT_RETRY_S = 2.0
+KNOWN_RETENTION = 10_000  # finished orders kept for GET /containers and the duplicate check
+RECONNECT_LOG_FIRST = 4  # failed connect attempts in a row that are all logged
+RECONNECT_LOG_EVERY_S = 30.0  # after those: at most one log line per this many wall seconds
+_monotonic = time.monotonic  # wall clock for the reconnect log backoff (patched in tests)
 
 _EMPTY_STATUS = {"pending": 0, "open": 0, "active_jobs": 0, "done": 0, "failed": 0,
                  "replans": 0, "stuck": 0, "bound": 0}
+
+
+def rss_mb() -> float:
+    """Peak resident set size of this process in MiB (``ru_maxrss``: KiB on Linux,
+    bytes on macOS)."""
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak / (1024 * 1024) if sys.platform == "darwin" else peak / 1024
 
 
 class _PositionLike(Protocol):
@@ -84,9 +105,11 @@ class EcsCore:
         connect: Callable[[], EquipmentPort],
         broadcaster: Broadcaster | None = None,
         auto_release: bool = False,
+        known_retention: int = KNOWN_RETENTION,
     ) -> None:
         self.layout = layout  # static geometry, served by GET /layout
         self.auto_release = auto_release
+        self.known_retention = known_retention
         self._last_alarms: dict[tuple[str, str, str | None], dict] = {}
         self._connect = connect  # returns a connected port or raises ConnectionError
         self.port = ReconnectingPort()
@@ -99,10 +122,11 @@ class EcsCore:
         self.tick_count = 0
         self.started_at = time.monotonic()
         self._link: EquipmentPort | None = None  # the bound connection, closed on loss
-        self._seen_jobs: set[str] = set()
-        self.known_containers: set[str] = set()  # every container accepted by submit()
         self._closing: set[asyncio.Future[None]] = set()  # off-loop closes in flight
         self._last_now: float | None = None  # last sim time seen while connected
+        self._failed_attempts = 0  # consecutive failed connect attempts (reset on success)
+        self._failed_since = 0.0  # wall time of the first of them
+        self._failed_logged_period = 0  # last RECONNECT_LOG_EVERY_S period logged
         self.time_reversed = False  # sim time went backwards (sim restarted): /health 503
         self.port.subscribe(self._on_equipment_event)
 
@@ -116,7 +140,7 @@ class EcsCore:
         try:
             link = await asyncio.to_thread(self._connect)  # OPC UA connect blocks
         except ConnectionError as e:
-            log.info("equipment link not available: %s", e)
+            self._log_unavailable(e)
             return False
         self._link = link
         try:
@@ -125,6 +149,7 @@ class EcsCore:
             log.warning("equipment link lost while binding: %s", e)
             self._drop_link(blocking=False)
             return False
+        self._failed_attempts = 0  # bound: the outage is over
         now = self.port.now()
         self._check_time(now)
         if self.dispatcher is None:
@@ -140,6 +165,22 @@ class EcsCore:
         self._publish_link()
         self.publish_alarms()
         return True
+
+    def _log_unavailable(self, e: ConnectionError) -> None:
+        """Log a failed attempt at info on attempts 1..``RECONNECT_LOG_FIRST`` of an
+        outage, then once per ``RECONNECT_LOG_EVERY_S`` wall seconds since its first
+        attempt (the others at debug). The retry timing is not affected."""
+        now = _monotonic()
+        self._failed_attempts += 1
+        n = self._failed_attempts
+        if n == 1:
+            self._failed_since, self._failed_logged_period = now, 0
+        period = math.floor((now - self._failed_since) / RECONNECT_LOG_EVERY_S)
+        if n <= RECONNECT_LOG_FIRST or period > self._failed_logged_period:
+            self._failed_logged_period = max(self._failed_logged_period, period)
+            log.info("equipment link not available (attempt %d): %s", n, e)
+        else:
+            log.debug("equipment link not available (attempt %d): %s", n, e)
 
     def _check_time(self, now: float) -> None:
         """Flag (once) sim time going backwards: the sim was restarted under this ECS,
@@ -201,9 +242,15 @@ class EcsCore:
                 self.tick_count += 1
                 self.publish_status()
                 self.publish_new_jobs()
+                self._prune()  # after publishing: a pruned order's jobs were all published
                 self.publish_alarms()
         except ConnectionError:
             self.on_link_lost()
+
+    def _prune(self) -> None:
+        """Bound the finished-order memory (see the module docstring)."""
+        assert self.dispatcher is not None
+        self.dispatcher.prune_done(self.known_retention)
 
     async def run(self) -> None:
         """Connect, then ``step()`` forever. An unexpected exception is logged and
@@ -245,16 +292,11 @@ class EcsCore:
         except WorkOrderError:
             raise  # rejected before any order was taken
         except ConnectionError as e:
-            self.known_containers.update(o.container_id for o in orders)
             log.warning("equipment link failed after the work orders were taken: %s", e)
             self.on_link_lost()
             self.publish_new_jobs()
             self.publish_alarms()
             return
-        except BaseException:
-            self.known_containers.update(o.container_id for o in orders)  # taken before the tick failed
-            raise
-        self.known_containers.update(o.container_id for o in orders)
         try:
             self.dispatcher.tick()
         except ConnectionError as e:
@@ -317,6 +359,22 @@ class EcsCore:
         self.publish_alarms()
         self.publish_status()
 
+    def is_known(self, container_id: str) -> bool:
+        """An open order or a finished one still retained has ``container_id``: a new
+        work order for it is a DUPLICATE_CONTAINER. (The Dispatcher records orders before
+        its first tick, so this holds even when that tick lost the link.)"""
+        return self.dispatcher is not None and self.dispatcher.is_known(container_id)
+
+    def uptime_s(self) -> float:
+        return time.monotonic() - self.started_at
+
+    def containers(self, since: int, limit: int) -> dict:
+        """``GET /containers``: changes after ``since`` (see ``Dispatcher.containers_since``)."""
+        if self.dispatcher is None:
+            return {"next": 0, "items": []}
+        nxt, items = self.dispatcher.containers_since(since, limit=limit)
+        return {"next": nxt, "items": [dataclasses.asdict(v) for v in items]}
+
     def alarms(self) -> list[dict]:
         if self.dispatcher is None:
             return []
@@ -337,7 +395,7 @@ class EcsCore:
             **base,
             "sim_time": self.port.now(),
             "connected": self.connected,
-            "uptime_s": time.monotonic() - self.started_at,
+            "uptime_s": self.uptime_s(),
             "tick_count": self.tick_count,
         }
 
@@ -369,19 +427,16 @@ class EcsCore:
         return {"type": "status", "sim_time": self.port.now(), **base}
 
     def publish_status(self) -> None:
-        if self.dispatcher is not None:
+        if self.dispatcher is not None and self.broadcaster.client_count > 0:
             self.broadcaster.publish(self.status_message())
 
     def publish_new_jobs(self) -> None:
         if self.dispatcher is None:
             return
-        for job_id, logged in self.dispatcher.job_log.items():
-            if job_id in self._seen_jobs:
-                continue
-            self._seen_jobs.add(job_id)
+        for logged in self.dispatcher.new_jobs_since_last_publish():
             self.broadcaster.publish({
                 "type": "job",
-                "job_id": job_id,
+                "job_id": logged.job.job_id,
                 "equipment_id": logged.equipment_id,
                 "sim_time": logged.assigned_at,
             })

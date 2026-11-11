@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGES = ["model", "sim", "ecs", "tos_stub", "runner", "gateway", "opcua", "kpi", "ecs_service", "viewer"]
+PACKAGES = ["model", "sim", "ecs", "tos_stub", "runner", "gateway", "opcua", "kpi", "ecs_service", "viewer", "soak"]
 ECS_HASH_FIXTURE = ROOT / "tests" / "fixtures" / "ecs_sources.sha256"
 
 # Workspace packages each package may import (besides itself); runner may import all.
@@ -25,6 +25,8 @@ ALLOWED = {
     "gateway": {"terminal_model", "terminal_opcua"},
     "tos_stub": {"terminal_model", "terminal_ecs"},
     "kpi": {"terminal_model", "terminal_ecs"},
+    # soak driver: WorkOrder (terminal_ecs) for the client, the layout loader (terminal_sim)
+    "soak": {"terminal_model", "terminal_ecs", "terminal_sim", "terminal_tos_stub"},
     "ecs_service": {"terminal_model", "terminal_ecs", "terminal_opcua", "terminal_kpi", "terminal_tos_stub",
                     "terminal_viewer"},
 }

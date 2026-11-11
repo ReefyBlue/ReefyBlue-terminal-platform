@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Literal
 
 from terminal_model.locations import SlotLoc, parse_location
 from terminal_model.types import Job, JobType
@@ -85,6 +86,18 @@ class LoggedJob:
     assigned_at: float
 
 
+@dataclass(frozen=True)
+class ContainerView:
+    """One order as ``GET /containers`` lists it; ``seq`` is the number of its last
+    change between open / done / failed (a cursor for ``Dispatcher.containers_since``)."""
+
+    seq: int
+    container_id: str
+    state: Literal["open", "done", "failed"]
+    job_type: Literal["DISCHARGE", "LOAD"]
+    yard_slot: str
+
+
 @dataclass
 class OrderRecord:
     order: WorkOrder
@@ -100,6 +113,7 @@ class OrderRecord:
     stuck: bool = False  # watchdog gave up re-cancelling (see Dispatcher._watchdog)
     replan_streak: int = 0  # JOB_FAILED/FAULT replans in a row (cap -> REPLAN_STREAK); reset on completion
     job_counts: dict[JobType, int] = field(default_factory=dict)
+    change_seq: int = 0  # bumped when taken, DONE or FAILED (``containers_since``); not a FIFO key
 
     @property
     def cid(self) -> str:

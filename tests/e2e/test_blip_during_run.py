@@ -92,14 +92,30 @@ def _run_with_blip(scenario, *, ecs_url: str, gateway: str,
     return result["k"], max_offline, recovered
 
 
+# ids/states as logged; the ECS log is JSON lines, so a match must not swallow the
+# quote that opens the "msg" value
+_BACK_ONLINE = re.compile(r"([\w.-]+) back online: (\w+) \(job ([\w.-]+)\)")
+
+
 def _assert_reconciled(ecs_log: str) -> None:
-    """The cut hits a running job (seed 7, cut at 10 s): on return the device reports that
-    job as its last one (``LastJobId``/``LastJobOutcome``) and the dispatcher reconciles
-    the missed outcome from it (B2d spec §5.1); no outcome is left to the auto-release
-    fallback (``resolve … : failed``)."""
+    """Per ``<eid> back online: <state> (job <X>)`` line: whether the cut hit a running
+    job depends on wall timing, so the check follows what the ECS saw (B2d spec §5.1).
+    ``job None``: nothing was running, nothing to reconcile. ``IDLE`` with job X: X ended
+    during the cut; the device reports it as its last job and the dispatcher reconciles
+    the missed outcome from it. ``BUSY`` with job X: X still runs; its outcome is not
+    unknown. In no case is an outcome left to the auto-release fallback
+    (``resolve … : failed``)."""
     text = Path(ecs_log).read_text()
-    assert re.search(r"reconciled \S+ on \S+ from equipment: (COMPLETED|FAILED)", text), \
-        "no missed outcome reconciled from the equipment's last-job report"
+    for eid, state, job_id in _BACK_ONLINE.findall(text):
+        if job_id == "None":
+            continue
+        jid, e = re.escape(job_id), re.escape(eid)
+        if state == "IDLE":
+            assert re.search(rf"reconciled {jid} on {e} from equipment: (COMPLETED|FAILED)", text), \
+                f"{job_id} on {eid} ended during the cut but was not reconciled from the last-job report"
+        elif state == "BUSY":
+            assert not re.search(rf"outcome of {jid} on {e} unknown", text), \
+                f"{job_id} on {eid} still ran after the cut but its outcome was declared unknown"
     assert not re.search(r"resolve \S+ on \S+: failed", text)
 
 

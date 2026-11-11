@@ -26,6 +26,11 @@ class Broadcaster:
     def clients(self) -> int:
         return len(self._queues)
 
+    @property
+    def client_count(self) -> int:
+        """Registered clients; 0 lets publishers skip building messages nobody gets."""
+        return len(self._queues)
+
     def register(self) -> asyncio.Queue[dict]:
         q: asyncio.Queue[dict] = asyncio.Queue(maxsize=self.QUEUE_SIZE)
         self._queues[q] = float("-inf")

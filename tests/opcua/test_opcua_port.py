@@ -19,6 +19,7 @@ from asyncua import ua
 from terminal_gateway.gateway import Gateway
 from terminal_model.port import EquipmentEvent, EquipmentPort, EventKind
 from terminal_model.types import Job, JobType, State
+from terminal_opcua import port as port_mod
 from terminal_opcua.port import OpcUaEquipmentPort
 from terminal_sim.layout import load_layout
 from terminal_sim.opcua_servers import ControlServer, EquipmentServer
@@ -265,12 +266,20 @@ async def test_connection_lost_fails_fast():
         await r.gateway.stop()
         lost = await _until(lambda: r.port._lost, 10.0, step=0.05)
         assert lost, "connection loss not detected"
-        t0 = time.monotonic()
-        with pytest.raises(ConnectionError):
-            await asyncio.to_thread(r.port.snapshot, "STS-01")
-        with pytest.raises(ConnectionError):
-            await asyncio.to_thread(r.port.wait_for_sim_time, r.port.now() + 1000, 30.0)
-        assert time.monotonic() - t0 < 0.5
+        # "Fast" = well inside the call timeout, not after waiting it out. Measured around the
+        # failing call only (not the thread hop), with a 2 s floor against full-suite load.
+        bound = max(2.0, 0.5 * port_mod.CALL_TIMEOUT_S)
+        assert bound < port_mod.CALL_TIMEOUT_S
+
+        def timed(fn, *args):
+            t0 = time.monotonic()
+            with pytest.raises(ConnectionError):
+                fn(*args)
+            return time.monotonic() - t0
+
+        assert await asyncio.to_thread(timed, r.port.snapshot, "STS-01") < bound
+        sim_t = r.port.now() + 1000
+        assert await asyncio.to_thread(timed, r.port.wait_for_sim_time, sim_t, 30.0) < bound
     finally:
         await asyncio.to_thread(r.port.close)
         await asyncio.gather(*(s.stop() for s in [*r.servers.values(), r.control]))

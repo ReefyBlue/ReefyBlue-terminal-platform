@@ -29,7 +29,7 @@ def _fleet(n_sts=2, n_agv=6, n_asc=None) -> list[dict]:
 
 class ScriptedEcs:
     """The ECS service API: ``statuses`` is a list of ``(open, sim_time)`` served in turn
-    (the last one repeats)."""
+    (the last one repeats); an entry ``503`` answers ``503 Not connected``."""
 
     def __init__(self, statuses, *, healthy=True, fleet=None, post_status=202, fresh=None):
         self.statuses = list(statuses)
@@ -60,7 +60,10 @@ class ScriptedEcs:
             self.fresh_served = True
             return httpx.Response(200, json={**self.fresh, "sim_time": self.statuses[0][1]})
         if path == "/status":
-            open_, sim_time = self.statuses[0] if len(self.statuses) == 1 else self.statuses.pop(0)
+            entry = self.statuses[0] if len(self.statuses) == 1 else self.statuses.pop(0)
+            if entry == 503:
+                return httpx.Response(503, json={"detail": "not connected to the equipment"})
+            open_, sim_time = entry
             return httpx.Response(200, json={"open": open_, "sim_time": sim_time})
         if path == "/kpis":
             return httpx.Response(200, json=dict(KPIS))
@@ -181,6 +184,27 @@ def test_sim_time_stall_raises_and_stops(setup, monkeypatch):
     # sim time moved to 60 at the first poll, then stood still for 120 s wall
     assert len(sleeps) == run.STALL_TIMEOUT_S / run.STATUS_POLL_S
     assert "GET /kpis" not in log and log[-2:] == ["stop", "close"]
+
+
+def test_status_503_during_a_link_cut_is_retried(setup):
+    """The first request that hits a just-cut ECS link answers 503 (the service then
+    serves from cache): the poll retries instead of ending the run."""
+    _, log, _, _, make = setup
+    ecs = ScriptedEcs([(200, 0.0), (3, 60.0), 503, 503, (3, 120.0), (0, 180.0)])
+    k = _run(make(ecs))
+    assert k == {**KPIS, "timed_out": 0.0}
+    assert log[-2:] == ["stop", "close"]
+
+
+def test_status_503_for_good_stalls_out(setup, monkeypatch):
+    _, log, sleeps, _, make = setup
+    clock = [0.0]
+    monkeypatch.setattr(run, "_clock", lambda: clock[0])
+    monkeypatch.setattr(run, "_sleep", lambda s: (sleeps.append(s), clock.__setitem__(0, clock[0] + s)))
+    with pytest.raises(RuntimeError, match="sim time stalled"):
+        _run(make(ScriptedEcs([(200, 0.0), (5, 60.0), 503])))
+    assert len(sleeps) == run.STALL_TIMEOUT_S / run.STATUS_POLL_S
+    assert log[-2:] == ["stop", "close"]
 
 
 def test_rejected_workorders_stop_sim(setup):

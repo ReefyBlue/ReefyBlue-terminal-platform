@@ -26,8 +26,10 @@ RECOVERY (any other JOB_FAILED, STATE_CHANGED->FAULT with a running job, watchdo
 QUARANTINE
     an order that fails (any reason) while its box is on its AGV (``BOX_ON_AGV``), and
     the AGV of a failed hand-over (TRANSFER_ERROR), quarantine that AGV: it gets no job
-    and needs an operator ``release()`` (cause "quarantined: box may be on board"); this
-    is never lifted by ``auto_release``.
+    and needs an operator ``release()`` (cause "quarantined: box may be on board"). With
+    ``auto_release`` an IDLE report with no box on board (snapshot extra
+    ``loaded_container_id`` present and empty) lifts it like a release; with a box, or
+    when the AGV does not report its load, it stays.
 LINK LOSS (STATE_CHANGED->OFFLINE)
     no replan: the order keeps its stage and job, the device gets no new jobs and the
     watchdog clock of an offline AGV stands still. On return (reason LINK_RESTORED /
@@ -41,8 +43,8 @@ LINK LOSS (STATE_CHANGED->OFFLINE)
 
 State sets: ``_excluded`` (until IDLE), ``_quarantined`` (until release),
 ``_offline`` (until the link returns) and ``_needs_release`` (until release, or IDLE
-with ``auto_release`` unless quarantined) are independent; a device in any of them
-gets no job (``_unusable``). A FAULT puts the device in both ``_excluded`` and
+with ``auto_release`` unless quarantined with a box on board) are independent; a
+device in any of them gets no job (``_unusable``). A FAULT puts the device in both ``_excluded`` and
 ``_needs_release``; an unknown outcome or a quarantine only in ``_needs_release`` (and
 ``_quarantined``), so ``_needs_release`` is not a subset of ``_excluded``.
 
@@ -72,12 +74,20 @@ operator ``resolve_job(.., "failed")`` neither count nor reset. At
 log, ``status()["failed"]``; its TP is freed, its AGV too unless the box is on it, see
 QUARANTINE) instead of being re-issued in an
 endless loop of immediately failing jobs.
+
+Finished orders (DONE and FAILED) are kept, in finish order, for ``containers_since``
+and the DUPLICATE_CONTAINER check until ``prune_done(keep)`` drops the oldest beyond
+``keep`` (with their ``completed`` entries and job-log entries; ``status()`` counters stay
+cumulative). Only the long-running ECS service prunes; nothing here calls it, so a run
+without pruning behaves exactly as before.
 """
 
 from __future__ import annotations
 
+import heapq
 import itertools
 import logging
+from collections import deque
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
 from typing import Literal
@@ -98,6 +108,7 @@ from terminal_ecs.orders import (
     RELEASE_AGV,
     ROLLBACK,
     TP_BUSY,
+    ContainerView,
     LoggedJob,
     OrderRecord,
     Stage,
@@ -136,6 +147,7 @@ class Dispatcher:
         self.jobs: dict[str, Job] = {}
         self.completed: list[str] = []
         self._job_log: dict[str, LoggedJob] = {}
+        self._new_jobs: deque[LoggedJob] = deque()  # logged since the last drain
 
         self._sts: list[str] = []
         self._agvs: list[str] = []
@@ -151,7 +163,10 @@ class Dispatcher:
                 self._asc_by_block[str(block) if block else eid.split("-", 1)[1]] = eid
 
         self._all_eq = frozenset({*self._sts, *self._agvs, *self._asc_by_block.values()})
-        self._known: set[str] = set()
+        self._known: set[str] = set()  # open + retained finished orders (DUPLICATE_CONTAINER)
+        self._finished: dict[str, OrderRecord] = {}  # DONE/FAILED records, in finish order
+        self._done_total = 0  # cumulative, unaffected by prune_done
+        self._change_hw = 0  # last ContainerView seq handed out
         self._open: dict[str, OrderRecord] = {}  # submit order = per-STS FIFO
         self._by_job: dict[str, OrderRecord] = {}
         self._job_eq: dict[str, str] = {}  # running job_id -> equipment id
@@ -201,7 +216,9 @@ class Dispatcher:
             self._known.add(o.container_id)
             stage = Stage.AWAIT_AGV if o.type is JobType.DISCHARGE else Stage.AWAIT_ASC
             seq = next(self._seq)
-            self._open[o.container_id] = OrderRecord(o, o.yard_slot, stage, seq=seq, submit_seq=seq)
+            rec = OrderRecord(o, o.yard_slot, stage, seq=seq, submit_seq=seq)
+            self._open[o.container_id] = rec
+            self._changed(rec)
         self.tick()
 
     def status(self) -> dict:
@@ -209,7 +226,7 @@ class Dispatcher:
             "pending": sum(r.stage in PENDING for r in self._open.values()),
             "open": len(self._open),  # every order not yet DONE or FAILED
             "active_jobs": len(self.jobs),
-            "done": len(self.completed),
+            "done": self._done_total,
             "failed": self._failed,
             "replans": self._replans,
             "stuck": sum(r.stuck for r in self._open.values()),
@@ -225,6 +242,66 @@ class Dispatcher:
             "needs_release": len(self._needs_release),
             "unknown_outcomes": len(self._unknown),
         }
+
+    def is_known(self, container_id: str) -> bool:
+        """True for an open order and a finished one not yet pruned (a re-submit is a
+        DUPLICATE_CONTAINER)."""
+        return container_id in self._known
+
+    def prune_done(self, keep: int) -> int:
+        """Forget the oldest finished (DONE/FAILED) orders beyond the newest ``keep``: their
+        records, ``completed`` entries, job-log entries and container ids (which may then
+        be submitted again). Open orders and the ``status()`` counters are untouched.
+        Returns how many were dropped. Never called by the dispatcher itself."""
+        if keep < 0:
+            raise ValueError(f"keep must be >= 0, not {keep}")
+        n = len(self._finished) - keep
+        if n <= 0:
+            return 0
+        done = 0
+        for cid in list(itertools.islice(self._finished, n)):
+            rec = self._finished.pop(cid)
+            self._known.discard(cid)
+            done += rec.stage is Stage.DONE
+            for jtype, count in rec.job_counts.items():  # job ids are "<cid>-<type>-<1..count>"
+                for i in range(1, count + 1):
+                    self._job_log.pop(f"{cid}-{jtype}-{i}", None)
+        # ``completed`` and ``_finished`` are both in finish order: the pruned DONE
+        # orders are the head of ``completed``.
+        del self.completed[:done]
+        return n
+
+    def containers_since(self, since: int, *, limit: int | None = None) -> tuple[int, list[ContainerView]]:
+        """Orders whose open/done/failed state changed after ``since`` (``seq`` order, at
+        most ``limit``), and the cursor for the next call: the last returned ``seq``, or
+        with nothing to return the newest ``seq`` handed out (also when ``since`` lies
+        beyond it, e.g. a cursor from another dispatcher). Pruned orders are gone; a
+        cursor older than the retained window gets every retained order."""
+        if since < 0:
+            raise ValueError(f"since must be >= 0, not {since}")
+        # Both sources are already ascending in change_seq: open orders keep their
+        # submit seq, finished ones get a new seq when they enter ``_finished``.
+        opened = [r for r in self._open.values() if r.change_seq > since]
+        finished: list[OrderRecord] = []
+        for r in reversed(self._finished.values()):
+            if r.change_seq <= since:
+                break
+            finished.append(r)
+        finished.reverse()
+        recs = list(heapq.merge(opened, finished, key=lambda r: r.change_seq))
+        if limit is not None:
+            recs = recs[:limit]
+        items = [
+            ContainerView(
+                seq=r.change_seq,
+                container_id=r.cid,
+                state="open" if r.cid in self._open else ("done" if r.stage is Stage.DONE else "failed"),
+                job_type=r.order.type.value,  # type: ignore[arg-type]
+                yard_slot=r.yard_slot,
+            )
+            for r in recs
+        ]
+        return (items[-1].seq if items else self._change_hw), items
 
     def alarms(self) -> list[Alarm]:
         """What the operator has to act on, oldest first (derived from the state sets)."""
@@ -260,14 +337,19 @@ class Dispatcher:
         for job_id, eid in self._unknown.items():
             if eid == equipment_id:
                 raise ReleaseRefused(f"resolve job {job_id} first")
-        self._clear_release(equipment_id)
-        self._excluded.discard(equipment_id)
-        if equipment_id in self._quarantined:
-            self._quarantined.discard(equipment_id)
-            log.warning("quarantine of %s lifted by operator release", equipment_id)
+        self._lift(equipment_id, "operator release")
         log.info("released %s", equipment_id)
         if tick:
             self.tick()
+
+    def _lift(self, eid: str, by: str) -> None:
+        """What a release does once it is allowed: clear the release need, the exclusion
+        and a quarantine (with its alarm)."""
+        self._clear_release(eid)
+        self._excluded.discard(eid)
+        if eid in self._quarantined:
+            self._quarantined.discard(eid)
+            log.warning("quarantine of %s lifted by %s", eid, by)
 
     def resolve_job(self, job_id: str, outcome: Literal["completed", "failed"], *, tick: bool = True) -> None:
         """Operator verdict on a job whose outcome was lost during a link outage.
@@ -287,6 +369,14 @@ class Dispatcher:
     def job_log(self) -> Mapping[str, LoggedJob]:
         """Read-only: every job id ever accepted by equipment -> who got it and when."""
         return MappingProxyType(self._job_log)
+
+    def new_jobs_since_last_publish(self) -> list[LoggedJob]:
+        """Jobs accepted by equipment since the previous call, in log order; drains.
+
+        A job rejected by its equipment (or pruned) before the drain is left out."""
+        out = [lj for lj in self._new_jobs if self._job_log.get(lj.job.job_id) is lj]
+        self._new_jobs.clear()
+        return out
 
     def committed_agvs(self) -> frozenset[str]:
         """AGVs reserved for an open order (also while idle, e.g. waiting in a lane)."""
@@ -486,7 +576,8 @@ class Dispatcher:
         self._job_eq[job.job_id] = eid
         if eid in self._agvs:
             self._last_progress[eid] = self.port.now()
-        self._job_log[job.job_id] = LoggedJob(job, eid, self.port.now())
+        logged = self._job_log[job.job_id] = LoggedJob(job, eid, self.port.now())
+        self._new_jobs.append(logged)
         if self.port.assign_job(eid, job):
             rec.job_counts[job.type] = rec.job_counts.get(job.type, 0) + 1
             log.debug("assign %s -> %s (%s -> %s)", job.job_id, eid, job.from_loc, job.to_loc)
@@ -576,6 +667,17 @@ class Dispatcher:
         self._enter(rec, Stage.DONE)
         del self._open[rec.cid]
         self.completed.append(rec.cid)
+        self._done_total += 1
+        self._retire(rec)
+
+    def _retire(self, rec: OrderRecord) -> None:
+        """Keep a finished order for ``containers_since`` until ``prune_done``."""
+        self._finished[rec.cid] = rec
+        self._changed(rec)
+
+    def _changed(self, rec: OrderRecord) -> None:
+        self._change_hw += 1
+        rec.change_seq = self._change_hw
 
     def _on_failed(self, ev: EquipmentEvent) -> None:
         rec = self._record_for(ev)
@@ -609,8 +711,11 @@ class Dispatcher:
 
     def _apply_state(self, eid: str, state: State | None) -> None:
         if state is State.IDLE:
-            if self.auto_release and eid not in self._quarantined:  # a quarantine needs a human
-                self._clear_release(eid)
+            if self.auto_release:
+                if eid not in self._quarantined:
+                    self._clear_release(eid)
+                elif self._box_free(eid):  # nothing to recover: no human needed
+                    self._lift(eid, "auto_release (IDLE, no box on board)")
             if eid not in self._needs_release:
                 self._excluded.discard(eid)
         elif state is State.FAULT:
@@ -620,6 +725,12 @@ class Dispatcher:
             for job_id, jeq in list(self._job_eq.items()):
                 if jeq == eid and job_id not in self._unknown:  # unknown ones wait for resolve_job
                     self._replan(self._by_job[job_id], jeq, "FAULT", streak=True)
+
+    def _box_free(self, eid: str) -> bool:
+        """The device reports its load and it is empty (``None`` or ``""``); a device that
+        does not report ``loaded_container_id`` may still carry a box."""
+        extra = self.port.snapshot(eid).extra
+        return "loaded_container_id" in extra and not extra["loaded_container_id"]
 
     def _go_offline(self, eid: str, reason: str | None) -> None:
         if eid in self._offline:
@@ -797,7 +908,8 @@ class Dispatcher:
         rec.fail_reason = reason
         rec.agv_id = None
         self._enter(rec, Stage.FAILED)
-        self._open.pop(rec.cid, None)
+        if self._open.pop(rec.cid, None) is not None:
+            self._retire(rec)
         self._failed += 1
 
     def _transfer(self, rec: OrderRecord, kind: str, eid: str, agv: str | None) -> bool:

@@ -1,0 +1,15 @@
+# Duurtest op de NAS (Plan B2c). Storingen als faults.yaml; de soak-driver levert het werk aan
+# (n_containers is voor de driver niet van belang, load_scenario vereist het veld wel).
+name: soak
+seed: 1
+n_sts: 2
+n_agv: 6
+n_containers: 60
+share_40ft: 0.6
+discharge_share: 0.5
+speed_factor: 1          # echte tijd; SPEED_FACTOR in .env overschrijft dit (sim --speed-factor)
+duration_s: 300000       # > 72 u sim-tijd; de driver bepaalt het einde (--hours)
+faults:
+  sts: {mtbf_s: 7200, mttr_s: 600}
+  agv: {mtbf_s: 14400, mttr_s: 300}
+  asc: {mtbf_s: 10800, mttr_s: 900}

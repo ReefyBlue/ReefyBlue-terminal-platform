@@ -16,6 +16,7 @@ class FakePort:
         self._state = {eid: State.IDLE for eid in equipment}
         self._job: dict[str, Job | None] = {eid: None for eid in equipment}
         self._last: dict[str, tuple[str | None, str | None]] = {eid: (None, None) for eid in equipment}
+        self._extra: dict[str, dict] = {eid: {} for eid in equipment}
         self._subs: list[Callable[[EquipmentEvent], None]] = []
         self._now = 0.0
         self.calls: list[tuple[str, Job]] = []
@@ -36,7 +37,8 @@ class FakePort:
             position=self._pos[equipment_id],
             current_job_id=job.job_id if job else None,
             energy_kwh=0.0,
-            extra={"last_job_id": self._last[equipment_id][0], "last_job_outcome": self._last[equipment_id][1]},
+            extra={**self._extra[equipment_id], "last_job_id": self._last[equipment_id][0],
+                   "last_job_outcome": self._last[equipment_id][1]},
         )
 
     def assign_job(self, equipment_id: str, job: Job) -> bool:
@@ -67,6 +69,10 @@ class FakePort:
 
     def set_position(self, equipment_id: str, pos: Position) -> None:
         self._pos[equipment_id] = pos
+
+    def set_extra(self, equipment_id: str, **values: object) -> None:
+        """Extra snapshot fields (e.g. ``loaded_container_id``); merged into ``extra``."""
+        self._extra[equipment_id].update(values)
 
     def set_last_job(self, equipment_id: str, job_id: str | None, outcome: str | None) -> None:
         """What the device reports as its most recent ended job ("COMPLETED" | "FAILED")."""
