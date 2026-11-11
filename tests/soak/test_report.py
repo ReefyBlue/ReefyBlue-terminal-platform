@@ -125,3 +125,47 @@ def test_main_reads_files(tmp_path, capsys):
     r.write_text(json.dumps(OK_RESTARTS))
     assert report.main([str(p), "--restarts", str(r), "--window-hours", "2"]) == 0
     assert "| 1 |" in capsys.readouterr().out
+
+
+def test_empty_final_status_walks_back():
+    s = make_samples(5, needs_release=3)
+    s[-1]["status"] = {}
+    s[-1]["alarms_by_kind"] = {}
+    rep = report.evaluate(s, OK_RESTARTS)
+    assert crit(rep, 5).passed is False
+    lost = make_samples(5, link_lost=1)
+    lost[-1]["status"], lost[-1]["alarms_by_kind"] = {}, {}
+    assert crit(report.evaluate(lost, OK_RESTARTS), 4).passed is False
+
+
+def test_all_empty_status_not_measured():
+    s = make_samples(5)
+    for x in s:
+        x["status"], x["alarms_by_kind"] = {}, {}
+    rep = report.evaluate(s, OK_RESTARTS)
+    assert crit(rep, 4).passed is None and crit(rep, 5).passed is None
+    assert "geen status in laatste meetpunt" in crit(rep, 5).detail
+    assert rep.windows == [] and rep.skipped_windows >= 1
+    assert "zonder status" in report.render_markdown(rep)
+
+
+def test_empty_boundary_sample_does_not_distort_windows():
+    s = make_samples(13)
+    s[6]["status"] = {}
+    rep = report.evaluate(s, OK_RESTARTS)
+    assert crit(rep, 3).passed is True
+    assert [round(w.moves_per_h) for w in rep.windows] == [50, 50]
+
+
+def test_rss_reference_is_not_the_last_sample():
+    rss = [100.0, 100.0, 500.0]
+    rep = report.evaluate(make_samples(3, rss=rss, step_h=3.0), OK_RESTARTS)
+    assert crit(rep, 2).passed is False  # last (500) vs second (100), not vs itself
+    assert crit(report.evaluate(make_samples(3, rss=rss), OK_RESTARTS), 2).passed is False
+
+
+def test_trailing_partial_window_is_marked_and_not_judged():
+    rep = report.evaluate(make_samples(10, done_per_hour=lambda i: 50 if i <= 6 else 5), OK_RESTARTS)
+    assert [w.partial for w in rep.windows] == [False, True]
+    assert crit(rep, 3).passed is True
+    assert "(deel)" in report.render_markdown(rep)

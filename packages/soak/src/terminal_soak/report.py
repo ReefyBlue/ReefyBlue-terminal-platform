@@ -40,6 +40,7 @@ class Window:
     offline: int
     needs_release: int
     unknown: int
+    partial: bool = False  # trailing window shorter than the window length
 
 
 @dataclass
@@ -58,6 +59,8 @@ class Report:
     windows: list[Window] = field(default_factory=list)
     cuts: list[Cut] = field(default_factory=list)
     ecs_resets_seen: int = 0
+    skipped_windows: int = 0  # windows without two samples that have a status
+    no_status_samples: int = 0
 
 
 def _t(s: dict) -> datetime:
@@ -73,24 +76,32 @@ def _rss(s: dict) -> float | None:
     return float(v) if v is not None else None
 
 
-def _windows(samples: list[dict], hours: float) -> list[Window]:
+def _has_status(s: dict) -> bool:
+    """The driver writes ``status == {}`` when the ECS was unreachable: no data."""
+    return (s.get("status") or {}).get("done") is not None
+
+
+def _windows(samples: list[dict], hours: float) -> tuple[list[Window], int]:
     if len(samples) < 2:
-        return []
+        return [], 0
     t0, tn = _t(samples[0]), _t(samples[-1])
     step = timedelta(hours=hours)
     out: list[Window] = []
+    skipped = 0
     k = 0
     while t0 + k * step < tn:
         lo, hi = t0 + k * step, min(t0 + (k + 1) * step, tn)
-        inside = [s for s in samples if lo <= _t(s) <= hi]
+        inside = [s for s in samples if lo <= _t(s) <= hi and _has_status(s)]
         k += 1
-        if len(inside) < 2:
+        if len(inside) < 2 or _t(inside[-1]) <= _t(inside[0]):
+            skipped += 1
             continue
         a, b = inside[0], inside[-1]
         dh = (_t(b) - _t(a)).total_seconds() / 3600.0
         out.append(Window(a["wall_time"], b["wall_time"], (_st(b, "done") - _st(a, "done")) / dh,
-                          _rss(b), _st(b, "offline"), _st(b, "needs_release"), _st(b, "unknown_outcomes")))
-    return out
+                          _rss(b), _st(b, "offline"), _st(b, "needs_release"), _st(b, "unknown_outcomes"),
+                          partial=hi - lo < step))
+    return out, skipped
 
 
 def _c1(restarts: dict[str, int] | None) -> Criterion:
@@ -111,9 +122,10 @@ def _c2(samples: list[dict]) -> Criterion:
     if len(samples) < 3:
         return Criterion(name, None, f"{NM} (< 3 meetpunten)")
     t0 = _t(samples[0])
-    ref = next((s for s in samples if _t(s) - t0 >= timedelta(hours=2)), None)
+    # the reference must be an earlier sample than the last one
+    ref = next((s for s in samples[:-1] if _t(s) - t0 >= timedelta(hours=2)), None)
     ref_label = "uur 2"
-    if ref is None or ref is samples[0]:
+    if ref is None:
         ref, ref_label = samples[1], "tweede meetpunt"
     r, last = _rss(ref), _rss(samples[-1])
     if r is None or last is None or r <= 0:
@@ -126,13 +138,19 @@ def _c3(windows: list[Window]) -> Criterion:
     name = "3 Doorvoer stabiel"
     if not windows:
         return Criterion(name, None, f"{NM} (geen venster)")
-    first = windows[0].moves_per_h
+    judged = [w for w in windows if not w.partial]
+    if not judged:  # run shorter than one window: only "moves happen"
+        w = windows[0]
+        return Criterion(name, w.moves_per_h > 0,
+                         f"alleen deelvenster, {w.moves_per_h:.1f} moves/uur (geen ±20 %-toets)")
+    first = judged[0].moves_per_h
     if first <= 0:
         return Criterion(name, False, "eerste venster 0 moves/uur")
-    dev = max(abs(w.moves_per_h - first) / first for w in windows)
+    dev = max(abs(w.moves_per_h - first) / first for w in judged)
     ok = dev <= TOLERANCE
-    return Criterion(name, ok, f"{len(windows)} venster(s), eerste {first:.1f} moves/uur, "
-                               f"grootste afwijking {dev * 100:.0f} % (max {TOLERANCE * 100:.0f} %)")
+    extra = " (deelvenster niet meegeteld)" if len(judged) < len(windows) else ""
+    return Criterion(name, ok, f"{len(judged)} venster(s), eerste {first:.1f} moves/uur, "
+                               f"grootste afwijking {dev * 100:.0f} % (max {TOLERANCE * 100:.0f} %){extra}")
 
 
 def _c4(samples: list[dict], cuts: list[Cut]) -> Criterion:
@@ -140,9 +158,13 @@ def _c4(samples: list[dict], cuts: list[Cut]) -> Criterion:
     if not samples:
         return Criterion(name, None, NM)
     last = samples[-1]
+    with_status = [x for x in samples if _has_status(x)]
+    if not with_status:
+        return Criterion(name, None, "niet gemeten (geen status in laatste meetpunt)")
+    alarm_src = with_status[-1]
     slow = [c for c in cuts if c.recovered_s > MAX_RECOVERY_S]
     open_since = last.get("cut_open_since")
-    lost = int((last.get("alarms_by_kind") or {}).get("LINK_LOST", 0))
+    lost = int((alarm_src.get("alarms_by_kind") or {}).get("LINK_LOST", 0))
     problems = []
     if slow:
         problems.append(f"{len(slow)} cut(s) > {MAX_RECOVERY_S:.0f} s hersteld (max {max(c.recovered_s for c in slow):.0f} s)")
@@ -160,6 +182,9 @@ def _c5(samples: list[dict], manual: bool) -> Criterion:
     name = "5 Geen vastzittend werk"
     if not samples:
         return Criterion(name, None, NM)
+    samples = [x for x in samples if _has_status(x)]
+    if not samples:
+        return Criterion(name, None, "niet gemeten (geen status in laatste meetpunt)")
     last = samples[-1]
     nr, uo = _st(last, "needs_release"), _st(last, "unknown_outcomes")
     if manual:
@@ -186,13 +211,14 @@ def _c6(samples: list[dict]) -> Criterion:
 
 def evaluate(samples: list[dict], restarts: dict[str, int] | None, *, window_hours: float = 6.0,
              manual: bool = False) -> Report:
-    windows = _windows(samples, window_hours)
+    windows, skipped = _windows(samples, window_hours)
     cuts = [Cut(r["at"], float(r["recovered_s"])) for r in (samples[-1].get("recoveries") or [])] if samples else []
     criteria = [_c1(restarts), _c2(samples), _c3(windows), _c4(samples, cuts), _c5(samples, manual), _c6(samples)]
     hours = (_t(samples[-1]) - _t(samples[0])).total_seconds() / 3600.0 if samples else 0.0
     return Report(samples[0]["wall_time"] if samples else None, samples[-1]["wall_time"] if samples else None,
                   hours, len(samples), criteria, windows, cuts,
-                  int(samples[-1].get("ecs_resets_seen") or 0) if samples else 0)
+                  int(samples[-1].get("ecs_resets_seen") or 0) if samples else 0,
+                  skipped, sum(1 for x in samples if not _has_status(x)))
 
 
 def _mark(p: bool | None) -> str:
@@ -211,7 +237,8 @@ def render_markdown(rep: Report) -> str:
           "|---|---|---|---|---|---|---|---|"]
     for i, w in enumerate(rep.windows, 1):
         rss = "-" if w.rss_mb is None else f"{w.rss_mb:.1f}"
-        L.append(f"| {i} | {w.start} | {w.end} | {w.moves_per_h:.1f} | {rss} | {w.offline} | {w.needs_release} | {w.unknown} |")
+        label = f"{i} (deel)" if w.partial else str(i)
+        L.append(f"| {label} | {w.start} | {w.end} | {w.moves_per_h:.1f} | {rss} | {w.offline} | {w.needs_release} | {w.unknown} |")
     if not rep.windows:
         L.append("| - | - | - | niet gemeten | - | - | - | - |")
     L += ["", "## Cuts", "", "| Cut | Begin | Herstel (s) |", "|---|---|---|"]
@@ -219,7 +246,12 @@ def render_markdown(rep: Report) -> str:
         L.append(f"| {i} | {c.at} | {c.recovered_s:.1f} |")
     if not rep.cuts:
         L.append("| - | geen cuts gezien | - |")
-    L += ["", "## Kanttekeningen", "",
+    notes = []
+    if rep.no_status_samples:
+        notes.append(f"- {rep.no_status_samples} meetpunt(en) zonder status (ECS onbereikbaar) genegeerd voor vensters en criteria 4/5.")
+    if rep.skipped_windows:
+        notes.append(f"- {rep.skipped_windows} venster(s) overgeslagen: minder dan twee meetpunten met status.")
+    L += ["", "## Kanttekeningen", "", *notes,
           "- rss_mb is de piek-RSS (ru_maxrss) en kan alleen stijgen; criterium 2 vergelijkt het laatste meetpunt met uur 2 (bij een run korter dan 2 uur met het tweede meetpunt).",
           f"- ECS-herstarts gezien door de driver (ecs_resets_seen): {rep.ecs_resets_seen}.",
           "- Moves/uur is gemeten in wandtijd (Δ status.done); YARD_FULL wordt niet in de samples vastgelegd en dus niet door dit rapport beoordeeld.", ""]
