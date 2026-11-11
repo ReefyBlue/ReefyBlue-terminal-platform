@@ -18,6 +18,17 @@ class WorkOrderRejected(Exception):
         self.errors = errors
 
 
+class EcsRefused(Exception):
+    """An operator request was refused (HTTP 404/409); ``code`` and ``message`` from the body
+    (``UNKNOWN_EQUIPMENT``, ``UNKNOWN_JOB``, ``RELEASE_REFUSED``)."""
+
+    def __init__(self, status: int, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.status = status
+        self.code = code
+        self.message = message
+
+
 class EcsClient:
     def __init__(self, base_url: str, *, transport: httpx.BaseTransport | None = None,
                  timeout_s: float = 5.0) -> None:
@@ -57,6 +68,25 @@ class EcsClient:
 
     def equipment(self) -> list[dict]:
         return self._get("/equipment")
+
+    def alarms(self) -> list[dict]:
+        return self._get("/alarms")
+
+    def _operator_post(self, path: str, body: dict | None = None) -> dict:
+        resp = self._http.post(path, json=body)
+        if resp.status_code in (404, 409):
+            data = resp.json()
+            raise EcsRefused(resp.status_code, data.get("code", ""), data.get("message", ""))
+        resp.raise_for_status()  # 422 (invalid outcome), 503 (not connected)
+        return resp.json()
+
+    def release(self, equipment_id: str) -> dict:
+        """``{"released": id}``; ``EcsRefused`` on 404 (unknown) / 409 (refused)."""
+        return self._operator_post(f"/equipment/{equipment_id}/release")
+
+    def resolve_job(self, job_id: str, outcome: str) -> dict:
+        """``{"job_id", "outcome"}``; ``EcsRefused`` on 404, ``httpx.HTTPStatusError`` on 422."""
+        return self._operator_post(f"/jobs/{job_id}/resolve", {"outcome": outcome})
 
     def health(self) -> bool:
         try:

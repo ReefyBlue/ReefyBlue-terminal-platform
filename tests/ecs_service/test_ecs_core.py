@@ -135,7 +135,11 @@ async def test_step_on_connection_error_unbinds_and_publishes_link(caplog):
             break
         await asyncio.sleep(0.01)
     assert fake.closed == 1
-    assert _drain(q) == [{"type": "link", "connected": False, "sim_time": 30.0}]
+    msgs = _drain(q)
+    assert [m for m in msgs if m["type"] == "link"] == [{"type": "link", "connected": False, "sim_time": 30.0}]
+    lost = [m for m in msgs if m["type"] == "equipment"]
+    assert {m["equipment_id"] for m in lost} == {"AGV-01", "ASC-A", "STS-01"}
+    assert all(m["reason"] == "LINK_LOST" and m["new_state"] == "OFFLINE" for m in lost)
     core.step()  # unbound: no-op
     assert _drain(q) == []
 
@@ -207,7 +211,7 @@ async def test_status_kpis_equipment_when_connected():
         "position": {"x": 10, "y": 50},
         "current_job_id": None,
         "energy_kwh": 0.0,
-        "extra": {},
+        "extra": {"last_job_id": None, "last_job_outcome": None},
     }
 
 
@@ -282,7 +286,7 @@ async def test_on_link_lost_closes_port_off_loop():
     core.on_link_lost()
     assert _t.monotonic() - t0 < 0.1  # close does not block the loop
     assert core.connected is False and fake.closed is False
-    assert _drain(q) == [{"type": "link", "connected": False, "sim_time": 0.0}]
+    assert [m for m in _drain(q) if m["type"] == "link"] == [{"type": "link", "connected": False, "sim_time": 0.0}]
     for _ in range(100):
         if fake.closed:
             break
@@ -390,29 +394,32 @@ async def test_connect_once_bind_failure_closes_off_loop():
     assert fake.closed is True and core.connected is False
 
 
-async def test_reconnect_readmits_device_that_recovered_during_the_outage():
+async def test_reconnect_faulted_device_needs_release_then_gets_jobs_again():
     first = _fake(LosingPort)
-    second = _fake()  # AGV-01 IDLE again on the new link
+    second = _fake()  # AGV-01 reports IDLE again on the new link
     ports = [first, second]
     b = Broadcaster()
     q = b.register()
     core = EcsCore(LAYOUT, connect=lambda: ports.pop(0), broadcaster=b)
     await core.connect_once()
-    first.set_state("AGV-01", State.FAULT)  # the Dispatcher excludes AGV-01
+    first.set_state("AGV-01", State.FAULT)
     first.lost = True
     core.step()
     assert core.connected is False
-    # FAULT -> IDLE happened while unbound: that STATE_CHANGED never arrives
     second.advance(90.0)
     _drain(q)
     assert await core.connect_once() is True
-    msgs = _drain(q)
-    restored = [m for m in msgs if m["type"] == "equipment"]
-    assert restored == [{"type": "equipment", "kind": "STATE_CHANGED", "equipment_id": "AGV-01",
-                         "sim_time": 90.0, "job_id": None, "reason": "LINK_RESTORED",
-                         "new_state": "IDLE"}]
+    restored = [m for m in _drain(q) if m["type"] == "equipment"]
+    assert {m["equipment_id"] for m in restored} == {"AGV-01", "ASC-A", "STS-01"}  # every device
+    assert all(m["reason"] == "LINK_RESTORED" and m["sim_time"] == 90.0 for m in restored)
+    assert next(m for m in restored if m["equipment_id"] == "AGV-01")["new_state"] == "IDLE"
+    # B2d: a device that FAULTed needs an explicit operator release, even though it reports IDLE
+    assert core.status()["needs_release"] == 1
     core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")])
-    assert "AGV-01" in [eid for eid, _ in second.calls]  # dispatched again: no longer excluded
+    assert "AGV-01" not in [eid for eid, _ in second.calls]
+    core.dispatcher.release("AGV-01")
+    core.submit([WorkOrder("C2", JobType.DISCHARGE, "STS-01", "A/1/1/2")])
+    assert "AGV-01" in [eid for eid, _ in second.calls]
 
 
 async def test_sim_time_going_backwards_flags_and_health_503(caplog):
@@ -457,3 +464,130 @@ async def test_sim_time_going_backwards_detected_in_step(caplog):
         core.step()
     assert core.time_reversed is True and core.connected is True
     assert sum("sim time went backwards" in r.getMessage() for r in caplog.records) == 1
+
+
+# -- B2d: alarms, release / resolve, auto_release ----------------------------------------
+def _alarm_msgs(q, action):
+    return [m for m in _drain(q) if m["type"] == "alarm" and m["action"] == action]
+
+
+async def test_core_link_blip_keeps_orders_and_resumes():
+    first = _fake(LosingPort)
+    second = _fake()
+    ports = [first, second]
+    b = Broadcaster()
+    q = b.register()
+    core = EcsCore(LAYOUT, connect=lambda: ports.pop(0), broadcaster=b)
+    await core.connect_once()
+    core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")])
+    (eid, job) = first.calls[0]
+    assert eid == "AGV-01" and core.status()["open"] == 1
+    _drain(q)
+    core.on_link_lost()
+    assert core.status()["offline"] == 3 and core.status()["replans"] == 0
+    alarms = core.alarms()
+    assert {(a["kind"], a["equipment_id"]) for a in alarms} == {
+        ("LINK_LOST", "AGV-01"), ("LINK_LOST", "ASC-A"), ("LINK_LOST", "STS-01")}
+    assert all(a["job_id"] is None and isinstance(a["since_sim_time"], float) for a in alarms)
+    raised = _alarm_msgs(q, "raised")
+    assert len(raised) == 3 and all(m["type"] == "alarm" and m["kind"] == "LINK_LOST" for m in raised)
+    # the device comes back BUSY with the same job
+    second._job["AGV-01"] = job
+    second._state["AGV-01"] = State.BUSY
+    second.advance(5.0)
+    assert await core.connect_once() is True
+    assert core.status()["offline"] == 0 and core.alarms() == []
+    cleared = _alarm_msgs(q, "cleared")
+    assert len(cleared) == 3 and all(m["kind"] == "LINK_LOST" and m["sim_time"] == 5.0 for m in cleared)
+    n_calls = len(second.calls)
+    second.complete("AGV-01")
+    core.step()
+    assert len(second.calls) > n_calls  # the order moved on to its next stage on the new link
+    assert second.calls[n_calls][1].job_id != job.job_id
+    assert core.status()["replans"] == 0
+
+
+async def test_core_release_and_resolve_publish():
+    fake = _fake()
+    core, q = _core(fake)
+    await core.connect_once()
+    fake.set_state("AGV-01", State.FAULT)
+    core.publish_alarms()
+    raised = _alarm_msgs(q, "raised")
+    assert [(m["kind"], m["equipment_id"], m["job_id"]) for m in raised] == [("NEEDS_RELEASE", "AGV-01", None)]
+    assert "since_sim_time" in raised[0] and "detail" in raised[0] and "sim_time" in raised[0]
+    fake.set_state("AGV-01", State.IDLE)
+    assert core.release("AGV-01") is None
+    msgs = _drain(q)
+    assert [m["action"] for m in msgs if m["type"] == "alarm"] == ["cleared"]
+    assert any(m["type"] == "status" for m in msgs)
+    assert core.alarms() == []
+
+
+async def test_core_unknown_outcome_resolve_publishes():
+    first = _fake(LosingPort)
+    second = _fake()  # AGV-01 returns IDLE without its job: outcome unknown
+    ports = [first, second]
+    b = Broadcaster()
+    q = b.register()
+    core = EcsCore(LAYOUT, connect=lambda: ports.pop(0), broadcaster=b)
+    await core.connect_once()
+    core.submit([WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")])
+    job_id = first.calls[0][1].job_id
+    core.on_link_lost()
+    _drain(q)
+    assert await core.connect_once() is True
+    raised = _alarm_msgs(q, "raised")
+    assert {m["kind"] for m in raised} == {"UNKNOWN_OUTCOME", "NEEDS_RELEASE"}
+    assert core.status()["unknown_outcomes"] == 1
+    core.resolve_job(job_id, "completed")
+    msgs = _drain(q)
+    cleared = [m for m in msgs if m["type"] == "alarm" and m["action"] == "cleared"]
+    assert [(m["kind"], m["job_id"]) for m in cleared] == [("UNKNOWN_OUTCOME", job_id)]
+    assert any(m["type"] == "status" for m in msgs)
+    core.release("AGV-01")
+    assert core.alarms() == []
+
+
+async def test_core_publish_alarms_is_a_diff():
+    fake = _fake()
+    core, q = _core(fake)
+    await core.connect_once()
+    fake.set_state("AGV-01", State.FAULT)
+    core.publish_alarms()
+    core.publish_alarms()  # nothing new
+    assert len(_alarm_msgs(q, "raised")) == 1
+
+
+async def test_core_auto_release_passthrough():
+    fake = _fake()
+    core = EcsCore(LAYOUT, connect=lambda: fake)
+    assert core.auto_release is False
+    await core.connect_once()
+    assert core.dispatcher.auto_release is False
+    fake2 = _fake()
+    core2 = EcsCore(LAYOUT, connect=lambda: fake2, auto_release=True)
+    assert core2.auto_release is True
+    await core2.connect_once()
+    assert core2.dispatcher.auto_release is True
+
+
+async def test_core_release_and_resolve_require_connection():
+    core, _ = _core(_fake())
+    with pytest.raises(RuntimeError, match="not connected"):
+        core.release("AGV-01")
+    with pytest.raises(RuntimeError, match="not connected"):
+        core.resolve_job("J1", "completed")
+    assert core.alarms() == []
+
+
+async def test_core_step_publishes_alarms_from_drained_events():
+    fake = _fake()
+    core, q = _core(fake)
+    await core.connect_once()
+    _drain(q)
+    fake.set_state("AGV-01", State.FAULT)
+    core.step()  # no 60 s boundary crossed
+    assert core.tick_count == 0
+    raised = _alarm_msgs(q, "raised")
+    assert [(m["kind"], m["equipment_id"]) for m in raised] == [("NEEDS_RELEASE", "AGV-01")]

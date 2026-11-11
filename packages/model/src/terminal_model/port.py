@@ -26,6 +26,13 @@ class EventKind(StrEnum):
     JOB_FAILED = "JOB_FAILED"
 
 
+class LinkReason(StrEnum):
+    LINK_LOST = "LINK_LOST"
+    LINK_RESTORED = "LINK_RESTORED"
+    UPSTREAM_DISCONNECTED = "UPSTREAM_DISCONNECTED"
+    UPSTREAM_RECONNECTED = "UPSTREAM_RECONNECTED"
+
+
 @dataclass(frozen=True)
 class EquipmentEvent:
     kind: EventKind

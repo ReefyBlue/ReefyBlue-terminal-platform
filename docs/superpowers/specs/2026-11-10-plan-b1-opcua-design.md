@@ -52,6 +52,7 @@ Namespace-URI `urn:terminal:model`, index toegekend bij registratie.
 - Variabelen: `Id` (String), `Kind` (String), `Vendor` (String), `State` (String: Idle/Busy/Fault/Maintenance), `PositionX`, `PositionY` (Double, m), `CurrentJobId` (String, leeg = geen), `EnergyKwh` (Double), `Extra` (String, JSON van `snapshot().extra`), `LastEvent` (String, JSON van `EquipmentEvent`), `EventSeq` (UInt64, start 0, +1 per event)
 
 Events: zie Plan B3-spec (`2026-11-10-plan-b3-events-design.md`) — vervangt LastEvent/EventSeq.
+OFFLINE: zie Plan B2d-spec (`2026-11-10-plan-b2d-link-loss-design.md`) — extra `State`-waarde bij verbindingsverlies.
 - Methoden: `AssignJob(jobJson: String) → Boolean`, `CancelJob() → Boolean`, `Reset() → Boolean`
 
 **Subtypen** voegen alleen de eigen `extra`-velden toe als losse variabelen (zie spec §3): `STSType` (BerthSide, SpreaderHeightM, TrolleyPositionM, HandoverLaneOccupied), `AGVType` (BatteryPct, LoadedContainerId, Route als JSON-string, SpeedMps), `ASCType` (BlockId, GantryPositionM, WsTpOccupied, LsTpOccupied). `Extra` blijft daarnaast bestaan zodat `snapshot().extra` verliesvrij overkomt.

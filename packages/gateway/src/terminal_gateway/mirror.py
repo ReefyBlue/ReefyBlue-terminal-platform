@@ -7,7 +7,7 @@ import logging
 from collections.abc import Callable
 
 from asyncua import Client, Node, Server, ua
-from terminal_model.port import EquipmentEvent, EquipmentSnapshot, EventKind
+from terminal_model.port import EquipmentEvent, EquipmentSnapshot, EventKind, LinkReason
 from terminal_model.types import Kind, Position, State
 from terminal_opcua.events import (
     EventEmitter,
@@ -35,8 +35,6 @@ METHOD_TIMEOUT_S = 2.0
 RECONNECT_S = 5.0
 CONNECT_TIMEOUT_S = 2.0
 WATCHDOG_S = 1.0
-FAULT_REASON = "UPSTREAM_DISCONNECTED"
-RECOVERY_REASON = "UPSTREAM_RECONNECTED"
 
 
 async def _safe_disconnect(client: Client) -> None:
@@ -136,12 +134,14 @@ class EquipmentMirror(_UpstreamLink):
     Upstream OPC UA events for this equipment are re-emitted by the mirror's own
     ``EventEmitter``: the gateway Seq is the mirror's, strictly increasing and never
     derived from the upstream Seq. Events the upstream emitted while the link was
-    down are lost; that shows up as an upstream Seq gap in the log (the ECS already
-    treats the device as FAULT during the outage and replans from the snapshot).
+    down are lost; that shows up as an upstream Seq gap in the log (the device is
+    OFFLINE during the outage and the ECS replans from the snapshot afterwards).
 
-    A lost link is reported as STATE_CHANGED -> FAULT (``UPSTREAM_DISCONNECTED``), once
-    per outage; on reconnect a STATE_CHANGED to the upstream's current state
-    (``UPSTREAM_RECONNECTED``) follows, so the ECS stops excluding the device.
+    A lost link is not a fault of the equipment: it is reported as ``State = OFFLINE``
+    and STATE_CHANGED -> OFFLINE (``LinkReason.UPSTREAM_DISCONNECTED``), once per
+    outage. On reconnect a STATE_CHANGED to the upstream's fresh state
+    (``LinkReason.UPSTREAM_RECONNECTED``) ALWAYS follows, also when that state is FAULT,
+    so the ECS knows the device is reachable again.
 
     Subscribe-before-read invariant: on (re)connect the data-change and event
     subscriptions are in place *before* the snapshot is read. OPC UA events have no
@@ -190,7 +190,7 @@ class EquipmentMirror(_UpstreamLink):
 
     async def start(self) -> None:
         snap = EquipmentSnapshot(
-            equipment_id=self.equipment_id, kind=self.kind, vendor="", state=State.FAULT,
+            equipment_id=self.equipment_id, kind=self.kind, vendor="", state=State.OFFLINE,
             position=Position(0.0, 0.0), current_job_id=None, energy_kwh=0.0, extra={},
         )
         handlers = EquipmentHandlers(
@@ -261,21 +261,18 @@ class EquipmentMirror(_UpstreamLink):
         self._uobj, self._uidx = uobj, uidx
 
     async def _announce_recovery(self, upstream_state: object) -> None:
-        """After a synthesized Fault: report the upstream's actual state (caller holds the
-        write lock). The ECS excludes a device until STATE_CHANGED -> IDLE, which the
-        upstream never sends when only the link was down. Skipped when the upstream is
-        itself FAULT: the device stays excluded and no second Fault is counted."""
+        """After an OFFLINE report: emit the upstream's fresh state (caller holds the write
+        lock), always, also when it is FAULT: the ECS treats OFFLINE as unknown until it
+        sees this event. An unknown state string is logged and yields no event."""
         try:
             state = State(upstream_state)
         except ValueError:
             log.warning("%s: upstream State %r unknown; no recovery event",
                         self.equipment_id, upstream_state)
             return
-        if state is State.FAULT:
-            return
         await self._emit(EquipmentEvent(
             EventKind.STATE_CHANGED, self.equipment_id, self._sim_time,
-            reason=RECOVERY_REASON, new_state=state))
+            reason=LinkReason.UPSTREAM_RECONNECTED.value, new_state=state))
 
     async def event_notification(self, event) -> None:
         if self._up_types is None or self.obj is None:
@@ -320,13 +317,13 @@ class EquipmentMirror(_UpstreamLink):
         self._fault_announced = True
         ev = EquipmentEvent(
             EventKind.STATE_CHANGED, self.equipment_id, self._sim_time,
-            reason=FAULT_REASON, new_state=State.FAULT)
+            reason=LinkReason.UPSTREAM_DISCONNECTED.value, new_state=State.OFFLINE)
         try:
             async with self._write_lock:
-                await self._write("State", State.FAULT.value)
+                await self._write("State", State.OFFLINE.value)
                 await self._emit(ev)
         except Exception:
-            log.exception("%s: writing synthesized Fault failed", self.equipment_id)
+            log.exception("%s: writing OFFLINE failed", self.equipment_id)
 
 
 class ControlMirror(_UpstreamLink):

@@ -5,11 +5,12 @@ import json
 import logging
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from terminal_ecs.workorders import WorkOrder
 from terminal_model.locations import parse_location
-from terminal_model.types import JobType
+from terminal_model.types import JobType, State
 from terminal_runner.run import main, prefill, run_once
 from terminal_sim.layout import load_layout
 from terminal_sim.scenario import load_scenario
@@ -152,3 +153,107 @@ def test_prefill_puts_load_containers_in_yard():
     assert yard.locate("C0001") is None
     assert yard.locate("C0002") == parse_location("A/1/1/2")
     assert yard.locate("C0003") == parse_location("B/2/3/1")
+
+
+def _dispatcher_spy(monkeypatch) -> list[dict]:
+    import terminal_runner.run as run_mod
+
+    kwargs_seen: list[dict] = []
+    real = run_mod.Dispatcher
+
+    def spy(*args, **kwargs):
+        kwargs_seen.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(run_mod, "Dispatcher", spy)
+    return kwargs_seen
+
+
+def test_run_once_auto_release_default_true(small_yaml: Path, monkeypatch):
+    seen = _dispatcher_spy(monkeypatch)
+    scenario = replace(load_scenario(small_yaml), duration_s=60.0)
+    run_once(scenario, load_layout(LAYOUT), seed=scenario.seed)
+    run_once(scenario, load_layout(LAYOUT), seed=scenario.seed, auto_release=False)
+    assert [k["auto_release"] for k in seen] == [True, False]
+
+
+@pytest.mark.parametrize("flag,expected", [([], True), (["--no-auto-release"], False)])
+def test_cli_no_auto_release_reaches_dispatcher(small_yaml: Path, tmp_path: Path, monkeypatch, flag, expected,
+                                                restore_root_logging):
+    seen = _dispatcher_spy(monkeypatch)
+    small_short = tmp_path / "short.yaml"
+    small_short.write_text(SMALL.replace("duration_s: 7200", "duration_s: 60"))
+    assert main([str(small_short), "--out", str(tmp_path / "o"), "--layout", str(LAYOUT), *flag]) == 0
+    assert [k["auto_release"] for k in seen] == [expected]
+
+
+@pytest.mark.parametrize("flag,expected", [([], True), (["--no-auto-release"], False)])
+def test_cli_no_auto_release_reaches_opcua_run(small_yaml: Path, monkeypatch, flag, expected):
+    import terminal_runner.run as run_mod
+
+    captured = []
+    monkeypatch.setattr(run_mod, "run_replications", lambda *a, run, **kw: captured.append(run) or "x")
+    monkeypatch.setattr(run_mod, "configure_json_logging", lambda: None)
+    assert main([str(small_yaml), "--port", "opcua", *flag]) == 0
+    (fn,) = captured
+    assert fn.func is run_mod.run_once_opcua and fn.keywords["auto_release"] is expected
+
+
+def test_cli_http_mode_ignores_auto_release(small_yaml: Path, monkeypatch):
+    import terminal_runner.run as run_mod
+
+    captured = []
+    monkeypatch.setattr(run_mod, "run_replications", lambda *a, run, **kw: captured.append(run) or "x")
+    monkeypatch.setattr(run_mod, "configure_json_logging", lambda: None)
+    assert main([str(small_yaml), "--port", "http", "--no-auto-release"]) == 0
+    (fn,) = captured
+    assert fn.func is run_mod.run_once_http and "auto_release" not in fn.keywords
+
+
+def test_help_documents_auto_release(capsys):
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--no-auto-release" in out and "--port http" in out and "--auto-release" in out
+
+
+class _StatePort:
+    """Reports the queued states per poll (``equipment_ids`` starts each poll)."""
+
+    def __init__(self, polls: list[dict[str, State]]) -> None:
+        self.polls = polls
+        self.current: dict[str, State] = {}
+        self.n = 0
+
+    def equipment_ids(self) -> list[str]:
+        self.current = self.polls[min(self.n, len(self.polls) - 1)]
+        self.n += 1
+        return sorted(self.current)
+
+    def snapshot(self, eid: str):
+        return SimpleNamespace(state=self.current[eid])
+
+
+def test_wait_ready_waits_out_offline(monkeypatch):
+    import terminal_runner.run as run_mod
+
+    sleeps = []
+    monkeypatch.setattr(run_mod, "_sleep", sleeps.append)
+    port = _StatePort([{"AGV-01": State.OFFLINE, "STS-01": State.IDLE},
+                       {"AGV-01": State.FAULT, "STS-01": State.OFFLINE},
+                       {"AGV-01": State.IDLE, "STS-01": State.IDLE}])
+    run_mod._wait_ready(port)
+    assert port.n == 3 and len(sleeps) == 2
+
+
+def test_wait_ready_gives_up_on_offline_after_timeout(monkeypatch, caplog):
+    import terminal_runner.run as run_mod
+
+    t = [0.0]
+    monkeypatch.setattr(run_mod, "_clock", lambda: t[0])
+    monkeypatch.setattr(run_mod, "_sleep", lambda s: t.__setitem__(0, t[0] + s))
+    port = _StatePort([{"AGV-01": State.OFFLINE}])
+    with caplog.at_level(logging.WARNING):
+        run_mod._wait_ready(port)
+    assert t[0] >= run_mod.READY_TIMEOUT_S
+    assert any("AGV-01" in r.getMessage() for r in caplog.records)

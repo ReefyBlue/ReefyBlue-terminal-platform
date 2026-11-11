@@ -28,3 +28,12 @@ def test_enums_are_strings():
     assert Kind.STS == "STS"
     assert State.MAINTENANCE == "MAINTENANCE"
     assert JobType.STACK_IN == "STACK_IN"
+
+
+def test_state_offline_and_link_reason():
+    from terminal_model.port import LinkReason
+
+    assert State("OFFLINE") is State.OFFLINE
+    assert LinkReason.LINK_LOST == "LINK_LOST"
+    assert {m.value for m in LinkReason} == {
+        "LINK_LOST", "LINK_RESTORED", "UPSTREAM_DISCONNECTED", "UPSTREAM_RECONNECTED"}

@@ -5,9 +5,9 @@ cannot be rebound (the ECS is frozen). ``ReconnectingPort`` keeps their callback
 forwards events from whichever port is currently bound; on reconnection it switches
 to the new port. While unbound it answers from the last-known state: ``now()`` is the
 last sim time seen, ``equipment_ids()``/``snapshot()`` the last snapshots, and
-commands are refused (``False`` plus a warning). The cached snapshots follow the
-forwarded events (state, current job) between reads, and a re-bind reconciles them
-with the new port's fleet (see ``bind``).
+commands are refused (``False`` plus a warning). ``unbind`` announces LINK_LOST (OFFLINE)
+and ``bind`` after a loss LINK_RESTORED for every device (see there); the Dispatcher
+reconciles. The cached snapshots follow forwarded events and ``assign_job`` between reads.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import logging
 from collections.abc import Callable
 from dataclasses import replace
 
-from terminal_model.port import EquipmentEvent, EquipmentPort, EquipmentSnapshot, EventKind
-from terminal_model.types import Job
+from terminal_model.port import EquipmentEvent, EquipmentPort, EquipmentSnapshot, EventKind, LinkReason
+from terminal_model.types import Job, State
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ class ReconnectingPort:
         self._snapshots: dict[str, EquipmentSnapshot] = {}
         self._now = 0.0
         self._generation = 0  # bumped on every bind/unbind
+        self._lost = False  # unbound after having been bound: next bind emits LINK_RESTORED
 
     @property
     def connected(self) -> bool:
@@ -41,13 +42,9 @@ class ReconnectingPort:
         """Make ``port`` current, forward its events to every kept callback and cache
         its fleet's snapshots (may raise ``ConnectionError``; the port stays bound).
 
-        On a re-bind (a snapshot cache exists) the fresh snapshots are reconciled with
-        the cached ones: state changes missed during the outage are delivered as
-        synthesised ``STATE_CHANGED`` events (``reason="LINK_RESTORED"``) after the
-        cache is refreshed, so the Dispatcher can e.g. re-admit a device that went
-        FAULT -> IDLE while unbound. Job completions/failures lost during the outage
-        cannot be reconstructed here; a changed ``current_job_id`` is logged as a
-        warning (reconciliation: step B2d)."""
+        The first bind emits nothing. A bind after an ``unbind`` refreshes the cache and
+        then emits ``STATE_CHANGED(<fresh state>, LINK_RESTORED)`` for EVERY device, also
+        unchanged ones: the Dispatcher reconciles per device (spec B2d)."""
         self._port = port
         self._generation += 1
         # One forwarder per bind; it goes quiet at the next bind/unbind, so a stale
@@ -55,36 +52,32 @@ class ReconnectingPort:
         port.subscribe(lambda ev, gen=self._generation: self._forward(gen, ev))
         self._now = port.now()
         self._ids = list(port.equipment_ids())
-        previous = dict(self._snapshots)
         for eid in self._ids:
             self._snapshots[eid] = port.snapshot(eid)
-        if previous:
-            self._reconcile(previous)
-
-    def _reconcile(self, previous: dict[str, EquipmentSnapshot]) -> None:
-        missed: list[EquipmentEvent] = []
-        jobs_changed: list[str] = []
-        for eid in self._ids:
-            old, new = previous.get(eid), self._snapshots[eid]
-            if old is None:
-                continue
-            if old.state is not new.state:
-                missed.append(EquipmentEvent(EventKind.STATE_CHANGED, eid, sim_time=self._now,
-                                             reason="LINK_RESTORED", new_state=new.state))
-            if old.current_job_id != new.current_job_id:
-                jobs_changed.append(f"{eid} ({old.current_job_id} -> {new.current_job_id})")
-        if jobs_changed:
-            log.warning("current job changed during the equipment link outage; lost job "
-                        "completions/failures are not reconciled: %s", ", ".join(jobs_changed))
-        generation = self._generation
-        for ev in missed:
-            log.info("state of %s changed during the outage: delivering STATE_CHANGED %s",
-                     ev.equipment_id, ev.new_state.value if ev.new_state else None)
-            self._forward(generation, ev)
+        if self._lost:
+            self._lost = False
+            generation = self._generation
+            for eid in self._ids:
+                self._forward(generation, EquipmentEvent(
+                    EventKind.STATE_CHANGED, eid, sim_time=self._now,
+                    reason=LinkReason.LINK_RESTORED, new_state=self._snapshots[eid].state))
 
     def unbind(self) -> None:
+        """Drop the port. Every known device gets ``STATE_CHANGED(OFFLINE, LINK_LOST)``
+        and its cached state becomes OFFLINE (cache first, then the events). Unbinding
+        an already unbound port does nothing."""
+        if self._port is None:
+            return
         self._port = None
         self._generation += 1
+        self._lost = True
+        generation = self._generation
+        for eid in list(self._snapshots):
+            self._snapshots[eid] = replace(self._snapshots[eid], state=State.OFFLINE)
+        for eid in list(self._snapshots):
+            self._forward(generation, EquipmentEvent(
+                EventKind.STATE_CHANGED, eid, sim_time=self._now,
+                reason=LinkReason.LINK_LOST, new_state=State.OFFLINE))
 
     def _forward(self, generation: int, ev: EquipmentEvent) -> None:
         if generation != self._generation:
@@ -95,7 +88,7 @@ class ReconnectingPort:
 
     def _track(self, ev: EquipmentEvent) -> None:
         """Keep the cached snapshot in step with the events (``snapshot()`` is a network
-        read, so it is not called per event): the re-bind reconciliation compares it."""
+        read, so it is not called per event)."""
         snap = self._snapshots.get(ev.equipment_id)
         if snap is None:
             return

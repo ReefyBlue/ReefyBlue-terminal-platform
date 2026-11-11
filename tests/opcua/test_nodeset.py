@@ -177,3 +177,22 @@ async def test_async_handlers_are_awaited(server):
         assert await clk.call_method(f"{idx}:PrefillYard", "[]") is True
         assert await clk.call_method(f"{idx}:Start") is False
     assert calls == ["{}", "stop", "start"]
+
+
+async def test_last_job_variables_exist_and_are_written(server):
+    idx, types = await nodeset.register_types(server)
+    assert {"LastJobId", "LastJobOutcome"} <= set(nodeset.EQUIPMENT_VARS)
+    folders = await nodeset.ensure_folders(server, idx, server.nodes.objects)
+    h = nodeset.EquipmentHandlers(lambda j: True, lambda: True, lambda: True)
+    obj = await nodeset.create_equipment_object(
+        server, idx, types, folders["Fleet"], _agv_snap(last_job_id=None, last_job_outcome=None), h)
+    last_id = await obj.get_child(f"{idx}:LastJobId")
+    last_outcome = await obj.get_child(f"{idx}:LastJobOutcome")
+    assert await last_id.read_value() == ""
+    assert await last_outcome.read_value() == ""
+    await nodeset.write_snapshot(obj, _agv_snap(last_job_id="C1-TRANSPORT-1", last_job_outcome="COMPLETED"))
+    assert await last_id.read_value() == "C1-TRANSPORT-1"
+    assert await last_outcome.read_value() == "COMPLETED"
+    await nodeset.write_snapshot(obj, _agv_snap(last_job_id="C1-TRANSPORT-2", last_job_outcome="FAILED"))
+    assert await last_id.read_value() == "C1-TRANSPORT-2"
+    assert await last_outcome.read_value() == "FAILED"

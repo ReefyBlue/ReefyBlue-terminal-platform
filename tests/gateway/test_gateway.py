@@ -15,7 +15,7 @@ from asyncua import Client
 from event_sink import EventSink
 from tcp_proxy import TcpProxy
 from terminal_gateway.gateway import Gateway
-from terminal_model.port import EquipmentEvent, EventKind
+from terminal_model.port import EquipmentEvent, EventKind, LinkReason
 from terminal_model.types import Kind, Position, State
 from terminal_opcua.events import resolve_event_types
 from terminal_sim.equipment.sts import STS
@@ -168,15 +168,15 @@ async def test_gateway_before_sim_recovers(rig):
     await rig.gateway.start()
     await rig.connect_client()
     await rig.sink.attach(rig.client)
-    assert await _val(rig, "State") == "FAULT"
-    # the Fault for the failed first connect has seq 1 (it may precede the sink)
+    assert await _val(rig, "State") == "OFFLINE"
+    # the OFFLINE for the failed first connect has seq 1 (it may precede the sink)
     assert await _wait_until(lambda: rig.gateway.mirrors["STS-01"]._emitter.seq == 1, 1.0)
     await rig.server.start()
     assert await _wait_for(lambda: _is(rig, "State", "IDLE"), 6.5, step=0.1)
     assert await _wait_until(lambda: any(ev.reason == "UPSTREAM_RECONNECTED" for _, ev in _sts(rig)), 1.0)
     assert await _linked(rig, 2.0)
     got = [(seq, ev.new_state, ev.reason) for seq, ev in _sts(rig)]
-    expected = [(1, State.FAULT, "UPSTREAM_DISCONNECTED"), (2, State.IDLE, "UPSTREAM_RECONNECTED")]
+    expected = [(1, State.OFFLINE, "UPSTREAM_DISCONNECTED"), (2, State.IDLE, "UPSTREAM_RECONNECTED")]
     assert got in (expected, expected[1:])
     rig.sts.set_state(State.BUSY)
     await rig.server.sync()
@@ -184,15 +184,15 @@ async def test_gateway_before_sim_recovers(rig):
     assert _sts(rig)[-1][1].new_state == State.BUSY
 
 
-async def test_server_drop_marks_fault(rig):
+async def test_server_drop_marks_offline(rig):
     await _start_connected(rig)
     await rig.server.stop()
-    assert await _wait_for(lambda: _is(rig, "State", "FAULT"), 3.0, step=0.05)
+    assert await _wait_for(lambda: _is(rig, "State", "OFFLINE"), 3.0, step=0.05)
     assert await _wait_until(lambda: len(_sts(rig)) >= 1, 1.0)
     [(seq, ev)] = _sts(rig)
     assert seq == 1
     assert (ev.kind, ev.new_state, ev.reason) == (
-        EventKind.STATE_CHANGED, State.FAULT, "UPSTREAM_DISCONNECTED")
+        EventKind.STATE_CHANGED, State.OFFLINE, LinkReason.UPSTREAM_DISCONNECTED)
 
 
 async def test_prefill_forwarded(rig):
@@ -293,13 +293,13 @@ async def test_blip_with_one_event_logs_gap(rig, caplog):
 
 
 @pytest.mark.parametrize("rig", [1.0], indirect=True)
-async def test_blip_without_events_only_fault_and_recovery(rig, caplog):
+async def test_blip_without_events_only_offline_and_recovery(rig, caplog):
     caplog.set_level(logging.WARNING, logger="terminal_gateway.mirror")
     await _start_connected(rig)
     await _blip(rig)
     await asyncio.sleep(0.2)  # nothing else may follow
     [(_, fault), (rec_seq, rec)] = _sts(rig)
-    assert fault.new_state == State.FAULT and rec.new_state == State.IDLE
+    assert fault.new_state == State.OFFLINE and rec.new_state == State.IDLE
     await _emit_jobs(rig, "J1", "J2")
     assert await _wait_until(lambda: len(_jobs(rig)) >= 2, 1.0)
     assert _jobs(rig) == [(rec_seq + 1, "J1"), (rec_seq + 2, "J2")]
@@ -314,7 +314,7 @@ async def test_blip_on_idle_upstream_reports_recovery_to_idle(rig):
     await _blip(rig)
     (fault_seq, fault), (rec_seq, rec) = _sts(rig)
     assert (fault.kind, fault.new_state, fault.reason) == (
-        EventKind.STATE_CHANGED, State.FAULT, "UPSTREAM_DISCONNECTED")
+        EventKind.STATE_CHANGED, State.OFFLINE, LinkReason.UPSTREAM_DISCONNECTED)
     assert (rec.kind, rec.new_state, rec.reason) == (
         EventKind.STATE_CHANGED, State.IDLE, "UPSTREAM_RECONNECTED")
     assert rec.equipment_id == "STS-01" and rec.sim_time == 42.0
@@ -335,18 +335,35 @@ async def test_blip_on_busy_upstream_reports_busy(rig):
 
 
 @pytest.mark.parametrize("rig", [1.0], indirect=True)
-async def test_blip_on_faulted_upstream_sends_no_recovery(rig):
+async def test_blip_on_faulted_upstream_reports_fault(rig):
     await _start_connected(rig)
     rig.sts.set_state(State.FAULT)
     await rig.server.sync()
     assert await _wait_until(lambda: len(_sts(rig)) == 1, 1.0)  # upstream's own Fault
-    rig.proxy.cut()
-    assert await _wait_until(
-        lambda: any(ev.reason == "UPSTREAM_DISCONNECTED" for _, ev in _sts(rig)), 3.0)
-    rig.proxy.restore()
-    assert await _linked(rig, 4.0)
-    await asyncio.sleep(0.3)
-    assert [ev.reason for _, ev in _sts(rig)][1:] == ["UPSTREAM_DISCONNECTED"]
+    await _blip(rig)
+    got = [(ev.new_state, ev.reason) for _, ev in _sts(rig)][1:]
+    assert got == [(State.OFFLINE, "UPSTREAM_DISCONNECTED"), (State.FAULT, "UPSTREAM_RECONNECTED")]
+    assert await _val(rig, "State") == "FAULT"
+
+
+@pytest.mark.parametrize("rig", [1.0], indirect=True)
+async def test_blip_with_unknown_upstream_state_sends_no_recovery(rig, caplog, monkeypatch):
+    caplog.set_level(logging.WARNING, logger="terminal_gateway.mirror")
+    await _start_connected(rig)
+    mirror = rig.gateway.mirrors["STS-01"]
+    emitted = []
+    real_emit = mirror._emit
+
+    async def spy(ev):
+        emitted.append(ev)
+        await real_emit(ev)
+
+    monkeypatch.setattr(mirror, "_emit", spy)
+    mirror._fault_announced = True
+    async with mirror._write_lock:
+        await mirror._announce_recovery("BOGUS")
+    assert emitted == []
+    assert any("unknown" in r.getMessage() for r in caplog.records)
 
 
 async def test_start_failure_stops_server(rig, monkeypatch):

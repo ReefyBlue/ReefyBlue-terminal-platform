@@ -5,7 +5,7 @@ import pytest
 
 from terminal_ecs.workorders import WorkOrder
 from terminal_model.types import JobType
-from terminal_tos_stub.client import EcsClient, WorkOrderRejected
+from terminal_tos_stub.client import EcsClient, EcsRefused, WorkOrderRejected
 
 ORDER = WorkOrder("C1", JobType.DISCHARGE, "STS-01", "A/1/1/1")
 
@@ -83,3 +83,48 @@ def test_wait_healthy_polls_until_200():
 def test_wait_healthy_times_out():
     c = client_for(lambda r: httpx.Response(503))
     assert c.wait_healthy(0.05, poll_s=0.01) is False
+
+
+ALARM = {"kind": "NEEDS_RELEASE", "equipment_id": "AGV-01", "job_id": None,
+         "since_sim_time": 3.0, "detail": "fault: release required"}
+
+
+def test_alarms_release_resolve():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        seen.append((request.method, request.url.path, body))
+        if request.url.path == "/alarms":
+            return httpx.Response(200, json=[ALARM])
+        if request.url.path.endswith("/release"):
+            return httpx.Response(200, json={"released": "AGV-01"})
+        return httpx.Response(200, json={"job_id": "J1", "outcome": "failed"})
+
+    with client_for(handler) as c:
+        assert c.alarms() == [ALARM]
+        assert c.release("AGV-01") == {"released": "AGV-01"}
+        assert c.resolve_job("J1", "failed") == {"job_id": "J1", "outcome": "failed"}
+    assert seen == [("GET", "/alarms", None), ("POST", "/equipment/AGV-01/release", None),
+                    ("POST", "/jobs/J1/resolve", {"outcome": "failed"})]
+
+
+@pytest.mark.parametrize("status,code", [(409, "RELEASE_REFUSED"), (404, "UNKNOWN_EQUIPMENT")])
+def test_release_refused_raises(status, code):
+    c = client_for(lambda r: httpx.Response(status, json={"code": code, "message": "equipment reports FAULT"}))
+    with pytest.raises(EcsRefused) as exc:
+        c.release("AGV-01")
+    assert (exc.value.status, exc.value.code, exc.value.message) == (status, code, "equipment reports FAULT")
+
+
+def test_resolve_404_raises_refused_and_422_http_error():
+    c = client_for(lambda r: httpx.Response(404, json={"code": "UNKNOWN_JOB", "message": "J9"}))
+    with pytest.raises(EcsRefused) as exc:
+        c.resolve_job("J9", "completed")
+    assert exc.value.code == "UNKNOWN_JOB"
+    c = client_for(lambda r: httpx.Response(422, json={"detail": []}))
+    with pytest.raises(httpx.HTTPStatusError):
+        c.resolve_job("J1", "maybe")
+    c = client_for(lambda r: httpx.Response(503, json={"detail": "not connected"}))
+    with pytest.raises(httpx.HTTPStatusError):
+        c.release("AGV-01")

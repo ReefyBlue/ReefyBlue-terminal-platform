@@ -21,6 +21,9 @@ from terminal_opcua.events import NAMESPACE_URI, EventTypes, register_event_type
 EQUIPMENT_VARS = (
     "Id", "Kind", "Vendor", "State", "PositionX", "PositionY",
     "CurrentJobId", "EnergyKwh", "Extra",
+    # outcome of the most recent job that ended ("" before the first): lets a controller
+    # reconcile a job whose JOB_COMPLETED/JOB_FAILED it missed during a link outage
+    "LastJobId", "LastJobOutcome",
 )
 
 KIND_VARS: dict[Kind, tuple[str, ...]] = {
@@ -42,6 +45,8 @@ EXTRA_KEY_MAP: dict[str, str] = {
     "gantry_position_m": "GantryPositionM",
     "ws_tp_occupied": "WsTpOccupied",
     "ls_tp_occupied": "LsTpOccupied",
+    "last_job_id": "LastJobId",
+    "last_job_outcome": "LastJobOutcome",
 }
 
 _S, _D, _B = ua.VariantType.String, ua.VariantType.Double, ua.VariantType.Boolean
@@ -49,7 +54,7 @@ _S, _D, _B = ua.VariantType.String, ua.VariantType.Double, ua.VariantType.Boolea
 VAR_TYPES: dict[str, ua.VariantType] = {
     "Id": _S, "Kind": _S, "Vendor": _S, "State": _S,
     "PositionX": _D, "PositionY": _D, "CurrentJobId": _S, "EnergyKwh": _D,
-    "Extra": _S,
+    "Extra": _S, "LastJobId": _S, "LastJobOutcome": _S,
     "BerthSide": _S, "SpreaderHeightM": _D, "TrolleyPositionM": _D,
     "HandoverLaneOccupied": _B,
     "BatteryPct": _D, "LoadedContainerId": _S, "Route": _S, "SpeedMps": _D,
@@ -273,6 +278,8 @@ async def write_snapshot(node: Node, snap: EquipmentSnapshot) -> None:
     await _write(node, "CurrentJobId", snap.current_job_id)
     await _write(node, "EnergyKwh", snap.energy_kwh)
     await _write(node, "Extra", json.dumps(dict(snap.extra)))
+    await _write(node, "LastJobId", snap.extra.get("last_job_id"))
+    await _write(node, "LastJobOutcome", snap.extra.get("last_job_outcome"))
     allowed = set(KIND_VARS[snap.kind])
     for key, value in snap.extra.items():
         var = EXTRA_KEY_MAP.get(key)

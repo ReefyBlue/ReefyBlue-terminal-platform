@@ -63,7 +63,10 @@ class EcsCore:
         *,
         connect: Callable[[], EquipmentPort],
         broadcaster: Broadcaster | None = None,
+        auto_release: bool = False,
     ) -> None:
+        self.auto_release = auto_release
+        self._last_alarms: dict[tuple[str, str, str | None], dict] = {}
         self._connect = connect  # returns a connected port or raises ConnectionError
         self.port = ReconnectingPort()
         self.broadcaster = broadcaster if broadcaster is not None else Broadcaster()
@@ -104,7 +107,7 @@ class EcsCore:
         now = self.port.now()
         self._check_time(now)
         if self.dispatcher is None:
-            self.dispatcher = Dispatcher(self.port, self.allocator)
+            self.dispatcher = Dispatcher(self.port, self.allocator, auto_release=self.auto_release)
             self.kpi = KpiCollector(self.port, self.dispatcher)
             self.t0 = now
             self.next_tick = now + SAMPLE_INTERVAL_S
@@ -114,6 +117,7 @@ class EcsCore:
             self.next_tick = self.t0 + (math.floor((now - self.t0) / SAMPLE_INTERVAL_S) + 1) * SAMPLE_INTERVAL_S
         log.info("equipment link connected at sim time %.1f", now)
         self._publish_link()
+        self.publish_alarms()
         return True
 
     def _check_time(self, now: float) -> None:
@@ -132,6 +136,7 @@ class EcsCore:
         log.warning("equipment link lost at sim time %.1f", self.port.now())
         self._drop_link(blocking=False)
         self._publish_link()
+        self.publish_alarms()
 
     def _drop_link(self, *, blocking: bool = True) -> None:
         self.port.unbind()
@@ -167,6 +172,7 @@ class EcsCore:
         try:
             self.port.drain_events()
             self._check_time(self.port.now())
+            self.publish_alarms()  # events from drain_events() may have changed the alarm list
             while self.port.now() >= self.next_tick:
                 self.dispatcher.tick()
                 self.kpi.sample()
@@ -174,6 +180,7 @@ class EcsCore:
                 self.tick_count += 1
                 self.publish_status()
                 self.publish_new_jobs()
+                self.publish_alarms()
         except ConnectionError:
             self.on_link_lost()
 
@@ -221,6 +228,7 @@ class EcsCore:
             log.warning("equipment link failed after the work orders were taken: %s", e)
             self.on_link_lost()
             self.publish_new_jobs()
+            self.publish_alarms()
             return
         except BaseException:
             self.known_containers.update(o.container_id for o in orders)  # taken before the tick failed
@@ -232,6 +240,75 @@ class EcsCore:
             log.warning("equipment link failed after the work orders were taken: %s", e)
             self.on_link_lost()
         self.publish_new_jobs()
+        self.publish_alarms()
+
+    def release(self, equipment_id: str) -> None:
+        """Operator release. ``KeyError`` (unknown equipment) only from the membership
+        check, and ``ReleaseRefused`` / a ``ConnectionError`` reading the device state,
+        all before anything changed. Once released, a ``ConnectionError`` in the tick
+        that follows is handled as a lost link (``on_link_lost()``) and ``release``
+        returns normally (as ``submit``)."""
+        if not self.connected or self.dispatcher is None:
+            raise RuntimeError("not connected")
+        d = self.dispatcher
+        if not d.has_equipment(equipment_id):
+            raise KeyError(equipment_id)
+        try:
+            d.release(equipment_id, tick=False)
+        except KeyError as e:  # never a 404: membership was checked above
+            raise RuntimeError(f"release({equipment_id}) failed internally: {e!r}") from e
+        self._tick_after_command(f"release of {equipment_id}")
+
+    def resolve_job(self, job_id: str, outcome: str) -> None:
+        """Operator verdict on a job with unknown outcome. ``KeyError`` (no such unknown
+        job) only from the membership check and ``ValueError`` (bad outcome), both before
+        anything changed. Once resolved, a ``ConnectionError`` (in the verdict's
+        follow-up or the tick) is handled as a lost link and ``resolve_job`` returns
+        normally."""
+        if not self.connected or self.dispatcher is None:
+            raise RuntimeError("not connected")
+        d = self.dispatcher
+        if outcome not in ("completed", "failed"):
+            raise ValueError(f"outcome must be 'completed' or 'failed', not {outcome!r}")
+        if job_id not in d.unknown_jobs():
+            raise KeyError(job_id)
+        try:
+            d.resolve_job(job_id, outcome, tick=False)  # type: ignore[arg-type]
+        except KeyError as e:  # never a 404: membership was checked above
+            raise RuntimeError(f"resolve_job({job_id}) failed internally: {e!r}") from e
+        except ConnectionError as e:
+            log.warning("equipment link failed after resolving %s: %s", job_id, e)
+            self.on_link_lost()
+            self.publish_new_jobs()
+            return
+        self._tick_after_command(f"resolve of {job_id}")
+
+    def _tick_after_command(self, what: str) -> None:
+        """Tick after an operator command took effect; a lost link does not undo it."""
+        try:
+            self.dispatcher.tick()  # type: ignore[union-attr]
+        except ConnectionError as e:
+            log.warning("equipment link failed after the %s: %s", what, e)
+            self.on_link_lost()  # publishes link + alarms
+            self.publish_new_jobs()
+            return
+        self.publish_new_jobs()
+        self.publish_alarms()
+        self.publish_status()
+
+    def alarms(self) -> list[dict]:
+        if self.dispatcher is None:
+            return []
+        return [
+            {
+                "kind": str(a.kind),
+                "equipment_id": a.equipment_id,
+                "job_id": a.job_id,
+                "since_sim_time": float(a.since),
+                "detail": a.detail,
+            }
+            for a in self.dispatcher.alarms()
+        ]
 
     def status(self) -> dict:
         base = self.dispatcher.status() if self.dispatcher is not None else {**_EMPTY_STATUS, "equipment": {}}
@@ -287,6 +364,20 @@ class EcsCore:
                 "equipment_id": logged.equipment_id,
                 "sim_time": logged.assigned_at,
             })
+
+    def publish_alarms(self) -> None:
+        """Publish ``alarm`` raised/cleared messages for the diff against the last call."""
+        if self.dispatcher is None:
+            return
+        current = {(a["kind"], a["equipment_id"], a["job_id"]): a for a in self.alarms()}
+        now = self.port.now()
+        for key, a in current.items():
+            if key not in self._last_alarms:
+                self.broadcaster.publish({"type": "alarm", "action": "raised", **a, "sim_time": now})
+        for key, a in self._last_alarms.items():
+            if key not in current:
+                self.broadcaster.publish({"type": "alarm", "action": "cleared", **a, "sim_time": now})
+        self._last_alarms = current
 
     def _publish_link(self) -> None:
         self.broadcaster.publish({"type": "link", "connected": self.connected, "sim_time": self.port.now()})

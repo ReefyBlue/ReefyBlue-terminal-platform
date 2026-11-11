@@ -3,8 +3,7 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-from fake_port import FakePort, FakeSlots, make_port
-from terminal_ecs.dispatcher import Dispatcher
+from fake_port import FakePort, FakeSlots, make_dispatcher, make_port
 from terminal_ecs.workorders import WorkOrder, WorkOrderError
 from terminal_model.types import Job, JobType, Kind, Position, State
 
@@ -15,7 +14,7 @@ def order(cid: str, slot: str = "A/1/1/1", sts: str = "STS-01") -> WorkOrder:
 
 def test_submit_rejects_duplicate_container():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     with pytest.raises(WorkOrderError) as exc:
         d.submit([order("C1"), order("C1", slot="A/1/1/2")])
     assert exc.value.code == "DUPLICATE_CONTAINER"
@@ -25,7 +24,7 @@ def test_submit_rejects_duplicate_container():
 
 def test_submit_rejects_duplicate_of_already_known_container():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([order("C1")])
     with pytest.raises(WorkOrderError) as exc:
         d.submit([order("C2"), order("C1")])
@@ -35,7 +34,7 @@ def test_submit_rejects_duplicate_of_already_known_container():
 
 def test_submit_rejects_unknown_sts():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     with pytest.raises(WorkOrderError) as exc:
         d.submit([order("C1"), order("C2", sts="STS-09")])
     assert exc.value.code == "UNKNOWN_STS"
@@ -45,7 +44,7 @@ def test_submit_rejects_unknown_sts():
 @pytest.mark.parametrize("slot", ["garbage", "TP/A/WS", "B/1/1/1"])
 def test_submit_rejects_invalid_slot(slot):
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     with pytest.raises(WorkOrderError) as exc:
         d.submit([order("C1", slot=slot)])
     assert exc.value.code == "INVALID_SLOT"
@@ -54,7 +53,7 @@ def test_submit_rejects_invalid_slot(slot):
 
 def test_discharge_happy_path():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([order("C1", slot="A/12/3/2")])
 
     # nearest idle AGV (AGV-01 at (10,50)) is sent to the STS
@@ -93,7 +92,7 @@ def test_discharge_happy_path():
 
 def test_on_transfer_called_with_exact_tuples():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     transfers: list[tuple[str, str, str]] = []
     d.on_transfer = lambda kind, eid, cid: transfers.append((kind, eid, cid))
     d.submit([order("C1")])
@@ -109,7 +108,7 @@ def test_on_transfer_called_with_exact_tuples():
 
 def test_lookahead_limits_agvs_per_sts():
     port = make_port(n_agv=6)
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([order(f"C{i}", slot=f"A/{i}/1/1") for i in range(1, 6)])
     transports = [(eid, j) for eid, j in port.calls if j.type is JobType.TRANSPORT]
     assert len(transports) == 2
@@ -134,7 +133,7 @@ def test_lookahead_limits_agvs_per_sts():
 def test_slot_occupied_asks_provider():
     port = make_port()
     slots = FakeSlots(["A/2/1/1"])
-    d = Dispatcher(port, slots)
+    d = make_dispatcher(port, slots)
     d.submit([order("C1", slot="A/1/1/1")])
     port.complete("AGV-01")
     port.complete("STS-01")
@@ -153,7 +152,7 @@ def test_slot_occupied_asks_provider():
 def test_slot_occupied_and_yard_full_marks_failed():
     port = make_port()
     slots = FakeSlots([])
-    d = Dispatcher(port, slots)
+    d = make_dispatcher(port, slots)
     d.submit([order("C1")])
     port.complete("AGV-01")
     port.complete("STS-01")
@@ -170,14 +169,14 @@ def test_rejected_assignment_tries_next_agv():
     port.assign_job("AGV-01", Job("X", JobType.TRANSPORT, "X", "AGV-01", "STS-01"))
     port.calls.clear()
     # AGV-01 is BUSY now, so the dispatcher must not use it and falls back to AGV-02
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([order("C1")])
     assert [(eid, j.job_id) for eid, j in port.calls] == [("AGV-02", "C1-TRANSPORT-1")]
 
 
 def test_second_discharge_to_the_same_tp_waits_until_stack_in_completes():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([order("C1", slot="A/1/1/1"), order("C2", slot="A/1/1/2")])
     agv02 = lambda: [j.job_id for e, j in port.calls if e == "AGV-02"]  # noqa: E731
     port.complete("AGV-01")  # C1 at STS -> discharge C1
@@ -198,7 +197,7 @@ def test_second_discharge_to_the_same_tp_waits_until_stack_in_completes():
 
 def test_discharge_arriving_at_an_occupied_tp_waits_there_with_its_box():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     transfers: list[tuple[str, str, str]] = []
     d.on_transfer = lambda kind, eid, cid: transfers.append((kind, eid, cid))
     d.submit([order("C1", slot="A/1/1/1"), order("C2", slot="A/1/1/2")])
@@ -227,7 +226,7 @@ def test_discharge_reslots_away_from_a_tp_blocked_by_a_faulted_asc():
         "AGV-02": (Kind.AGV, Position(300, 50)),
     })
     slots = FakeSlots(["B/7/1/1"])
-    d = Dispatcher(port, slots)
+    d = make_dispatcher(port, slots)
     d.submit([order("C1", slot="A/1/1/1"), order("C2", slot="A/1/1/2")])
     port.complete("AGV-01")
     port.complete("AGV-02")
@@ -246,7 +245,7 @@ def test_discharge_reslots_away_from_a_tp_blocked_by_a_faulted_asc():
 
 def test_subscribes_and_reports_equipment_state():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     assert d.status()["equipment"] == {
         "AGV-01": "IDLE", "AGV-02": "IDLE", "ASC-A": "IDLE", "STS-01": "IDLE",
     }
@@ -268,7 +267,7 @@ def test_tick_is_reentrancy_safe():
         "ASC-A": (Kind.ASC, Position(50, 120)),
         **{f"AGV-{i:02d}": (Kind.AGV, Position(10 * i, 50)) for i in range(1, 7)},
     })
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([order(f"C{i}", slot=f"A/{i}/1/1") for i in range(1, 4)])
     assert [j.job_id for _, j in port.calls] == ["C1-TRANSPORT-1", "C2-TRANSPORT-1"]
     for cid in ("C1", "C2", "C3"):
@@ -283,7 +282,7 @@ def test_tick_is_reentrancy_safe():
 
 def test_discharge_follows_per_sts_fifo_not_arrival_order():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([order("C1", slot="A/1/1/1"), order("C2", slot="A/1/1/2")])
     agv_of = {j.container_id: e for e, j in port.calls}
     assert agv_of == {"C1": "AGV-01", "C2": "AGV-02"}
@@ -308,7 +307,7 @@ def test_invalid_slot_from_provider_is_treated_as_yard_full():
         "AGV-01": (Kind.AGV, Position(10, 50)),
     })
     slots = FakeSlots(["B/1/1/1"])  # wrong block
-    d = Dispatcher(port, slots)
+    d = make_dispatcher(port, slots)
     d.submit([order("C1", slot="A/1/1/1")])
     port.complete("AGV-01")
     port.complete("STS-01")
@@ -325,7 +324,7 @@ def test_invalid_slot_from_provider_is_treated_as_yard_full():
 
 def test_raising_transfer_hook_fails_order_without_stranding_it():
     port = make_port()
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
 
     def boom(kind: str, eid: str, cid: str) -> None:
         raise RuntimeError("world says no")
@@ -362,7 +361,7 @@ def test_stack_in_assigns_at_most_one_job_per_asc_per_tick():
     })
     port.assign_job("ASC-A", Job("X", JobType.STACK_IN, "X", "TP/A/WS", "A/9/9/1"))
     port._state["ASC-A"] = State.BUSY  # hold the ASC while C1 reaches the TP
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     load = WorkOrder(container_id="L2", type=JobType.LOAD, sts_id="STS-02", yard_slot="A/3/1/1")
     d.submit([order("C1", slot="A/1/1/1"), load])
     port.complete("AGV-01")
@@ -383,7 +382,7 @@ def test_box_waiting_at_a_tp_moves_on_when_its_asc_faults():
         "AGV-01": (Kind.AGV, Position(10, 50)),
         "AGV-02": (Kind.AGV, Position(300, 50)),
     })
-    d = Dispatcher(port, FakeSlots(["B/7/1/1"]))
+    d = make_dispatcher(port, FakeSlots(["B/7/1/1"]))
     d.submit([order("C1", slot="A/1/1/1"), order("C2", slot="A/1/1/2")])
     for eid in ("AGV-01", "AGV-02", "STS-01", "STS-01", "AGV-01", "AGV-02"):
         port.complete(eid)  # C1's box on TP A (STACK_IN), C2 waits at TP A
@@ -406,7 +405,7 @@ def test_asc_block_comes_from_snapshot_extra():
         "CRANE-7": (Kind.ASC, Position(50, 120)),  # id says nothing about the block
         "AGV-01": (Kind.AGV, Position(10, 50)),
     })
-    d = Dispatcher(port, FakeSlots())
+    d = make_dispatcher(port, FakeSlots())
     d.submit([order("C1", slot="A/1/1/1")])  # accepted: block A has an ASC
     for eid in ("AGV-01", "STS-01", "AGV-01"):
         port.complete(eid)

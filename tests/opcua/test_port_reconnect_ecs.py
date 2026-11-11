@@ -1,8 +1,9 @@
 """The ECS over ``OpcUaEquipmentPort`` survives a gateway <-> equipment-server blip.
 
-The gateway reports a lost upstream link as STATE_CHANGED -> FAULT, so the
-Dispatcher excludes the device; on reconnect it must report the upstream's real
-state (IDLE here), or the device stays excluded for good.
+The gateway reports a lost upstream link as STATE_CHANGED -> OFFLINE (B2d): the
+Dispatcher shows the device offline but does not replan; on reconnect the gateway
+reports the upstream's real state (IDLE here) and the device is usable again
+without an operator release (no FAULT, no job running during the blip).
 """
 
 import asyncio
@@ -83,17 +84,21 @@ async def test_dispatcher_uses_agv_again_after_link_blip():
 
         proxy.cut()
         assert await drain_until(
-            lambda: (State.FAULT, "UPSTREAM_DISCONNECTED") in agv_states(), 5.0), events
+            lambda: (State.OFFLINE, "UPSTREAM_DISCONNECTED") in agv_states(), 5.0), events
         status = await asyncio.to_thread(dispatcher.status)
-        assert status["equipment"][AGV] is State.FAULT
+        assert status["equipment"][AGV] is State.OFFLINE
+        assert (status["offline"], status["replans"], status["needs_release"]) == (1, 0, 0)
 
         proxy.restore()
         assert await drain_until(
             lambda: (State.IDLE, "UPSTREAM_RECONNECTED") in agv_states(), 6.0), events
         status = await asyncio.to_thread(dispatcher.status)
         assert status["equipment"][AGV] is State.IDLE
+        assert (status["offline"], status["replans"], status["needs_release"],
+                status["unknown_outcomes"]) == (0, 0, 0, 0)
+        assert dispatcher.alarms() == []
 
-        # the only AGV is no longer excluded: a discharge order gets it
+        # the only AGV is usable again: a discharge order gets it
         order = WorkOrder("C1", JobType.DISCHARGE, "STS-01", allocator.next_slot("A"))
         await asyncio.to_thread(dispatcher.submit, [order])
         assigned = [lj.equipment_id for lj in dispatcher.job_log.values()]

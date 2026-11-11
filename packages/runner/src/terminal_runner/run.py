@@ -78,14 +78,16 @@ def prefill(yard: Yard, orders: list[WorkOrder]) -> None:
             yard.occupy(parse_location(order.yard_slot), order.container_id)
 
 
-def run_once(scenario: Scenario, layout: Layout, seed: int) -> dict[str, float]:
+def run_once(scenario: Scenario, layout: Layout, seed: int, *, auto_release: bool = True) -> dict[str, float]:
     """One run, stepped per KPI sample interval until all orders are DONE/FAILED or
-    ``duration_s`` (hard cap). Rates are per simulated hour actually run."""
+    ``duration_s`` (hard cap). Rates are per simulated hour actually run. ``auto_release``
+    (default: unattended) goes to the Dispatcher; without it a faulted device stays out
+    until an operator releases it, which no one does in a runner run."""
     scenario = replace(scenario, seed=seed)
     world = World(layout, scenario)
     allocator = make_allocator(layout)
     orders = make_workorders(scenario, layout, allocator, random.Random(seed))
-    dispatcher = Dispatcher(world.port, allocator)
+    dispatcher = Dispatcher(world.port, allocator, auto_release=auto_release)
     # No on_transfer hook: the sim moves boxes itself (World.handover).
     kpi = KpiCollector(world.port, dispatcher, faults_total=world.faults_total)
 
@@ -129,15 +131,16 @@ def _connect(gateway: str) -> OpcUaEquipmentPort:
 
 
 def _wait_ready(port: OpcUaEquipmentPort) -> None:
-    """Wait until no device is FAULT (the gateway mirrors an unreachable server as Fault);
-    after ``READY_TIMEOUT_S`` go on and let the ECS treat the rest as faulted."""
-    deadline = time.monotonic() + READY_TIMEOUT_S
+    """Wait until no device is FAULT or OFFLINE (the gateway mirrors a server it has not
+    reached yet as OFFLINE); after ``READY_TIMEOUT_S`` go on and let the ECS deal with the rest."""
+    deadline = _clock() + READY_TIMEOUT_S
     while True:
-        down = [e for e in port.equipment_ids() if port.snapshot(e).state is State.FAULT]
+        down = [e for e in port.equipment_ids()
+                if port.snapshot(e).state in (State.FAULT, State.OFFLINE)]
         if not down:
             return
-        if time.monotonic() >= deadline:
-            log.warning("starting with equipment in FAULT: %s", down)
+        if _clock() >= deadline:
+            log.warning("starting with equipment in FAULT/OFFLINE: %s", down)
             return
         _sleep(0.2)
 
@@ -188,7 +191,8 @@ def _advance(port: OpcUaEquipmentPort, t: float, timeout_s: float) -> None:
         raise RuntimeError(f"sim time stalled: {e}") from e
 
 
-def run_once_opcua(scenario: Scenario, layout: Layout, seed: int, *, gateway: str) -> dict[str, float]:
+def run_once_opcua(scenario: Scenario, layout: Layout, seed: int, *, gateway: str,
+                   auto_release: bool = True) -> dict[str, float]:
     """One run against a live sim process behind the gateway at ``gateway``.
 
     The sim starts paused at sim time 0: the runner places the LOAD containers
@@ -211,7 +215,7 @@ def run_once_opcua(scenario: Scenario, layout: Layout, seed: int, *, gateway: st
         if slots and not port.prefill_yard(slots):
             raise _prefill_rejected(len(slots))
         port.drain_events()  # events from before the run: no subscriber yet, dropped
-        dispatcher = Dispatcher(port, allocator)
+        dispatcher = Dispatcher(port, allocator, auto_release=auto_release)
         kpi = KpiCollector(port, dispatcher, faults_total=None)
         t0 = port.now()
         dispatcher.submit(orders)
@@ -437,14 +441,20 @@ def main(argv: list[str] | None = None) -> int:
                         help="gateway endpoint for --port opcua/http (default: %(default)s)")
     parser.add_argument("--ecs", default="http://localhost:8000",
                         help="ECS service base URL for --port http (default: %(default)s)")
+    parser.add_argument("--no-auto-release", action="store_true",
+                        help="keep faulted equipment out until an operator releases it and leave "
+                             "unknown job outcomes open (default: auto-release, as unattended runs "
+                             "need); no effect with --port http: there the ECS service decides "
+                             "(terminal_ecs_service.serve --auto-release)")
     args = parser.parse_args(argv)
-    run: RunFn = run_once
+    auto_release = not args.no_auto_release
+    run: RunFn = partial(run_once, auto_release=auto_release)
     if args.port in ("opcua", "http"):
         if args.replications > 1:
             parser.error(f"--replications > 1 is not supported with --port {args.port} in B1: "
                          "each replication needs a fresh sim process")
         if args.port == "opcua":
-            run = partial(run_once_opcua, gateway=args.gateway)
+            run = partial(run_once_opcua, gateway=args.gateway, auto_release=auto_release)
         else:
             run = partial(run_once_http, ecs=args.ecs, gateway=args.gateway)
     configure_json_logging()
