@@ -11,8 +11,8 @@ from terminal_model.types import JobType
 @dataclass(frozen=True)
 class WorkOrder:
     container_id: str
-    type: JobType  # DISCHARGE or LOAD
-    sts_id: str
+    type: JobType  # DISCHARGE or LOAD; rack mode also TRUCK_IN / TRUCK_OUT (LS-ASC, no STS)
+    sts_id: str  # unused ("") for TRUCK_IN / TRUCK_OUT
     yard_slot: str
     # Rack mode (v2 layouts) only; ignored by the legacy dispatcher.
     reefer: bool = False  # reefer box: reefer racks only

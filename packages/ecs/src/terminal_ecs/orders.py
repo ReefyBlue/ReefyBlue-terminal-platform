@@ -11,6 +11,8 @@ from terminal_model.types import Job, JobType
 
 from terminal_ecs.workorders import WorkOrder
 
+Column = tuple[str, int, int]  # rack mode: (block, bay, row), 0-based
+
 
 class Stage(StrEnum):
     # discharge
@@ -38,6 +40,8 @@ class Stage(StrEnum):
     ON_RACK = "ON_RACK"  # box on the rack (discharge: for STACK_IN; load: for an AGV)
     AGV_TO_RACK = "AGV_TO_RACK"  # load: empty AGV driving to the rack to lift the box
     RACK_TO_STS = "RACK_TO_STS"  # load: box on the AGV, driving to the STS lane
+    REHANDLE = "REHANDLE"  # LOAD / TRUCK_OUT: the LS-ASC moves a box off the order's box (STACK_MOVE)
+    TRUCK = "TRUCK"  # TRUCK_IN / TRUCK_OUT: the LS-ASC's truck job runs
     # terminal
     DONE = "DONE"
     FAILED = "FAILED"
@@ -97,7 +101,10 @@ RELEASE_AGV = frozenset({Stage.AGV_EN_ROUTE, Stage.AGV_TO_TP})
 # fault, in the ASC's spreader: the same job is re-issued to the same crane). Stages kept:
 # AT_LANE (STS job; a held box is set down by the re-issued job), LANE_PICKUP, TO_RACK,
 # BUFFER_WAIT, RACK_TO_STS (box on the AGV or in the lane buffer).
-RACK_ROLLBACK = {**ROLLBACK, Stage.STACKING: Stage.ON_RACK}
+# A failed STACK_MOVE / truck job goes back to AWAIT_ASC (re-planned; a box held in the
+# LS-ASC's spreader is set down by the re-issued job).
+RACK_ROLLBACK = {**ROLLBACK, Stage.STACKING: Stage.ON_RACK, Stage.REHANDLE: Stage.AWAIT_ASC,
+                 Stage.TRUCK: Stage.AWAIT_ASC}
 RACK_RELEASE_AGV = frozenset({Stage.TO_STS_LANE, Stage.AGV_TO_RACK})
 
 
@@ -118,7 +125,7 @@ class ContainerView:
     seq: int
     container_id: str
     state: Literal["open", "done", "failed"]
-    job_type: Literal["DISCHARGE", "LOAD"]
+    job_type: Literal["DISCHARGE", "LOAD", "TRUCK_IN", "TRUCK_OUT"]
     yard_slot: str
 
 
@@ -144,6 +151,12 @@ class OrderRecord:
     rack: str | None = None  # transfer rack claimed for the box
     buffer: str | None = None  # apron buffer of a BUFFER_WAIT AGV
     avoid_racks: set[str] = field(default_factory=set)  # refused with RACK_OCCUPIED; re-picked
+    rehandles: int = 0  # STACK_MOVEs completed to dig this order's box out
+    move: tuple[str, Column, Column] | None = None  # (box, from, to) of its running / held STACK_MOVE
+    dig_col: Column | None = None  # column being dug (no box set down on it meanwhile)
+    move_retries: int = 0  # STACK_MOVE target re-picked after COLUMN_FULL-style failures
+    avoid_cols: set[Column] = field(default_factory=set)  # STACK_MOVE targets found full
+    truck_lane: int | None = None  # truck lane of a TRUCK_IN / TRUCK_OUT (kept for a re-issue)
 
     @property
     def cid(self) -> str:

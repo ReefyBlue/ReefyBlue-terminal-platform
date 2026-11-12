@@ -182,6 +182,11 @@ class Asc2(Equipment):
         self.track.clear_yield(self.equipment_id)
         if target is None:
             return
+        # Yielding only ever moves away from the partner. A target on the partner's side is
+        # stale (asked while this crane was moving; the track knew only its start bay), and
+        # driving there could wait forever for a partner parked in the way.
+        if (target > self.gantry_bay) if self.role == WS else (target < self.gantry_bay):
+            return
         # Moving away from a waiting partner: the claim succeeds unless the partner moves.
         while not self.track.claim(self.equipment_id, self.gantry_bay, target,
                                    self.env.now() + self._move_time(target, self.trolley_m)

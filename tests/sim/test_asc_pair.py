@@ -283,3 +283,31 @@ def test_expired_claim_fails_the_job_with_track_timeout(world2, rec):
     stop = ws.gantry_bay
     world2.run(t + 100)
     assert ws.gantry_bay == stop and ws.holding == "C1"
+
+
+def test_a_stale_yield_request_never_drives_a_crane_towards_its_partner(world2, rec):
+    """The LS asks the WS to yield while the WS drives to the racks (its track position is still
+    its start bay, so the target lies landward of where it stops). Once idle the WS must not
+    honour that stale target by driving towards the LS (C1b Task 5: it then waited forever for
+    an LS parked there)."""
+    r = rec(world2)
+    ws, ls = world2.equipment["ASC-A-WS"], world2.equipment["ASC-A-LS"]
+    world2.stack.put("A", 30, 0, "C1")
+    world2.stack.put("A", 20, 5, "C2")
+    world2.port.assign_job("ASC-A-WS", _job("J1", JobType.STACK_OUT, "C1", "SLOT:A:30:0", "RACK:RK-A-1"))
+    world2.run(1)
+    while ws.gantry_bay < 30.0 - 1e-9:  # out to bay 30 ...
+        world2.run(world2.now() + 1)
+    while ws.gantry_bay > 29.0:  # ... and on its way back to the racks
+        world2.run(world2.now() + 0.5)
+    world2.port.assign_job("ASC-A-LS", _job("J2", JobType.STACK_MOVE, "C2", "SLOT:A:20:5", "SLOT:A:12:5"))
+    idle_moves = []
+    t_end = world2.now() + 1500
+    while world2.now() < t_end:
+        before = ws.gantry_bay
+        world2.run(world2.now() + 0.5)
+        if ws.current_job is None and ws.gantry_bay > before + 1e-9:
+            idle_moves.append((world2.now(), before, ws.gantry_bay))
+    assert r.done("ASC-A-WS", "J1") is not None and r.done("ASC-A-LS", "J2") is not None
+    assert idle_moves == []
+    assert ws.state is State.IDLE and ls.state is State.IDLE
