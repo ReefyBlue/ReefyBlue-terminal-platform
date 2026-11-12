@@ -13,7 +13,12 @@ from terminal_ecs.orders import Stage
 from terminal_ecs.workorders import WorkOrder
 from terminal_model.layout import LayoutError
 from terminal_model.locations import SlotLoc
-from terminal_model.port import EquipmentEvent, EventKind, LinkReason
+from terminal_model.port import (
+    EquipmentEvent,
+    EventKind,
+    LinkReason,
+    RackOccupancyUnavailable,
+)
 from terminal_model.types import JobType, State
 from terminal_sim.layout import load_layout
 from terminal_sim.loc2 import parse_loc2
@@ -388,6 +393,8 @@ class LinkPort:
         self.down: set[str] = set()
         self.strip: dict[str, set[str]] = {}  # snapshot extra keys the device does not report
         self.frozen: dict[str, object] = {}  # muted device -> position it keeps reporting
+        self.zones_down: set[str] = set()  # blocks whose rack occupancy is unavailable
+        self.zones_missing: set[str] = set()  # blocks the port has no zone for (KeyError)
         self._subs = []
         inner.subscribe(self._on)
 
@@ -427,6 +434,10 @@ class LinkPort:
         return self.inner.now()
 
     def rack_occupancy(self, block):
+        if block in self.zones_missing:
+            raise KeyError(block)
+        if block in self.zones_down:
+            raise RackOccupancyUnavailable(block)
         return self.inner.rack_occupancy(block)
 
     def cut(self, eid: str) -> None:
@@ -696,3 +707,72 @@ def test_auto_release_reconcile_without_the_box_location_stays_unknown():
     d.release("STS-01")
     run_until(world, d, lambda: d.status()["open"] == 0)
     assert where(world, "D1") == ["stack"] and d.alarms() == []
+
+
+# ------------------------------------------------------------------ rack occupancy unavailable (T6 review)
+
+def test_rack_mode_refuses_to_start_without_every_zone():
+    """The startup check reads every zone: a port without one (or with other racks) is refused;
+    a zone only temporarily unavailable is not."""
+    layout = load_layout(MV_SMALL)
+    world = make_world(layout, load_scenario(MV_SCENARIO, layout))
+    port = LinkPort(world.port)
+    port.zones_missing = {"C"}
+    with pytest.raises(LayoutError, match="zone C: rack_occupancy"):
+        Dispatcher(port, Slots(), layout=layout.terminal)
+    port.zones_missing = set()
+    real = port.rack_occupancy
+    port.rack_occupancy = lambda b: {k: v for k, v in real(b).items() if k != "RK-B-2"}
+    with pytest.raises(LayoutError, match="zone B: racks"):
+        Dispatcher(port, Slots(), layout=layout.terminal)
+    del port.rack_occupancy
+    port.zones_down = {"D"}
+    Dispatcher(port, Slots(), layout=layout.terminal)  # checked at run time instead
+
+
+def test_racks_unavailable_during_the_rack_choice_waits_in_buffer_with_a_warning():
+    world, port, d = make_linked()
+    port.zones_down = {"A"}
+    d.submit([discharge("D1", "STS-01", "A/6/1/1")])
+    rec = d._open["D1"]
+    run_until(world, d, lambda: rec.stage is Stage.BUFFER_WAIT and rec.current_job_id is None)
+    world.run(world.now() + 300)
+    assert rec.stage is Stage.BUFFER_WAIT
+    assert not any(lj.job.to_loc.startswith("RACK:") for lj in jobs_for(d, "D1"))
+    [alarm] = d.alarms()
+    assert (alarm.kind, alarm.equipment_id, alarm.severity) == (AlarmKind.RACKS_UNAVAILABLE, "ASC-A-WS", "WARNING")
+    port.zones_down.clear()
+    d.tick()
+    assert jobs_for(d, "D1")[-1].job.to_loc.startswith("RACK:RK-A-")
+    assert d.alarms() == []  # cleared by the successful read
+    run_until(world, d, lambda: d.status()["open"] == 0)
+    assert where(world, "D1") == ["stack"]
+    s = d.status()
+    assert (s["done"], s["failed"], s["needs_release"]) == (1, 0, 0)
+
+
+def test_racks_unavailable_at_a_crane_fault_is_unknown_not_reissued():
+    """The WS-ASC faults after setting the box down in the stack while the zone's occupancy is
+    unavailable: whether the box left the rack cannot be told, so nothing is re-issued (UNKNOWN,
+    release needed even with auto_release)."""
+    world, port, d = make_linked(auto_release=True)
+    d.submit([discharge("D1", "STS-01", "A/6/1/1")])
+    rec = d._open["D1"]
+    asc = world.equipment["ASC-A-WS"]
+    run_until(world, d, lambda: world.stack.locate("D1") is not None and asc.current_job is not None, step=0.5)
+    job_id = rec.current_job_id
+    port.zones_down = {"A"}
+    _fault(asc)
+    world.run(world.now() + 60)
+    asc.set_state(State.IDLE)
+    world.run(world.now() + 300)
+    assert [lj.job.job_id for lj in jobs_for(d, "D1") if lj.job.type is JobType.STACK_IN] == [job_id]
+    assert d.unknown_jobs() == {job_id}
+    kinds = {(a.kind, a.equipment_id) for a in d.alarms()}
+    assert {(AlarmKind.UNKNOWN_OUTCOME, "ASC-A-WS"), (AlarmKind.NEEDS_RELEASE, "ASC-A-WS"),
+            (AlarmKind.RACKS_UNAVAILABLE, "ASC-A-WS")} <= kinds
+    port.zones_down.clear()
+    d.resolve_job(job_id, "completed")
+    d.release("ASC-A-WS")
+    run_until(world, d, lambda: d.status()["open"] == 0)
+    assert where(world, "D1") == ["stack"]

@@ -67,3 +67,9 @@ class RackOccupancyPort(Protocol):
     of ``World2`` and the OPC UA port (``TransferZone`` objects) implement it."""
 
     def rack_occupancy(self, block: str) -> Mapping[str, str | None]: ...
+
+
+class RackOccupancyUnavailable(Exception):
+    """``rack_occupancy`` cannot be answered right now (the zone's data is stale or its link
+    is down). Not a ``ConnectionError``: the equipment link as a whole is fine. Callers must
+    treat the occupancy as UNKNOWN (fail closed), never fall back to older values."""

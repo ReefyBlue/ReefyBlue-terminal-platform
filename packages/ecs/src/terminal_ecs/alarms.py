@@ -11,6 +11,7 @@ class AlarmKind(StrEnum):
     NEEDS_RELEASE = "NEEDS_RELEASE"  # after a FAULT / unknown outcome: operator must release
     UNKNOWN_OUTCOME = "UNKNOWN_OUTCOME"  # a job's result was lost during a link outage
     NO_FREE_COLUMN = "NO_FREE_COLUMN"  # rack mode, WARNING: an order waits for a free column to dig
+    RACKS_UNAVAILABLE = "RACKS_UNAVAILABLE"  # rack mode, WARNING: a block's rack occupancy is unknown
 
 
 @dataclass(frozen=True)

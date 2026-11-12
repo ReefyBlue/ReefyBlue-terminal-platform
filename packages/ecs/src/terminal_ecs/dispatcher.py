@@ -142,9 +142,14 @@ set-down (the crane reports no ``holding`` and the box is on the AGV / in the la
 on board / on the rack / off it) is not re-issued: the order carries on as if it had
 completed (``_rack_handover_done``). Rack mode fails CLOSED: it needs ``rack_occupancy``
 on the port, ``holding`` from STS/ASC, ``lane_buffer`` from STS and the AGV load
+and an answer of ``rack_occupancy`` with exactly its racks for every transfer zone
 (``LayoutError`` at start otherwise); when at run time a failed or completed crane job
-leaves the box's place unknown (a key missing), nothing is re-issued: the job's outcome is
-UNKNOWN (alarm, release needed even with ``auto_release``) until ``resolve_job``.
+leaves the box's place unknown (a key missing, or the rack occupancy unavailable:
+``RackOccupancyUnavailable``), nothing is re-issued: the job's outcome is
+UNKNOWN (alarm, release needed even with ``auto_release``) until ``resolve_job``. While a
+block's rack occupancy is unavailable no rack of it is chosen (discharges wait in
+BUFFER_WAIT, loads in AWAIT_ASC) and a WARNING alarm ``RACKS_UNAVAILABLE`` is raised for
+the block (cleared by the next successful read).
 Freed AGVs are parked on a free apron buffer (``PARK-*`` jobs: in the job log and
 ``_job_eq``, watched by the watchdog - a stalled park is cancelled and parked again - and
 reconciled after a link loss: an unknown outcome counts as parked only if the AGV stands
@@ -170,6 +175,7 @@ from terminal_model.port import (
     EventKind,
     LinkReason,
     RackOccupancyPort,
+    RackOccupancyUnavailable,
 )
 from terminal_model.types import Job, JobType, Kind, Position, State
 
@@ -476,6 +482,11 @@ class Dispatcher:
             out += [Alarm(AlarmKind.NO_FREE_COLUMN, ls or "", None, since.get((AlarmKind.NO_FREE_COLUMN, cid), now),
                           f"{cid}: no free column to dig out {box}", severity="WARNING", container_id=cid)
                     for cid, (ls, box) in self._no_col.items()]
+            # WARNING: no rack of the block is chosen until its occupancy is known again
+            out += [Alarm(AlarmKind.RACKS_UNAVAILABLE, self._asc_by_block.get(block, ""), None,
+                          since.get((AlarmKind.RACKS_UNAVAILABLE, block), now),
+                          f"transfer zone {block}: rack occupancy unavailable", severity="WARNING")
+                    for block in sorted(self._racks_down)]
         return sorted(out, key=lambda a: (a.since, a.kind, a.equipment_id, a.job_id or ""))
 
     def has_equipment(self, equipment_id: str) -> bool:
@@ -1161,6 +1172,7 @@ class Dispatcher:
         self._box_col: dict[str, Column] = {}  # ECS column model: box -> column
         self._col_tiers: dict[Column, dict[str, int]] = {}  # column -> box -> tier (0-based)
         self._no_col: dict[str, tuple[str | None, str]] = {}  # order -> (LS-ASC, box): no free dig column
+        self._racks_down: set[str] = set()  # blocks whose rack occupancy is unavailable (RACKS_UNAVAILABLE)
         self._sts_spec = {s.id: s for s in t.sts}
         self._berths = {b.id: b for b in t.quay.berths}
         self._lanes: dict[str, list[str]] = {s.id: [ln.id for ln in s.lanes] for s in t.sts}
@@ -1188,11 +1200,25 @@ class Dispatcher:
     def _check_rack_port(self, t: TerminalLayout, ids: set[str]) -> None:
         """Rack mode fails closed, so it needs to see where boxes are: ``rack_occupancy`` on the
         port, ``holding`` from every STS and ASC, ``lane_buffer`` from every STS and the load
-        (``loaded_container_id``) from every AGV. Devices OFFLINE at start are checked when
+        (``loaded_container_id``) from every AGV, and ``rack_occupancy`` answering every transfer
+        zone with exactly its racks (``TypeError``/``KeyError`` or other racks: refused; a zone
+        unavailable at start is checked at run time). Devices OFFLINE at start are checked when
         they matter (a missing key then makes the outcome unknown)."""
         missing: list[str] = []
         if not isinstance(self.port, RackOccupancyPort):
             missing.append("port: rack_occupancy")
+        else:
+            for z in t.transfer_zones:  # every zone answers with exactly its racks
+                want = {r.id for r in z.racks}
+                try:
+                    got = set(self.port.rack_occupancy(z.block))
+                except RackOccupancyUnavailable:
+                    continue  # temporarily unknown: handled at runtime (RACKS_UNAVAILABLE)
+                except (TypeError, KeyError) as e:
+                    missing.append(f"zone {z.block}: rack_occupancy ({e!r})")
+                    continue
+                if got != want:
+                    missing.append(f"zone {z.block}: racks {sorted(got)} != {sorted(want)}")
         need = {Kind.STS: ("holding", "lane_buffer"), Kind.ASC: ("holding",), Kind.AGV: ("loaded_container_id",)}
         for eid in sorted(ids):
             snap = self.port.snapshot(eid)
@@ -1577,15 +1603,33 @@ class Dispatcher:
         rec.lane = None
 
     def _rack_occupied(self, block: str) -> Mapping[str, object]:
+        """The port's occupancy of ``block``. ``RackOccupancyUnavailable`` is passed on (the
+        caller treats it as unknown) and raises a ``RACKS_UNAVAILABLE`` WARNING for the block,
+        cleared by the next successful read."""
         assert isinstance(self.port, RackOccupancyPort)  # checked at start
-        return self.port.rack_occupancy(block)
+        try:
+            occupied = self.port.rack_occupancy(block)
+        except RackOccupancyUnavailable:
+            if block not in self._racks_down:
+                log.warning("rack occupancy of block %s unavailable: no rack choice, handovers unknown", block)
+                self._racks_down.add(block)
+                self._raise(AlarmKind.RACKS_UNAVAILABLE, block)
+            raise
+        if block in self._racks_down:
+            log.info("rack occupancy of block %s available again", block)
+            self._racks_down.discard(block)
+            self._alarm_since.pop((AlarmKind.RACKS_UNAVAILABLE, block), None)
+        return occupied
 
     def _free_rack(self, block: str, reefer: bool, avoid: set[str]) -> str | None:
         """First rack of ``block``'s zone (zone order) of the box's kind that no order claims and
         the port reports empty (``Racks.free_rack`` seen from the ECS)."""
         if block not in self._racks:
             return None
-        occupied = self._rack_occupied(block)
+        try:
+            occupied = self._rack_occupied(block)
+        except RackOccupancyUnavailable:
+            return None  # unknown occupancy: no rack (discharge -> BUFFER_WAIT, load waits)
         for r in self._racks[block]:
             if r.reefer == reefer and r.id not in self._rack_claim and not occupied.get(r.id) and r.id not in avoid:
                 return r.id
@@ -1808,7 +1852,10 @@ class Dispatcher:
             return False if carrying is False else None
         if rec.rack is None:
             return None
-        on_rack = self._rack_occupied(rec.block).get(rec.rack) == cid
+        try:
+            on_rack = self._rack_occupied(rec.block).get(rec.rack) == cid
+        except RackOccupancyUnavailable:
+            return None
         return not on_rack if rec.stage is Stage.STACKING else on_rack
 
     def _rack_unknown(self, rec: OrderRecord, eid: str, reason: str) -> None:

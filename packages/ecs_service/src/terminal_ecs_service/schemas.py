@@ -53,7 +53,7 @@ class ContainersOut(BaseModel):
 
 
 class AlarmOut(BaseModel):
-    kind: Literal["LINK_LOST", "NEEDS_RELEASE", "UNKNOWN_OUTCOME", "NO_FREE_COLUMN"]
+    kind: Literal["LINK_LOST", "NEEDS_RELEASE", "UNKNOWN_OUTCOME", "NO_FREE_COLUMN", "RACKS_UNAVAILABLE"]
     equipment_id: str
     job_id: str | None
     since_sim_time: float

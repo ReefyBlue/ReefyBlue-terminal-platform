@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import socket
 from dataclasses import replace
@@ -84,7 +85,7 @@ def test_v2_values_derived_and_typed():
     assert v["Holding"] is None and v["TrolleyPos_m"] == 3.0
     assert "LaneId" not in v  # not in extra: left at its last value
     off = nodeset.v2_values(replace(snap, state=State.OFFLINE))
-    assert (off["TechnicalStatus"], off["OperationalMode"]) == ("", "")
+    assert (off["TechnicalStatus"], off["OperationalMode"]) == ("RED", "Offline")
     assert "LastDataReceivedAt" not in off
     assert nodeset.v2_values(replace(snap, state=State.MAINTENANCE))["TechnicalStatus"] == "YELLOW"
 
@@ -147,6 +148,10 @@ async def test_legacy_equipment_server_has_no_v2_vars():
     assert set(got) == {*nodeset.EQUIPMENT_VARS, *nodeset.KIND_VARS[Kind.STS]}
 
 
+async def _stamp(client: Client) -> datetime.datetime:
+    return (await _read_object(client, ["Terminal", "TransferZones", "A"]))["LastDataReceivedAt"]
+
+
 async def test_zone_server_racks():
     world = _world2()
     zone = world.terminal.transfer_zone("A")
@@ -162,8 +167,18 @@ async def test_zone_server_racks():
                 [f"{idx}:Terminal", f"{idx}:TransferZones", f"{idx}:A"])
             assert (await obj.read_display_name()).Text == "ICZA-WS"
             top = await _read_object(client, ["Terminal", "TransferZones", "A"])
+            stamp = top.pop("LastDataReceivedAt")
             assert top == {"BlockId": "A", "RackCount": len(zone.racks), "RacksOccupied": 1,
                            "Online": True}
+            assert isinstance(stamp, datetime.datetime)
+            stamped = await _stamp(client)
+            await server.sync()  # unchanged occupancy: the stamp stays
+            assert await _stamp(client) == stamped
+            world.racks.take(first.id)
+            await server.sync()  # a rack change: a newer stamp
+            assert await _stamp(client) > stamped
+            world.racks.put(first.id, "C-1")
+            await server.sync()
             racks = {}
             for r in zone.racks:
                 racks[r.id] = await _read_object(client, ["Terminal", "TransferZones", "A", "Racks", r.id])

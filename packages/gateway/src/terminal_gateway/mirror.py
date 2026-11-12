@@ -21,6 +21,8 @@ from terminal_opcua.nodeset import (
     EQUIPMENT_VARS,
     KIND_VARS,
     NAMESPACE_URI,
+    OPERATIONAL_MODE,
+    TECHNICAL_STATUS,
     V2_KIND_VARS,
     EquipmentHandlers,
     Types,
@@ -30,6 +32,7 @@ from terminal_opcua.nodeset import (
     get_var,
     to_variant,
     zone_rack_vars,
+    zone_variant,
 )
 
 log = logging.getLogger(__name__)
@@ -388,6 +391,9 @@ class EquipmentMirror(_UpstreamLink):
         try:
             async with self._write_lock:
                 await self._write("State", State.OFFLINE.value)
+                if self.v2:  # the derived status of a device without data (v2_values for OFFLINE)
+                    await self._write("TechnicalStatus", TECHNICAL_STATUS[State.OFFLINE.value])
+                    await self._write("OperationalMode", OPERATIONAL_MODE[State.OFFLINE.value])
                 await self._emit(ev)
         except Exception:
             log.exception("%s: writing OFFLINE failed", self.equipment_id)
@@ -469,7 +475,8 @@ class ZoneMirror(_UpstreamLink):
     The racks come from the layout; the upstream must serve the same rack ids (else the link
     is retried). Each rack's ``ContainerId`` and the zone's ``RacksOccupied`` follow the
     upstream by subscription. ``Online`` is True while the link is up; when it is lost the
-    last values stay and ``Online`` becomes False (the occupancy is then stale)."""
+    last values stay and ``Online`` becomes False (the occupancy is then stale: the OPC UA port
+    refuses to answer, ``RackOccupancyUnavailable``). ``LastDataReceivedAt`` is mirrored as is."""
 
     def __init__(
         self, server: Server, idx: int, types: Types, parent: Node, *, zone, endpoint: str,
@@ -508,8 +515,8 @@ class ZoneMirror(_UpstreamLink):
         want = [r.id for r in self.zone.racks]
         if sorted(up_racks) != sorted(want):
             raise ValueError(f"zone {self.block}: upstream racks {sorted(up_racks)} != layout {want}")
-        keys: list[tuple[str | None, str]] = [(None, "RacksOccupied")]
-        nodes = [await uobj.get_child(f"{uidx}:RacksOccupied")]
+        keys: list[tuple[str | None, str]] = [(None, "RacksOccupied"), (None, "LastDataReceivedAt")]
+        nodes = [await uobj.get_child(f"{uidx}:{v}") for _, v in keys]
         for rid in want:
             keys.append((rid, "ContainerId"))
             nodes.append(await up_racks[rid].get_child(f"{uidx}:ContainerId"))
@@ -518,8 +525,8 @@ class ZoneMirror(_UpstreamLink):
         await sub.subscribe_data_change(nodes, sampling_interval=0.0)
         async with self._lock:  # subscribed first: a newer value is not overwritten
             for (rack, var), value in zip(keys, await client.read_values(nodes), strict=True):
-                await (await self._local(rack, var)).write_value(to_variant(var, value))
-            await (await self._local(None, "Online")).write_value(to_variant("Online", True))
+                await (await self._local(rack, var)).write_value(zone_variant(var, value))
+            await (await self._local(None, "Online")).write_value(zone_variant("Online", True))
 
     async def datachange_notification(self, node: Node, val, data) -> None:
         key = self._names.get(node.nodeid)
@@ -527,7 +534,7 @@ class ZoneMirror(_UpstreamLink):
             return
         async with self._lock:
             try:
-                await (await self._local(*key)).write_value(to_variant(key[1], val))
+                await (await self._local(*key)).write_value(zone_variant(key[1], val))
             except Exception:
                 log.exception("%s: mirroring %s failed", self.name, key)
 
@@ -539,6 +546,6 @@ class ZoneMirror(_UpstreamLink):
             return
         try:
             async with self._lock:
-                await (await self._local(None, "Online")).write_value(to_variant("Online", False))
+                await (await self._local(None, "Online")).write_value(zone_variant("Online", False))
         except Exception:
             log.exception("%s: writing Online=False failed", self.name)

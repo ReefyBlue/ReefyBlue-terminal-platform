@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 from collections.abc import Callable
@@ -117,6 +118,7 @@ class ZoneServer:
         self.endpoint = f"opc.tcp://{host}:{port}/terminal/zone/{zone.block}"
         self._server: Server | None = None
         self._obj = None
+        self._last: dict[str, str | None] | None = None  # occupancy at the last write
 
     def occupancy(self) -> dict[str, str | None]:
         return {r.id: self.racks.occupant(r.id) for r in self.zone.racks}
@@ -131,7 +133,8 @@ class ZoneServer:
         self._obj = await create_zone_object(
             server, idx, types, parent, self.zone.block,
             [(r.id, r.reefer, r.size) for r in self.zone.racks])
-        await write_zone(self._obj, self.occupancy())
+        self._last = None
+        await self._write()
         await server.start()
         self._server = server
 
@@ -140,9 +143,16 @@ class ZoneServer:
             await self._server.stop()
             self._server = None
 
+    async def _write(self) -> None:
+        """Write the occupancy; ``LastDataReceivedAt`` (UTC now) when it changed (or first)."""
+        occ = self.occupancy()
+        changed = datetime.datetime.now(datetime.UTC) if occ != self._last else None
+        await write_zone(self._obj, occ, changed_at=changed)
+        self._last = occ
+
     async def sync(self) -> None:
         assert self._obj is not None, "server not started"
-        await write_zone(self._obj, self.occupancy())
+        await self._write()
 
 
 class ControlServer:

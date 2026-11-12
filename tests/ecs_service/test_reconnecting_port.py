@@ -150,12 +150,15 @@ def test_rebind_emits_link_restored_for_all():
 
 
 def test_reconnecting_port_rack_occupancy():
-    """Forwarded to the bound port (``RackOccupancyPort``), the last answer while unbound."""
+    """Forwarded to the bound port (``RackOccupancyPort``); unbound it fails closed
+    (``RackOccupancyUnavailable``, no cached answer)."""
     import pytest
-    from terminal_model.port import RackOccupancyPort
+    from terminal_model.port import RackOccupancyPort, RackOccupancyUnavailable
 
     rp = ReconnectingPort()
     assert isinstance(rp, RackOccupancyPort)
+    with pytest.raises(RackOccupancyUnavailable):  # never bound
+        rp.rack_occupancy("A")
     p = _fake()
     rp.bind(p)
     with pytest.raises(TypeError):  # a legacy port has no rack occupancy
@@ -163,8 +166,8 @@ def test_reconnecting_port_rack_occupancy():
     occ = {"RK-A-1": "C1", "RK-A-2": None}
     p.rack_occupancy = lambda block: dict(occ) if block == "A" else {}[block]  # type: ignore[attr-defined]
     assert rp.rack_occupancy("A") == occ
-    rp.unbind()
-    occ["RK-A-1"] = None  # not seen while unbound
-    assert rp.rack_occupancy("A") == {"RK-A-1": "C1", "RK-A-2": None}
     with pytest.raises(KeyError):
         rp.rack_occupancy("B")
+    rp.unbind()
+    with pytest.raises(RackOccupancyUnavailable):  # no stale answer while unbound
+        rp.rack_occupancy("A")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import inspect
 import json
 import weakref
@@ -82,20 +83,27 @@ V2_EXTRA_KEY_MAP: dict[Kind, dict[str, str]] = {
     },
 }
 
-# Derived from ``State`` (the sim has no manual/remote mode and no warning levels of its own):
-# OFFLINE is unknown (""), as the gateway reports a lost link as OFFLINE.
-TECHNICAL_STATUS = {"IDLE": "GREEN", "BUSY": "GREEN", "MAINTENANCE": "YELLOW", "FAULT": "RED"}
+# Derived from ``State`` - a display convention, not sim facts: the sim has no manual/remote
+# mode and no warning levels of its own. MAINTENANCE -> YELLOW / "Maintenance" and
+# FAULT -> RED / "Automatic" (a faulted crane stays in automatic mode) are our mapping onto the
+# Konecranes screens. OFFLINE (no data; the gateway reports a lost link so and also writes these
+# two on the mirror) -> RED / "Offline".
+TECHNICAL_STATUS = {"IDLE": "GREEN", "BUSY": "GREEN", "MAINTENANCE": "YELLOW", "FAULT": "RED",
+                    "OFFLINE": "RED"}
 OPERATIONAL_MODE = {"IDLE": "Automatic", "BUSY": "Automatic", "FAULT": "Automatic",
-                    "MAINTENANCE": "Maintenance"}
+                    "MAINTENANCE": "Maintenance", "OFFLINE": "Offline"}
 
 # Transfer zone (one object per block under ``Terminal/TransferZones``, browse name = block id,
 # display name ``ICZ<block>-WS``) with a ``Racks`` folder of ``RackType`` objects (browse name =
 # rack id). ``ContainerId`` "" = free.
-ZONE_VARS = ("BlockId", "RackCount", "RacksOccupied", "Online")
+# ``LastDataReceivedAt`` (UTC DateTime) on a zone: when the sim server last wrote a changed rack
+# occupancy (also at start), mirrored by the gateway as is.
+ZONE_VARS = ("BlockId", "RackCount", "RacksOccupied", "Online", "LastDataReceivedAt")
 RACK_VARS = ("Index", "ContainerId", "Reefer", "Size")
 
 _S, _D, _B = ua.VariantType.String, ua.VariantType.Double, ua.VariantType.Boolean
 _I = ua.VariantType.Int32
+_T = ua.VariantType.DateTime
 
 VAR_TYPES: dict[str, ua.VariantType] = {
     "Id": _S, "Kind": _S, "Vendor": _S, "State": _S,
@@ -116,7 +124,11 @@ VAR_TYPES: dict[str, ua.VariantType] = {
     "Index": _I, "ContainerId": _S, "Reefer": _B, "Size": _S,
 }
 
-_DEFAULTS = {_S: "", _D: 0.0, _B: False, _I: 0}
+_DEFAULTS = {_S: "", _D: 0.0, _B: False, _I: 0,
+             _T: datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC)}
+
+# Variables whose type on a TransferZone differs from VAR_TYPES (same browse name, other type).
+ZONE_VAR_TYPES: dict[str, ua.VariantType] = {"LastDataReceivedAt": _T}
 
 
 @dataclass
@@ -158,8 +170,8 @@ async def _resolve(result):
     return result
 
 
-def to_variant(name: str, value: object) -> ua.Variant:
-    vt = VAR_TYPES[name]
+def to_variant(name: str, value: object, vt: ua.VariantType | None = None) -> ua.Variant:
+    vt = vt or VAR_TYPES[name]
     if vt is _S:
         value = "" if value is None else str(value)
     elif vt is _D:
@@ -172,8 +184,13 @@ def to_variant(name: str, value: object) -> ua.Variant:
     return ua.Variant(value, vt)
 
 
-async def _add_var(parent: Node, idx: int, name: str) -> None:
-    vt = VAR_TYPES[name]
+def zone_variant(name: str, value: object) -> ua.Variant:
+    """``to_variant`` for a variable of a TransferZone object."""
+    return to_variant(name, value, ZONE_VAR_TYPES.get(name))
+
+
+async def _add_var(parent: Node, idx: int, name: str, vt: ua.VariantType | None = None) -> None:
+    vt = vt or VAR_TYPES[name]
     v = await parent.add_variable(idx, name, ua.Variant(_DEFAULTS[vt], vt))
     await v.set_modelling_rule(True)
 
@@ -237,7 +254,7 @@ async def register_types(server: Server, *, v2: bool = False) -> tuple[int, Type
             v2_nodes[kind] = t
         zone = await base.add_object_type(idx, "TransferZoneType")
         for var in ZONE_VARS:
-            await _add_var(zone, idx, var)
+            await _add_var(zone, idx, var, ZONE_VAR_TYPES.get(var))
         rack = await base.add_object_type(idx, "RackType")
         for var in RACK_VARS:
             await _add_var(rack, idx, var)
@@ -388,14 +405,20 @@ async def zone_rack_vars(zone: Node) -> dict[str, dict[str, Node]]:
     return out
 
 
-async def write_zone(zone: Node, occupancy: Mapping[str, str | None], *, online: bool = True) -> None:
-    """Write ``ContainerId`` of every rack in ``occupancy`` (None -> ""), ``RacksOccupied`` and
-    ``Online``."""
+async def write_zone(
+    zone: Node, occupancy: Mapping[str, str | None], *, online: bool = True,
+    changed_at: datetime.datetime | None = None,
+) -> None:
+    """Write ``ContainerId`` of every rack in ``occupancy`` (None -> ""), ``RacksOccupied``,
+    ``Online`` and, when given, ``LastDataReceivedAt`` (``changed_at``)."""
     racks = await zone_rack_vars(zone)
     for rack_id, cid in occupancy.items():
         await racks[rack_id]["ContainerId"].write_value(to_variant("ContainerId", cid))
     await _write(zone, "RacksOccupied", sum(c is not None for c in occupancy.values()))
     await _write(zone, "Online", online)
+    if changed_at is not None:
+        await (await get_var(zone, "LastDataReceivedAt")).write_value(
+            zone_variant("LastDataReceivedAt", changed_at))
 
 
 async def block_folder(server: Server, idx: int, yard: Node, block: str) -> Node:

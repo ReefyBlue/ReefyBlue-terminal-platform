@@ -22,6 +22,7 @@ from terminal_model.port import (
     EquipmentSnapshot,
     EventKind,
     LinkReason,
+    RackOccupancyUnavailable,
 )
 from terminal_model.types import Job, State
 
@@ -39,7 +40,6 @@ class ReconnectingPort:
         self._now = 0.0
         self._generation = 0  # bumped on every bind/unbind
         self._lost = False  # unbound after having been bound: next bind emits LINK_RESTORED
-        self._racks: dict[str, dict[str, str | None]] = {}  # last rack_occupancy per block
 
     @property
     def connected(self) -> bool:
@@ -156,11 +156,12 @@ class ReconnectingPort:
 
     # -- RackOccupancyPort (v2 layouts) ------------------------------------------------
     def rack_occupancy(self, block: str) -> dict[str, str | None]:
-        """The bound port's rack occupancy of ``block``; while unbound the last one read
-        (``KeyError`` if never read). ``TypeError`` if the bound port has none (legacy)."""
-        if self._port is not None:
-            read = getattr(self._port, "rack_occupancy", None)
-            if read is None:
-                raise TypeError("the equipment port reports no rack occupancy")
-            self._racks[block] = dict(read(block))
-        return dict(self._racks[block])
+        """The bound port's rack occupancy of ``block``. Unbound: ``RackOccupancyUnavailable``
+        (fail closed: no cached answer). ``TypeError`` if the bound port has none (legacy), so
+        the Dispatcher's startup check refuses rack mode."""
+        if self._port is None:
+            raise RackOccupancyUnavailable(f"equipment link not connected (block {block})")
+        read = getattr(self._port, "rack_occupancy", None)
+        if read is None:
+            raise TypeError("the equipment port reports no rack occupancy")
+        return dict(read(block))

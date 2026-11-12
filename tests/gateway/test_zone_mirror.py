@@ -4,7 +4,7 @@ OPC UA port serves ``rack_occupancy`` from that mirror (``RackOccupancyPort``)."
 from __future__ import annotations
 
 import asyncio
-import logging
+import datetime
 import socket
 import time
 from dataclasses import replace
@@ -14,7 +14,8 @@ import pytest
 import pytest_asyncio
 from terminal_gateway.gateway import Gateway
 from terminal_gateway.serve import GatewayLayout, _Sts, load_gateway_layout
-from terminal_model.port import RackOccupancyPort
+from terminal_model.port import RackOccupancyPort, RackOccupancyUnavailable
+from terminal_opcua.nodeset import get_var
 from terminal_opcua.port import OpcUaEquipmentPort
 from terminal_sim.layout import load_layout
 from terminal_sim.opcua_servers import EquipmentServer, ZoneServer
@@ -177,7 +178,9 @@ async def test_v2_sts_vars_mirrored(rig):
 
 
 @_module_loop
-async def test_zone_link_loss_keeps_values_and_reconnects(rig, caplog):
+async def test_zone_link_loss_is_unavailable_never_stale(rig):
+    """While the gateway's link to a zone is down the port refuses to answer
+    (``RackOccupancyUnavailable``, not the last mirrored values, not ``ConnectionError``)."""
     zone = rig.zones["A"]
     rack = rig.world.terminal.transfer_zone("A").racks[0].id
     rig.world.racks.put(rack, "TGHU0000001")
@@ -187,13 +190,10 @@ async def test_zone_link_loss_keeps_values_and_reconnects(rig, caplog):
     await zone.stop()
     try:
         assert await _until(lambda: _true(not mirror.connected), 5.0)
-        online = await (await mirror._local(None, "Online")).read_value()
-        assert online is False
-        with caplog.at_level(logging.WARNING, logger="terminal_opcua.port"):
-            stale = await _occ(rig, "A")
+        assert await (await mirror._local(None, "Online")).read_value() is False
+        with pytest.raises(RackOccupancyUnavailable):
             await _occ(rig, "A")
-        assert stale[rack] == "TGHU0000001"  # last mirrored values
-        assert sum("offline at the gateway" in m for m in caplog.messages) == 1
+        assert (await _occ(rig, "B")) == rig.world.port.rack_occupancy("B")  # other zones answer
     finally:
         rig.world.racks.take(rack)
         await zone.start()
@@ -201,3 +201,47 @@ async def test_zone_link_loss_keeps_values_and_reconnects(rig, caplog):
     assert await _until(lambda: _true(mirror.connected), 10.0)
     assert await _until(lambda: _eq(_occ(rig, "A"), rig.world.port.rack_occupancy("A")), 3.0)
     assert await (await mirror._local(None, "Online")).read_value() is True
+
+
+@_module_loop
+async def test_zone_last_data_received_at_mirrored(rig):
+    mirror = rig.gateway.zones["B"]
+    up = rig.zones["B"]
+
+    async def same() -> bool:
+        return (await (await mirror._local(None, "LastDataReceivedAt")).read_value()
+                == await (await get_var(up._obj, "LastDataReceivedAt")).read_value())
+
+    rig.world.racks.put(rig.world.terminal.transfer_zone("B").racks[0].id, "STAMP-1")
+    await rig.sync()
+    try:
+        assert await _until(same, 3.0)
+        stamp = await (await mirror._local(None, "LastDataReceivedAt")).read_value()
+        assert isinstance(stamp, datetime.datetime) and stamp.year >= 2026
+    finally:
+        rig.world.racks.take(rig.world.terminal.transfer_zone("B").racks[0].id)
+        await rig.sync()
+
+
+@_module_loop
+async def test_v2_mirror_link_loss_marks_status_offline(rig):
+    """A lost equipment link: State OFFLINE and the derived TechnicalStatus RED /
+    OperationalMode Offline; the upstream's values return on reconnect."""
+    mirror = rig.gateway.mirrors["STS-01"]
+    await rig.sts.stop()
+    try:
+        async def offline() -> bool:
+            return (await mirror._mirrored("State") == "OFFLINE"
+                    and await mirror._mirrored("TechnicalStatus") == "RED"
+                    and await mirror._mirrored("OperationalMode") == "Offline")
+
+        assert await _until(offline, 5.0)
+    finally:
+        await rig.sts.start()
+        await rig.sync()
+
+    async def back() -> bool:
+        return (mirror.connected and await mirror._mirrored("TechnicalStatus") == "GREEN"
+                and await mirror._mirrored("OperationalMode") == "Automatic")
+
+    assert await _until(back, 10.0)

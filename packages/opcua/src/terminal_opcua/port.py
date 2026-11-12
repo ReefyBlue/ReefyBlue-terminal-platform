@@ -30,7 +30,11 @@ from dataclasses import dataclass
 from typing import Any, Self, TypeVar
 
 from asyncua import Client, Node, ua
-from terminal_model.port import EquipmentEvent, EquipmentSnapshot
+from terminal_model.port import (
+    EquipmentEvent,
+    EquipmentSnapshot,
+    RackOccupancyUnavailable,
+)
 from terminal_model.types import Job, Kind, Position, State
 
 from terminal_opcua.codec import extra_from_json, job_to_json
@@ -113,7 +117,6 @@ class OpcUaEquipmentPort:
         self._clock: Node | None = None
         # block -> (rack ids in zone order, their ContainerId nodes, the zone's Online node)
         self._zones: dict[str, tuple[list[str], list[Node], Node]] = {}
-        self._zone_offline: set[str] = set()  # blocks whose stale occupancy was logged
         self._events: queue.SimpleQueue[EquipmentEvent] = queue.SimpleQueue()
         self._callbacks: list[Callable[[EquipmentEvent], None]] = []
         self._now = 0.0
@@ -226,7 +229,7 @@ class OpcUaEquipmentPort:
         self._loop = self._thread = None
         self._client = self._subscription = self._clock = self._types = None
         self._equipment, self._by_node, self._clock_methods = {}, {}, {}
-        self._zones, self._zone_offline = {}, set()
+        self._zones = {}
 
     async def _disconnect(self) -> None:
         client = self._client
@@ -325,19 +328,15 @@ class OpcUaEquipmentPort:
     def rack_occupancy(self, block: str) -> dict[str, str | None]:
         """``{rack_id: container_id | None}`` of ``block``'s transfer zone (``TransferZone``
         objects, mirrored by the gateway), racks in zone order; ``KeyError`` for a block
-        without one. While the gateway's link to the zone is down (``Online`` False) the last
-        mirrored values are returned and a warning is logged once per outage."""
+        without one. ``RackOccupancyUnavailable`` while the gateway's link to the zone is down
+        (``Online`` False): the mirrored values are stale and never returned (fail closed)."""
         if not self._connected:
             raise RuntimeError("port not connected")
         rack_ids, nodes, online = self._zones[block]
         assert self._client is not None
         values = self._run(self._client.read_values([online, *nodes]))
         if not values[0]:
-            if block not in self._zone_offline:
-                self._zone_offline.add(block)
-                log.warning("transfer zone %s offline at the gateway: occupancy may be stale", block)
-        else:
-            self._zone_offline.discard(block)
+            raise RackOccupancyUnavailable(f"transfer zone {block} offline at the gateway")
         return {rid: (str(v) if v else None) for rid, v in zip(rack_ids, values[1:], strict=True)}
 
     def zone_blocks(self) -> list[str]:

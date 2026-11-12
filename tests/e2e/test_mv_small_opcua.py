@@ -16,6 +16,7 @@ import pytest
 from asyncua import Client
 from opcua_procs import ROOT, ecs_service, sim_and_gateway
 from terminal_model.port import RackOccupancyPort
+from terminal_model.types import Job, JobType
 from terminal_opcua.nodeset import NAMESPACE_URI, V2_KIND_VARS
 from terminal_opcua.port import OpcUaEquipmentPort
 from terminal_runner.run import run_once_http
@@ -50,6 +51,17 @@ def test_mv_small_v2_vars_and_racks_over_opcua(tmp_path):
             assert port.zone_blocks() == [z.block for z in layout.terminal.transfer_zones]
             for zone in layout.terminal.transfer_zones:
                 assert port.rack_occupancy(zone.block) == {r.id: None for r in zone.racks}
+            # one occupied rack end to end: a prefilled box, a STACK_OUT to RK-A-1 by the WS-ASC
+            assert port.prefill_yard([("A/6/1/1", "OPCU0000001")]) is True
+            assert port.start_sim() is True
+            job = Job("J-T6-1", JobType.STACK_OUT, "OPCU0000001", "SLOT:A:5:0", "RACK:RK-A-1")
+            assert port.assign_job("ASC-A-WS", job) is True
+            deadline = time.monotonic() + 60.0
+            while port.rack_occupancy("A")["RK-A-1"] != "OPCU0000001":
+                assert time.monotonic() < deadline, port.snapshot("ASC-A-WS")
+                time.sleep(0.2)
+            occ = port.rack_occupancy("A")
+            assert [r for r, c in occ.items() if c] == ["RK-A-1"]
             sts, agv, asc = port.snapshot("STS-01"), port.snapshot("AGV-01"), port.snapshot("ASC-A-WS")
             # the ECS rack-mode keys (Extra)
             assert {"holding", "lane_buffer"} <= set(sts.extra)

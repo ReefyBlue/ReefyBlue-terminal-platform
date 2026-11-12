@@ -617,6 +617,7 @@ const ALARM_LABELS = {
   NEEDS_RELEASE: "Vrijgave nodig",
   UNKNOWN_OUTCOME: "Uitkomst onbekend",
   NO_FREE_COLUMN: "Geen vrije kolom",
+  RACKS_UNAVAILABLE: "Rackbezetting onbekend",
 };
 
 const RELEASABLE = new Set(["NEEDS_RELEASE", "LINK_LOST"]);
