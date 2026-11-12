@@ -29,6 +29,15 @@ class Stage(StrEnum):
     TO_STS = "TO_STS"
     AT_STS_LOAD = "AT_STS_LOAD"
     LOADING = "LOADING"
+    # rack mode (v2 layouts with transfer zones; see ``Dispatcher`` "RACK MODE")
+    TO_STS_LANE = "TO_STS_LANE"  # empty AGV driving to its STS lane
+    AT_LANE = "AT_LANE"  # AGV in the lane; with a job: the STS DISCHARGE / LOAD runs
+    LANE_PICKUP = "LANE_PICKUP"  # discharge box in the lane buffer; the AGV lifts it itself
+    TO_RACK = "TO_RACK"  # discharge box on the AGV, driving to a transfer rack
+    BUFFER_WAIT = "BUFFER_WAIT"  # discharge box on the AGV, no rack free: waiting in a buffer
+    ON_RACK = "ON_RACK"  # box on the rack (discharge: for STACK_IN; load: for an AGV)
+    AGV_TO_RACK = "AGV_TO_RACK"  # load: empty AGV driving to the rack to lift the box
+    RACK_TO_STS = "RACK_TO_STS"  # load: box on the AGV, driving to the STS lane
     # terminal
     DONE = "DONE"
     FAILED = "FAILED"
@@ -62,7 +71,14 @@ PENDING = frozenset({Stage.AWAIT_AGV, Stage.AWAIT_ASC})
 # Stages in which the order's box is on its AGV: from the sts_to_agv / tp_to_agv
 # hand-over until agv_to_tp (discharge, entering STACKING) / agv_to_sts (load, DONE).
 # A failed LOADING rolls back to AT_STS_LOAD with the box still on board.
-BOX_ON_AGV = frozenset({Stage.TO_YARD, Stage.AWAIT_TP, Stage.TO_STS, Stage.AT_STS_LOAD, Stage.LOADING})
+# Rack mode: TO_RACK, BUFFER_WAIT, RACK_TO_STS (and a LOAD in AT_LANE, see
+# ``Dispatcher._rack_box_on_agv``; a DISCHARGE in AT_LANE has no box on its AGV yet).
+BOX_ON_AGV = frozenset(
+    {
+        Stage.TO_YARD, Stage.AWAIT_TP, Stage.TO_STS, Stage.AT_STS_LOAD, Stage.LOADING,
+        Stage.TO_RACK, Stage.BUFFER_WAIT, Stage.RACK_TO_STS,
+    }
+)
 
 # Where an order goes when its running job fails. Stages missing here keep their stage
 # (the box is on the AGV/at the TP) and simply get the job re-issued by ``tick()``.
@@ -72,9 +88,17 @@ ROLLBACK = {
     Stage.UNSTACKING: Stage.AWAIT_ASC,
     Stage.AGV_TO_TP: Stage.AT_TP,
     Stage.LOADING: Stage.AT_STS_LOAD,
+    Stage.TO_STS_LANE: Stage.AWAIT_AGV,  # rack mode
+    Stage.AGV_TO_RACK: Stage.ON_RACK,  # rack mode
 }
 # Rollbacks where the AGV carries no box yet and is released.
 RELEASE_AGV = frozenset({Stage.AGV_EN_ROUTE, Stage.AGV_TO_TP})
+# Rack mode: a failed STACK_IN goes back to ON_RACK (the box is on the rack or, after a
+# fault, in the ASC's spreader: the same job is re-issued to the same crane). Stages kept:
+# AT_LANE (STS job; a held box is set down by the re-issued job), LANE_PICKUP, TO_RACK,
+# BUFFER_WAIT, RACK_TO_STS (box on the AGV or in the lane buffer).
+RACK_ROLLBACK = {**ROLLBACK, Stage.STACKING: Stage.ON_RACK}
+RACK_RELEASE_AGV = frozenset({Stage.TO_STS_LANE, Stage.AGV_TO_RACK})
 
 
 @dataclass(frozen=True)
@@ -114,6 +138,12 @@ class OrderRecord:
     replan_streak: int = 0  # JOB_FAILED/FAULT replans in a row (cap -> REPLAN_STREAK); reset on completion
     job_counts: dict[JobType, int] = field(default_factory=dict)
     change_seq: int = 0  # bumped when taken, DONE or FAILED (``containers_since``); not a FIFO key
+    # rack mode only
+    vessel: str | None = None  # VESSEL:<berth>:<bay>:<row>:<tier> of the STS move
+    lane: str | None = None  # STS lane held for the order's AGV (and its buffered box)
+    rack: str | None = None  # transfer rack claimed for the box
+    buffer: str | None = None  # apron buffer of a BUFFER_WAIT AGV
+    avoid_racks: set[str] = field(default_factory=set)  # refused with RACK_OCCUPIED; re-picked
 
     @property
     def cid(self) -> str:

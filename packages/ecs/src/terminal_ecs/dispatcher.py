@@ -80,6 +80,40 @@ and the DUPLICATE_CONTAINER check until ``prune_done(keep)`` drops the oldest be
 ``keep`` (with their ``completed`` entries and job-log entries; ``status()`` counters stay
 cumulative). Only the long-running ECS service prunes; nothing here calls it, so a run
 without pruning behaves exactly as before.
+
+RACK MODE (``layout`` is a v2 ``TerminalLayout`` with transfer zones; everything above
+except the TP rules still holds). Job locations use the v2 grammar (``VESSEL:``, ``LANE:``,
+``RACK:``, ``BUFFER:``, ``SLOT:<block>:<bay>:<row>`` 0-based). Per block the WS-ASC does
+STACK_IN / STACK_OUT; the LS-ASC gets no job here.
+
+DISCHARGE
+    AWAIT_AGV(None) --TRANSPORT (agv->LANE, a lane is taken)--> TO_STS_LANE(job) --done--> AT_LANE(None)
+    AT_LANE(None) --DISCHARGE (VESSEL->LANE)--> AT_LANE(job) --done, box on the AGV--> TO_RACK(None)
+    AT_LANE(job) --done, box left in the lane buffer (AGV not IDLE)--> LANE_PICKUP(None)
+    LANE_PICKUP(None) --TRANSPORT (LANE->LANE, the AGV lifts the box)--> LANE_PICKUP(job) --done--> TO_RACK(None)
+    TO_RACK(None) --free rack (also in ``alternative_blocks``: re-blocked)--> TO_RACK(job), lane freed
+    TO_RACK(None)/BUFFER_WAIT(None) --no free rack--> BUFFER_WAIT(job) to a buffer of its STS --done--> BUFFER_WAIT(None)
+    TO_RACK(job) --done, AGV freed--> ON_RACK(None) --STACK_IN (RACK->SLOT)--> STACKING(job) --done--> DONE
+LOAD
+    AWAIT_ASC(None) --free rack--> STACK_OUT (SLOT->RACK) UNSTACKING(job) --done--> ON_RACK(None)
+    ON_RACK(None) --TRANSPORT (agv->RACK, a lane is taken)--> AGV_TO_RACK(job) --done--> RACK_TO_STS(None)
+    RACK_TO_STS(None) --TRANSPORT (RACK->LANE)--> RACK_TO_STS(job) --done--> AT_LANE(None)
+    AT_LANE(None) --LOAD (LANE->VESSEL)--> AT_LANE(job) --done, AGV and lane freed--> DONE
+
+Lanes are the lookahead: an order gets an AGV only with a free lane of its STS (no other
+order holds it, no box in its lane buffer); while the FIFO head has no lane, other orders
+leave one free, and while a head LOAD still needs an AGV they leave one AGV free. Racks are
+claimed per order (``rack_occupancy`` of the port, if it has one, adds boxes the ECS does not
+know); a LOAD takes at most all but one rack of its kind in a block, so discharges always
+find one eventually. ``RACK_OCCUPIED`` is retryable: the rack is avoided and another picked
+(or BUFFER_WAIT / AWAIT_ASC), without replan or exclusion. ``COLUMN_FULL`` /
+``TIER_NOT_ON_TOP`` of a STACK_IN re-slots like ``SLOT_OCCUPIED``. A failed STACK_IN goes
+back to ON_RACK and is re-issued to the same crane (which keeps a held box across a fault);
+an ASC reporting ``holding`` another box gets no job. A crane job that fails after the
+set-down (the crane reports no ``holding`` and the box is on the AGV / in the lane buffer /
+on board / on the rack / off it) is not re-issued: the order carries on as if it had
+completed (``_rack_handover_done``). Freed AGVs are parked on a free apron
+buffer (``PARK-*`` jobs, not in the job log) so they never block a lane or rack point.
 """
 
 from __future__ import annotations
@@ -92,6 +126,8 @@ from collections.abc import Callable, Mapping
 from types import MappingProxyType
 from typing import Literal
 
+from terminal_model.layout import TerminalLayout
+from terminal_model.layout_grid import cell_of, grid_view
 from terminal_model.locations import SlotLoc, parse_location
 from terminal_model.port import EquipmentEvent, EquipmentPort, EventKind, LinkReason
 from terminal_model.types import Job, JobType, Kind, Position, State
@@ -105,6 +141,8 @@ from terminal_ecs.orders import (
     NEEDS_AGV,
     PENDING,
     PRE_CRANE,
+    RACK_RELEASE_AGV,
+    RACK_ROLLBACK,
     RELEASE_AGV,
     ROLLBACK,
     TP_BUSY,
@@ -127,6 +165,13 @@ _UNKNOWN_CAUSE = "unknown outcome"
 
 _CRANE_JOB = {Stage.AT_STS: (JobType.DISCHARGE, Stage.DISCHARGING), Stage.AT_STS_LOAD: (JobType.LOAD, Stage.LOADING)}
 
+# Rack mode: vessel cells picked when the order has no ``vessel_slot`` (spec C1 §5 vessel:
+# 50 bays per berth from ``from_m + 25`` at 6.5 m, 22 rows, 10 hold + 8 deck tiers).
+VESSEL_BAYS, VESSEL_BAY0_M, VESSEL_BAY_PITCH_M = 50, 25.0, 6.5
+VESSEL_ROWS, VESSEL_TIERS_HOLD, VESSEL_TIERS_DECK = 22, 10, 8
+_RACK_RETRY = frozenset({"RACK_OCCUPIED"})
+_RESLOT_REASONS = frozenset({"COLUMN_FULL", "TIER_NOT_ON_TOP"})
+
 
 class Dispatcher:
     def __init__(
@@ -137,8 +182,11 @@ class Dispatcher:
         lookahead_per_sts: int = 2,
         watchdog_s: float = 600.0,
         auto_release: bool = False,
+        layout: TerminalLayout | None = None,
     ) -> None:
         self.port = port
+        self.layout = layout
+        self.rack_mode = layout is not None and bool(layout.transfer_zones)
         self.slot_provider = slot_provider
         self.lookahead_per_sts = lookahead_per_sts
         self.watchdog_s = watchdog_s
@@ -161,8 +209,13 @@ class Dispatcher:
             elif kind is Kind.ASC:
                 block = port.snapshot(eid).extra.get("block_id")
                 self._asc_by_block[str(block) if block else eid.split("-", 1)[1]] = eid
+        self._other_asc: list[str] = []  # rack mode: the LS-ASCs (no jobs, but state events)
+        self._park_jobs: dict[str, tuple[str, str]] = {}  # rack mode: PARK job id -> (AGV, buffer)
+        if self.rack_mode:
+            assert layout is not None
+            self._init_rack_mode(layout)
 
-        self._all_eq = frozenset({*self._sts, *self._agvs, *self._asc_by_block.values()})
+        self._all_eq = frozenset({*self._sts, *self._agvs, *self._asc_by_block.values(), *self._other_asc})
         self._known: set[str] = set()  # open + retained finished orders (DUPLICATE_CONTAINER)
         self._finished: dict[str, OrderRecord] = {}  # DONE/FAILED records, in finish order
         self._done_total = 0  # cumulative, unaffected by prune_done
@@ -217,6 +270,8 @@ class Dispatcher:
             stage = Stage.AWAIT_AGV if o.type is JobType.DISCHARGE else Stage.AWAIT_ASC
             seq = next(self._seq)
             rec = OrderRecord(o, o.yard_slot, stage, seq=seq, submit_seq=seq)
+            if self.rack_mode:
+                rec.vessel = self._vessel_for(o)
             self._open[o.container_id] = rec
             self._changed(rec)
         self.tick()
@@ -413,6 +468,9 @@ class Dispatcher:
     # -------------------------------------------------------------- tick phases
 
     def _tick_once(self) -> None:
+        if self.rack_mode:
+            self._tick_rack()
+            return
         # 1. Crane: each idle STS serves only its FIFO head (DISCHARGE or LOAD).
         for sts in self._sts:
             head = self._fifo_head(sts)
@@ -623,12 +681,17 @@ class Dispatcher:
         rec.stage, rec.seq = stage, next(self._seq)
 
     def _on_completed(self, ev: EquipmentEvent) -> None:
+        if self._park_jobs and self._park_ended(ev):
+            return
         rec = self._record_for(ev)
         if rec is None:
             return
         self._detach(rec)
         rec.watchdog_cancels, rec.stuck, rec.replan_streak = 0, False, 0  # the order made progress
         log.debug("completed %s on %s", ev.job_id, ev.equipment_id)
+        if self.rack_mode:
+            self._rack_completed(rec, ev)
+            return
         agv = rec.agv_id or ev.equipment_id
         match rec.stage:
             case Stage.AGV_EN_ROUTE:
@@ -663,6 +726,8 @@ class Dispatcher:
         self._transfer(rec, "agv_to_tp", agv, agv)
 
     def _finish(self, rec: OrderRecord) -> None:
+        if self.rack_mode:
+            self._release_claims(rec)
         rec.agv_id = None
         self._enter(rec, Stage.DONE)
         del self._open[rec.cid]
@@ -680,8 +745,12 @@ class Dispatcher:
         rec.change_seq = self._change_hw
 
     def _on_failed(self, ev: EquipmentEvent) -> None:
+        if self._park_jobs and self._park_ended(ev):
+            return
         rec = self._record_for(ev)
         if rec is None:  # unknown, or already rolled back (FAULT state change / watchdog)
+            return
+        if self.rack_mode and self._rack_failed(rec, ev):
             return
         if rec.stage is Stage.STACKING and ev.reason == "SLOT_OCCUPIED":
             self._detach(rec)
@@ -837,11 +906,20 @@ class Dispatcher:
         a row (no completion between) fail the order (``REPLAN_STREAK``)."""
         self._detach(rec)
         self._excluded.add(eid)
+        if self.rack_mode and self._rack_handover_done(rec, eid):
+            # The crane failed after it had set the box down: the step is done, not replanned.
+            log.warning("%s: %s failed on %s (%s) after the hand-over; carrying on", rec.cid, rec.stage, eid, reason)
+            rec.watchdog_cancels, rec.stuck, rec.replan_streak = 0, False, 0
+            self._rack_completed(rec, EquipmentEvent(EventKind.JOB_COMPLETED, eid, self.port.now()))
+            return
         self._replans += 1
         old = rec.stage
-        if old in RELEASE_AGV:
-            rec.agv_id = None
-        rec.stage = ROLLBACK.get(old, old)
+        if self.rack_mode:
+            self._rack_rollback(rec, old)
+        else:
+            if old in RELEASE_AGV:
+                rec.agv_id = None
+            rec.stage = ROLLBACK.get(old, old)
         rec.seq = rec.submit_seq
         log.warning("replan %s: %s failed on %s (%s) -> %s", rec.cid, old, eid, reason, rec.stage)
         if streak:
@@ -902,8 +980,11 @@ class Dispatcher:
         # A failed order's box may physically stay on the TP; free the TP anyway so the
         # block keeps working (the failure is logged and counted). A box that may still
         # be on its AGV quarantines that AGV instead of handing it to the next order.
-        if rec.stage in BOX_ON_AGV and rec.agv_id is not None and rec.agv_id not in self._quarantined:
+        on_agv = self._rack_box_on_agv(rec) if self.rack_mode else rec.stage in BOX_ON_AGV
+        if on_agv and rec.agv_id is not None and rec.agv_id not in self._quarantined:
             self._quarantine(rec.agv_id, rec.cid, reason)
+        if self.rack_mode:
+            self._release_claims(rec)
         self._clear_tp(rec)
         rec.fail_reason = reason
         rec.agv_id = None
@@ -925,3 +1006,473 @@ class Dispatcher:
             self._fail_order(rec, "TRANSFER_ERROR")
             return False
         return True
+
+    # ================================================================== rack mode
+
+    def _init_rack_mode(self, t: TerminalLayout) -> None:
+        ids = set(self.port.equipment_ids())
+        self._asc_by_block = {b.id: b.asc_ws_id for b in t.blocks if b.asc_ws_id in ids}
+        self._other_asc = [b.asc_ls_id for b in t.blocks if b.asc_ls_id in ids]
+        self._blocks = {b.id: b for b in t.blocks}
+        self._sts_spec = {s.id: s for s in t.sts}
+        self._berths = {b.id: b for b in t.quay.berths}
+        self._lanes: dict[str, list[str]] = {s.id: [ln.id for ln in s.lanes] for s in t.sts}
+        self._racks = {z.block: list(z.racks) for z in t.transfer_zones}
+        self._rack_pos = {r.id: Position(r.x_m, r.y_m) for z in t.transfer_zones for r in z.racks}
+        self._buffers = {b.id: b for b in t.apron.buffers}
+        self._lane_owner: dict[str, str] = {}  # lane id -> container id
+        self._rack_claim: dict[str, str] = {}  # rack id -> container id
+        self._buffer_agv: dict[str, str] = {}  # buffer id -> AGV parked there / heading there
+        self._vessel_moves: dict[str, int] = {}  # STS id -> vessel cells handed out
+        self._park_seq = itertools.count(1)
+        # AGVs start on the buffer cells of the grid view (the sim's start cells, in STS order).
+        g = grid_view(t)
+        order = {s.id: i for i, s in enumerate(t.sts)}
+        bufs = sorted(t.apron.buffers, key=lambda b: order.get(b.sts_id, len(order)))
+        by_cell = {c: b.id for b, c in zip(bufs, g.agv_start_cells, strict=False)}
+        for agv in self._agvs:
+            p = self.port.snapshot(agv).position
+            buf = by_cell.get(cell_of(p.x, p.y, g.cell_m))
+            if buf is not None and buf not in self._buffer_agv:
+                self._buffer_agv[buf] = agv
+
+    def _vessel_for(self, o: WorkOrder) -> str:
+        """The order's vessel cell: its ``vessel_slot``, else the next cell of the STS's home bay
+        (row by row, deck tiers from the bottom)."""
+        if o.vessel_slot:
+            return o.vessel_slot
+        spec = self._sts_spec.get(o.sts_id)
+        berth_id = spec.berth_ids[0] if spec and spec.berth_ids else next(iter(self._berths))
+        x0 = spec.x0_m if spec else self.port.snapshot(o.sts_id).position.x
+        bay = round((x0 - self._berths[berth_id].from_m - VESSEL_BAY0_M) / VESSEL_BAY_PITCH_M)
+        bay = min(max(bay, 0), VESSEL_BAYS - 1)
+        n = self._vessel_moves.get(o.sts_id, 0)
+        self._vessel_moves[o.sts_id] = n + 1
+        row = n % VESSEL_ROWS
+        tier = VESSEL_TIERS_HOLD + (n // VESSEL_ROWS) % VESSEL_TIERS_DECK
+        return f"VESSEL:{berth_id}:{bay}:{row}:{tier}"
+
+    @staticmethod
+    def _slot2(rec: OrderRecord) -> str:
+        """``yard_slot`` (1-based ``block/bay/row/tier``) as a v2 column (0-based, no tier: the
+        ASC sets down on top / picks the column's top box)."""
+        loc = parse_location(rec.yard_slot)
+        assert isinstance(loc, SlotLoc)
+        return f"SLOT:{loc.block}:{loc.bay - 1}:{loc.row - 1}"
+
+    # -------------------------------------------------------------- tick
+
+    def _tick_rack(self) -> None:
+        # 1. Crane: each idle STS serves only its FIFO head, once its AGV is in the lane.
+        for sts in self._sts:
+            head = self._rack_head(sts)
+            if (
+                head
+                and head.current_job_id is None
+                and head.stage is Stage.AT_LANE
+                and head.agv_id not in self._unusable()
+                and self._available(sts)
+            ):
+                lane = f"LANE:{head.lane}"
+                assert head.vessel is not None
+                jtype = head.order.type
+                src, dst = (head.vessel, lane) if jtype is JobType.DISCHARGE else (lane, head.vessel)
+                self._issue(sts, head, Job(head.next_job_id(jtype), jtype, head.cid, src, dst), Stage.AT_LANE)
+        # 2./3. Bound AGVs and the WS-ASCs (at most one job each per pass; STACK_IN first).
+        used: set[str] = set()
+        self._plan_rack_discharge(used)
+        self._plan_rack_load(used)
+        # 4. Empty AGVs to lanes / racks, bounded by the lanes.
+        for sts in self._sts:
+            self._dispatch_rack_agvs(sts)
+        # 5. Free AGVs not on a buffer go and park on one.
+        self._park_free_agvs()
+
+    def _rack_pre_crane(self, rec: OrderRecord) -> bool:
+        if rec.order.type is JobType.LOAD:
+            return True  # a LOAD is DONE when its STS job completes
+        return rec.stage in (Stage.AWAIT_AGV, Stage.TO_STS_LANE, Stage.AT_LANE)
+
+    def _rack_head(self, sts: str) -> OrderRecord | None:
+        for r in self._open.values():
+            if r.order.sts_id == sts and self._rack_pre_crane(r):
+                return r
+        return None
+
+    def _plan_rack_discharge(self, used: set[str]) -> None:
+        """Discharge boxes on their way from the lane to the stack: lane-buffer pickups, rack
+        choice (or BUFFER_WAIT) and STACK_IN."""
+        for rec in self._waiting(Stage.LANE_PICKUP):
+            if rec.agv_id is None or not self._available(rec.agv_id):
+                continue
+            lane = f"LANE:{rec.lane}"
+            self._issue(rec.agv_id, rec, Job(rec.next_job_id(JobType.TRANSPORT), JobType.TRANSPORT,
+                                             rec.cid, lane, lane), Stage.LANE_PICKUP)
+        bound = sorted([*self._waiting(Stage.TO_RACK), *self._waiting(Stage.BUFFER_WAIT)], key=lambda r: r.seq)
+        for rec in bound:
+            agv = rec.agv_id
+            if agv is None:
+                log.error("order %s is %s without an AGV; skipping", rec.cid, rec.stage)
+                continue
+            if not self._available(agv):
+                continue
+            src = rec.agv_at or (f"LANE:{rec.lane}" if rec.lane else agv)
+            rack = self._discharge_rack(rec)
+            if rack is not None:
+                job = Job(rec.next_job_id(JobType.TRANSPORT), JobType.TRANSPORT, rec.cid, src, f"RACK:{rack}")
+                rec.rack, self._rack_claim[rack] = rack, rec.cid
+                if self._issue(agv, rec, job, Stage.TO_RACK):
+                    self._leave_lane_or_buffer(rec)
+                else:
+                    self._drop_rack(rec)
+                continue
+            if rec.stage is Stage.BUFFER_WAIT and rec.buffer is not None:
+                continue  # parked in its buffer: wait for a rack
+            buf = self._free_buffer(rec.order.sts_id, self.port.snapshot(agv).position)
+            if buf is None:
+                continue
+            job = Job(rec.next_job_id(JobType.TRANSPORT), JobType.TRANSPORT, rec.cid, src, f"BUFFER:{buf}")
+            self._unpark(agv)
+            rec.buffer, self._buffer_agv[buf] = buf, agv
+            if self._issue(agv, rec, job, Stage.BUFFER_WAIT):
+                log.info("no free rack in block %s for %s: %s waits in buffer %s", rec.block, rec.cid, agv, buf)
+                self._free_lane(rec)
+            else:
+                self._buffer_agv.pop(buf, None)
+                rec.buffer = None
+        for rec in self._waiting(Stage.ON_RACK):
+            if rec.order.type is not JobType.DISCHARGE:
+                continue
+            asc = self._asc_by_block.get(rec.block)
+            if asc is None or asc in used or not self._asc_takes(asc, rec.cid):
+                continue
+            job = Job(rec.next_job_id(JobType.STACK_IN), JobType.STACK_IN, rec.cid, f"RACK:{rec.rack}",
+                      self._slot2(rec))
+            if self._issue(asc, rec, job, Stage.STACKING):
+                used.add(asc)
+
+    def _plan_rack_load(self, used: set[str]) -> None:
+        """Load boxes: STACK_OUT onto a rack, and loaded AGVs from the rack to their lane."""
+        for rec in self._waiting(Stage.AWAIT_ASC):
+            asc = self._asc_by_block.get(rec.block)
+            if asc is None or asc in used or not self._asc_takes(asc, rec.cid):
+                continue
+            new = rec.rack is None
+            rack = rec.rack or self._load_rack(rec)
+            if rack is None:
+                continue  # no rack: the order stays in AWAIT_ASC
+            rec.rack, self._rack_claim[rack] = rack, rec.cid
+            job = Job(rec.next_job_id(JobType.STACK_OUT), JobType.STACK_OUT, rec.cid, self._slot2(rec), f"RACK:{rack}")
+            if self._issue(asc, rec, job, Stage.UNSTACKING):
+                used.add(asc)
+            elif new:
+                self._drop_rack(rec)
+        for rec in self._waiting(Stage.RACK_TO_STS):
+            if rec.agv_id is None or not self._available(rec.agv_id):
+                continue
+            src = rec.agv_at or rec.agv_id
+            job = Job(rec.next_job_id(JobType.TRANSPORT), JobType.TRANSPORT, rec.cid, src, f"LANE:{rec.lane}")
+            self._issue(rec.agv_id, rec, job, Stage.RACK_TO_STS)
+
+    def _asc_takes(self, asc: str, cid: str) -> bool:
+        """The crane is available and does not hold another box in its spreader."""
+        if not self._available(asc):
+            return False
+        holding = self.port.snapshot(asc).extra.get("holding")
+        return not holding or holding == cid
+
+    def _dispatch_rack_agvs(self, sts: str) -> None:
+        head = self._rack_head(sts)
+        lanes = self._free_lanes(sts)
+        for rec in [r for r in self._open.values() if r.order.sts_id == sts]:  # submit order
+            if rec.current_job_id is not None or rec.agv_id is not None:
+                continue
+            needs = rec.stage is Stage.AWAIT_AGV if rec.order.type is JobType.DISCHARGE else rec.stage is Stage.ON_RACK
+            if not needs:
+                continue
+            if not lanes:
+                return
+            if rec is not head and head is not None:
+                if head.lane is None and len(lanes) < 2:
+                    return  # keep a lane for the head: the crane serves only the head
+                head_waits = (
+                    head.agv_id is None and head.order.type is JobType.LOAD
+                    and head.stage in (Stage.AWAIT_ASC, Stage.UNSTACKING, Stage.ON_RACK)
+                )
+                if head_waits and len(self._free_agvs()) < 2:
+                    return
+            if not self._send_rack_agv(rec, lanes[0]):
+                return  # no AGV available
+            lanes.pop(0)
+
+    def _send_rack_agv(self, rec: OrderRecord, lane: str) -> bool:
+        if rec.order.type is JobType.DISCHARGE:
+            dest, target, stage = f"LANE:{lane}", self.port.snapshot(rec.order.sts_id).position, Stage.TO_STS_LANE
+        else:
+            assert rec.rack is not None
+            dest, target, stage = f"RACK:{rec.rack}", self._rack_pos[rec.rack], Stage.AGV_TO_RACK
+        candidates = [(self.port.snapshot(agv).position.distance_to(target), agv) for agv in self._free_agvs()]
+        for _, agv in sorted(candidates):
+            job = Job(rec.next_job_id(JobType.TRANSPORT), JobType.TRANSPORT, rec.cid, agv, dest)
+            rec.agv_id, rec.lane, self._lane_owner[lane] = agv, lane, rec.cid
+            if self._issue(agv, rec, job, stage):
+                self._unpark(agv)
+                rec.agv_at = None
+                return True
+            rec.agv_id, rec.lane = None, None
+            del self._lane_owner[lane]
+        return False
+
+    # -------------------------------------------------------------- lanes, racks, buffers
+
+    def _free_lanes(self, sts: str) -> list[str]:
+        """Lanes of ``sts`` no order holds and whose lane buffer is empty."""
+        buffered = self.port.snapshot(sts).extra.get("lane_buffer") or {}
+        assert isinstance(buffered, Mapping)
+        return [ln for ln in self._lanes.get(sts, []) if ln not in self._lane_owner and not buffered.get(ln)]
+
+    def _free_lane(self, rec: OrderRecord) -> None:
+        if rec.lane is not None and self._lane_owner.get(rec.lane) == rec.cid:
+            del self._lane_owner[rec.lane]
+        rec.lane = None
+
+    def _rack_occupied(self, block: str) -> Mapping[str, object]:
+        occ = getattr(self.port, "rack_occupancy", None)
+        return occ(block) if occ is not None else {}
+
+    def _free_rack(self, block: str, reefer: bool, avoid: set[str]) -> str | None:
+        """First rack of ``block``'s zone (zone order) of the box's kind that no order claims and
+        the port reports empty (``Racks.free_rack`` seen from the ECS)."""
+        if block not in self._racks:
+            return None
+        occupied = self._rack_occupied(block)
+        for r in self._racks[block]:
+            if r.reefer == reefer and r.id not in self._rack_claim and not occupied.get(r.id) and r.id not in avoid:
+                return r.id
+        return None
+
+    def _discharge_rack(self, rec: OrderRecord) -> str | None:
+        """A free rack in the order's block, else in one of its ``alternative_blocks`` (the
+        order is re-blocked to a new slot there); None -> BUFFER_WAIT."""
+        reefer = rec.order.reefer
+        rack = self._free_rack(rec.block, reefer, rec.avoid_racks)
+        if rack is not None:
+            return rack
+        for block in rec.order.alternative_blocks:
+            if block == rec.block or block not in self._asc_by_block:
+                continue
+            rack = self._free_rack(block, reefer, rec.avoid_racks)
+            if rack is None:
+                continue
+            new = self.slot_provider.next_slot(block)
+            if new is None or not valid_slot(new, block):
+                if new is not None:
+                    log.error("slot provider returned invalid slot %r for %s in block %s", new, rec.cid, block)
+                continue
+            log.info("replan %s: no free rack in block %s, re-blocked %s -> %s", rec.cid, rec.block, rec.yard_slot, new)
+            rec.yard_slot = new
+            self._replans += 1
+            return rack
+        rec.avoid_racks.clear()  # avoided racks get another chance on the next tick
+        return None
+
+    def _load_rack(self, rec: OrderRecord) -> str | None:
+        """A free rack for a STACK_OUT, leaving at least one rack of the kind to discharges."""
+        reefer = rec.order.reefer
+        kind = [r.id for r in self._racks.get(rec.block, []) if r.reefer == reefer]
+        loads = sum(
+            1 for r in self._open.values()
+            if r.order.type is JobType.LOAD and r.rack in kind and r.rack is not None
+        )
+        if loads >= max(1, len(kind) - 1):
+            return None
+        rack = self._free_rack(rec.block, reefer, rec.avoid_racks)
+        if rack is None:
+            rec.avoid_racks.clear()
+        return rack
+
+    def _drop_rack(self, rec: OrderRecord) -> None:
+        if rec.rack is not None and self._rack_claim.get(rec.rack) == rec.cid:
+            del self._rack_claim[rec.rack]
+        rec.rack = None
+
+    def _free_buffer(self, sts: str | None, near: Position) -> str | None:
+        """Nearest unused apron buffer, those of ``sts`` first."""
+        free = [b for b in self._buffers.values() if b.id not in self._buffer_agv]
+        if not free:
+            return None
+        return min(free, key=lambda b: (b.sts_id != sts, near.distance_to(Position(b.x_m, b.y_m)), b.id)).id
+
+    def _unpark(self, agv: str) -> None:
+        for buf, a in list(self._buffer_agv.items()):
+            if a == agv:
+                del self._buffer_agv[buf]
+
+    def _leave_lane_or_buffer(self, rec: OrderRecord) -> None:
+        """The order's AGV drives off (to a rack): its lane or buffer is free again."""
+        self._free_lane(rec)
+        if rec.buffer is not None:
+            if self._buffer_agv.get(rec.buffer) == rec.agv_id:
+                del self._buffer_agv[rec.buffer]
+            rec.buffer = None
+        rec.agv_at = None
+
+    def _release_claims(self, rec: OrderRecord) -> None:
+        self._free_lane(rec)
+        self._drop_rack(rec)
+        # A quarantined AGV stays where it is: its buffer stays taken (it parks there).
+        if rec.buffer is not None and rec.agv_id not in self._quarantined:
+            if self._buffer_agv.get(rec.buffer) == rec.agv_id:
+                del self._buffer_agv[rec.buffer]
+            rec.buffer = None
+
+    def _park_free_agvs(self) -> None:
+        parked = set(self._buffer_agv.values())
+        for agv in self._free_agvs():
+            if agv in parked:
+                continue
+            buf = self._free_buffer(None, self.port.snapshot(agv).position)
+            if buf is None:
+                return
+            job = Job(f"PARK-{agv}-{next(self._park_seq)}", JobType.TRANSPORT, "", agv, f"BUFFER:{buf}")
+            self._buffer_agv[buf] = agv
+            self._park_jobs[job.job_id] = (agv, buf)
+            if not self.port.assign_job(agv, job):
+                self._park_jobs.pop(job.job_id, None)
+                if self._buffer_agv.get(buf) == agv:
+                    del self._buffer_agv[buf]
+
+    def _park_ended(self, ev: EquipmentEvent) -> bool:
+        """A PARK job ended (True); a failed one leaves its AGV unparked (parked again later)."""
+        ended = self._park_jobs.pop(ev.job_id, None) if ev.job_id else None
+        if ended is None:
+            return False
+        agv, buf = ended
+        if ev.kind is EventKind.JOB_FAILED and self._buffer_agv.get(buf) == agv:
+            del self._buffer_agv[buf]
+        return True
+
+    # -------------------------------------------------------------- events
+
+    def _agv_carries(self, agv: str | None, cid: str) -> bool:
+        """The AGV reports ``cid`` on board; one that does not report its load is assumed to."""
+        if agv is None:
+            return False
+        extra = self.port.snapshot(agv).extra
+        if "loaded_container_id" not in extra:
+            return True
+        return cid in (extra.get("loaded_container_id"), extra.get("load_a"), extra.get("load_b"))
+
+    def _reports_carrying(self, agv: str | None, cid: str) -> bool | None:
+        """Whether the AGV reports ``cid`` on board; None if it does not report its load."""
+        if agv is None:
+            return None
+        extra = self.port.snapshot(agv).extra
+        if "loaded_container_id" not in extra:
+            return None
+        return cid in (extra.get("loaded_container_id"), extra.get("load_a"), extra.get("load_b"))
+
+    def _rack_handover_done(self, rec: OrderRecord, eid: str) -> bool:
+        """A crane job of ``rec`` failed (fault, unknown outcome): True if the equipment
+        reports that the box had already been set down (the crane hoists up empty after the
+        hand-over). Re-issuing such a job would pick a box that is no longer there. Needs the
+        crane's ``holding`` and the AGV load / rack occupancy; without them: False."""
+        cid = rec.cid
+        extra = self.port.snapshot(eid).extra
+        if "holding" not in extra or extra["holding"] == cid:
+            return False
+        if rec.stage is Stage.AT_LANE and eid == rec.order.sts_id:
+            carrying = self._reports_carrying(rec.agv_id, cid)
+            if rec.order.type is JobType.DISCHARGE:
+                buffered = extra.get("lane_buffer") or {}
+                assert isinstance(buffered, Mapping)
+                return bool(carrying) or cid in buffered.values()
+            return carrying is False  # LOAD: neither in the spreader nor on the AGV -> on board
+        if rec.stage in (Stage.STACKING, Stage.UNSTACKING) and rec.rack is not None:
+            occ = getattr(self.port, "rack_occupancy", None)
+            if occ is None:
+                return False
+            on_rack = occ(rec.block).get(rec.rack) == cid
+            return not on_rack if rec.stage is Stage.STACKING else on_rack
+        return False
+
+    def _rack_box_on_agv(self, rec: OrderRecord) -> bool:
+        return rec.stage in BOX_ON_AGV or (rec.order.type is JobType.LOAD and rec.stage is Stage.AT_LANE)
+
+    def _rack_completed(self, rec: OrderRecord, ev: EquipmentEvent) -> None:
+        agv = rec.agv_id or ev.equipment_id
+        match rec.stage:
+            case Stage.TO_STS_LANE:
+                rec.agv_at = f"LANE:{rec.lane}"
+                self._enter(rec, Stage.AT_LANE)
+            case Stage.AT_LANE if rec.order.type is JobType.DISCHARGE:
+                if self._agv_carries(rec.agv_id, rec.cid):
+                    self._enter(rec, Stage.TO_RACK)
+                    self._transfer(rec, "sts_to_agv", ev.equipment_id, rec.agv_id)
+                else:  # the AGV was not ready: the box waits in the lane buffer
+                    log.info("%s left in the buffer of lane %s; %s picks it up", rec.cid, rec.lane, rec.agv_id)
+                    self._enter(rec, Stage.LANE_PICKUP)
+            case Stage.AT_LANE:  # LOAD on board
+                if self._transfer(rec, "agv_to_sts", agv, agv):
+                    self._finish(rec)
+            case Stage.LANE_PICKUP:
+                self._enter(rec, Stage.TO_RACK)
+            case Stage.BUFFER_WAIT:
+                rec.agv_at = f"BUFFER:{rec.buffer}"
+                self._enter(rec, Stage.BUFFER_WAIT)
+            case Stage.TO_RACK:
+                rec.avoid_racks.clear()
+                rec.agv_id = rec.agv_at = None  # AGV free once the box is on the rack
+                self._enter(rec, Stage.ON_RACK)
+                self._transfer(rec, "agv_to_rack", agv, agv)
+            case Stage.STACKING:
+                self._finish(rec)
+            case Stage.UNSTACKING:
+                rec.avoid_racks.clear()
+                self._enter(rec, Stage.ON_RACK)
+                self._transfer(rec, "asc_to_rack", ev.equipment_id, None)
+            case Stage.AGV_TO_RACK:
+                rec.agv_at = f"RACK:{rec.rack}"
+                self._drop_rack(rec)
+                self._enter(rec, Stage.RACK_TO_STS)
+                self._transfer(rec, "rack_to_agv", agv, agv)
+            case Stage.RACK_TO_STS:
+                rec.agv_at = f"LANE:{rec.lane}"
+                self._enter(rec, Stage.AT_LANE)
+            case _:
+                log.error("completed %s for %s in unexpected stage %s", ev.job_id, rec.cid, rec.stage)
+
+    def _rack_failed(self, rec: OrderRecord, ev: EquipmentEvent) -> bool:
+        """Rack-mode failures that are not replans; True if handled."""
+        if ev.reason in _RACK_RETRY and rec.stage in (Stage.TO_RACK, Stage.UNSTACKING):
+            self._detach(rec)
+            if rec.rack is not None:
+                rec.avoid_racks.add(rec.rack)
+            log.info("%s: rack %s occupied for %s; picking another", ev.equipment_id, rec.rack, rec.cid)
+            self._drop_rack(rec)
+            if rec.stage is Stage.UNSTACKING:
+                self._enter(rec, Stage.AWAIT_ASC)
+            return True
+        if ev.reason in _RESLOT_REASONS and rec.stage is Stage.STACKING:
+            self._detach(rec)
+            self._enter(rec, Stage.ON_RACK)
+            self._reslot(rec)
+            return True
+        if ev.reason == "SLOT_EMPTY" and rec.stage is Stage.UNSTACKING:
+            self._detach(rec)
+            log.error("slot %s empty for load %s; failing order", rec.yard_slot, rec.cid)
+            self._fail_order(rec, "SLOT_EMPTY")
+            return True
+        return False
+
+    def _rack_rollback(self, rec: OrderRecord, old: Stage) -> None:
+        if old in RACK_RELEASE_AGV:
+            rec.agv_id = rec.agv_at = None
+            self._free_lane(rec)
+        if old is Stage.TO_RACK:
+            self._drop_rack(rec)  # picked again (the AGV's booking ended with its job)
+        if old is Stage.BUFFER_WAIT and rec.buffer is not None:
+            if self._buffer_agv.get(rec.buffer) == rec.agv_id:
+                del self._buffer_agv[rec.buffer]
+            rec.buffer = rec.agv_at = None
+        rec.stage = RACK_ROLLBACK.get(old, old)

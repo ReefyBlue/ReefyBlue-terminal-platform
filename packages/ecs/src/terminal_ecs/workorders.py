@@ -14,6 +14,10 @@ class WorkOrder:
     type: JobType  # DISCHARGE or LOAD
     sts_id: str
     yard_slot: str
+    # Rack mode (v2 layouts) only; ignored by the legacy dispatcher.
+    reefer: bool = False  # reefer box: reefer racks only
+    alternative_blocks: tuple[str, ...] = ()  # discharge: blocks to re-block to when no rack is free
+    vessel_slot: str | None = None  # VESSEL:<berth>:<bay>:<row>:<tier>; None = the dispatcher picks
 
 
 class SlotProvider(Protocol):

@@ -133,7 +133,7 @@ class World2:
         self.yard = StackYard(self.stack, t)
         self.points: dict[str, str] = {}  # lane/rack id -> AGV id
         self.rack_res: dict[str, str] = {}  # rack id -> equipment id that will set a box on it
-        self.port = SimEquipmentPort(self)
+        self.port = SimEquipmentPort2(self)
         self.equipment: dict[str, Equipment] = {}
         emit = self.port._dispatch
 
@@ -347,3 +347,13 @@ def _geometry(b, zone, truck) -> tuple[float, float]:
     else:
         hi = b.bays - 1.0
     return lo, hi
+
+
+class SimEquipmentPort2(SimEquipmentPort):
+    """The sim port of ``World2``: also reports rack occupancy (the in-process counterpart of the
+    OPC UA ``TransferZone`` objects), ``rack_occupancy(block) -> {rack_id: container_id | None}``."""
+
+    def rack_occupancy(self, block: str) -> dict[str, str | None]:
+        racks = self._world.racks
+        zone = self._world.terminal.transfer_zone(block)  # KeyError for an unknown block
+        return {r.id: racks.occupant(r.id) for r in zone.racks}
