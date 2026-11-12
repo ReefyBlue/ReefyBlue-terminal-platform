@@ -291,6 +291,29 @@ class World2:
         sts.lane_buffer[lane_id] = None
         agv.load(cid)
 
+    # --- boxes -------------------------------------------------------------------------
+    def locate_box(self, cid: str) -> str | None:
+        """Where ``cid`` is in the terminal (stack, rack, AGV, lane buffer, a spreader, on board),
+        or None if nowhere (still in the vessel's discharge stow, or unknown)."""
+        if self.stack.locate(cid) is not None:
+            return "stack"
+        for rack_id in self.rack_specs:
+            if self.racks.occupant(rack_id) == cid:
+                return f"rack:{rack_id}"
+        for agv_id, agv in self.agvs.items():
+            if agv.carries(cid):
+                return f"agv:{agv_id}"
+        for sts in self.sts:
+            if cid in sts.lane_buffer.values():
+                return f"lane_buffer:{sts.equipment_id}"
+        for eid, eq in self.equipment.items():
+            if getattr(eq, "holding", None) == cid:
+                return f"spreader:{eid}"
+        for berth, vessel in self.vessels.items():
+            if cid in vessel.loaded:
+                return f"vessel:{berth}"
+        return None
+
     # --- racks ------------------------------------------------------------------------
     def rack_occupant(self, rack_id: str) -> str | None:
         return self.racks.occupant(rack_id)

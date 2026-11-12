@@ -170,6 +170,9 @@ class Sts2(Equipment):
         v, want = parsed
         vessel = self.vessels[v.berth]
         cid = job.container_id
+        if job.type is JobType.DISCHARGE and self.holding != cid and self.hub.locate_box(cid) is not None:
+            self.fail_job("BOX_NOT_AT_SOURCE")  # already discharged: never make a second copy
+            return
         self.wait_for_agv_s = 0.0
         target_x = vessel.bay_x(v.bay)
         if abs(target_x - self.x_m) > 1e-6:

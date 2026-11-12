@@ -103,17 +103,24 @@ LOAD
 Lanes are the lookahead: an order gets an AGV only with a free lane of its STS (no other
 order holds it, no box in its lane buffer); while the FIFO head has no lane, other orders
 leave one free, and while a head LOAD still needs an AGV they leave one AGV free. Racks are
-claimed per order (``rack_occupancy`` of the port, if it has one, adds boxes the ECS does not
-know); a LOAD takes at most all but one rack of its kind in a block, so discharges always
-find one eventually. ``RACK_OCCUPIED`` is retryable: the rack is avoided and another picked
+claimed per order (the port's ``rack_occupancy`` adds boxes the ECS does not know); a LOAD
+takes at most all but one rack of its kind in a block (of a single-rack kind: that rack),
+so discharges always find one eventually. ``RACK_OCCUPIED`` is retryable: the rack is avoided and another picked
 (or BUFFER_WAIT / AWAIT_ASC), without replan or exclusion. ``COLUMN_FULL`` /
 ``TIER_NOT_ON_TOP`` of a STACK_IN re-slots like ``SLOT_OCCUPIED``. A failed STACK_IN goes
 back to ON_RACK and is re-issued to the same crane (which keeps a held box across a fault);
 an ASC reporting ``holding`` another box gets no job. A crane job that fails after the
 set-down (the crane reports no ``holding`` and the box is on the AGV / in the lane buffer /
 on board / on the rack / off it) is not re-issued: the order carries on as if it had
-completed (``_rack_handover_done``). Freed AGVs are parked on a free apron
-buffer (``PARK-*`` jobs, not in the job log) so they never block a lane or rack point.
+completed (``_rack_handover_done``). Rack mode fails CLOSED: it needs ``rack_occupancy``
+on the port, ``holding`` from STS/ASC, ``lane_buffer`` from STS and the AGV load
+(``LayoutError`` at start otherwise); when at run time a failed or completed crane job
+leaves the box's place unknown (a key missing), nothing is re-issued: the job's outcome is
+UNKNOWN (alarm, release needed even with ``auto_release``) until ``resolve_job``.
+Freed AGVs are parked on a free apron buffer (``PARK-*`` jobs: in the job log and
+``_job_eq``, watched by the watchdog - a stalled park is cancelled and parked again - and
+reconciled after a link loss: an unknown outcome counts as parked only if the AGV stands
+on the buffer) so they never block a lane or rack point.
 """
 
 from __future__ import annotations
@@ -126,10 +133,16 @@ from collections.abc import Callable, Mapping
 from types import MappingProxyType
 from typing import Literal
 
-from terminal_model.layout import TerminalLayout
+from terminal_model.layout import LayoutError, TerminalLayout
 from terminal_model.layout_grid import cell_of, grid_view
 from terminal_model.locations import SlotLoc, parse_location
-from terminal_model.port import EquipmentEvent, EquipmentPort, EventKind, LinkReason
+from terminal_model.port import (
+    EquipmentEvent,
+    EquipmentPort,
+    EventKind,
+    LinkReason,
+    RackOccupancyPort,
+)
 from terminal_model.types import Job, JobType, Kind, Position, State
 
 from terminal_ecs.alarms import Alarm, AlarmKind, ReleaseRefused
@@ -211,6 +224,7 @@ class Dispatcher:
                 self._asc_by_block[str(block) if block else eid.split("-", 1)[1]] = eid
         self._other_asc: list[str] = []  # rack mode: the LS-ASCs (no jobs, but state events)
         self._park_jobs: dict[str, tuple[str, str]] = {}  # rack mode: PARK job id -> (AGV, buffer)
+        self._park_log: list[str] = []  # ended PARK job ids still in the job log (``prune_done``)
         if self.rack_mode:
             assert layout is not None
             self._init_rack_mode(layout)
@@ -324,6 +338,9 @@ class Dispatcher:
         # ``completed`` and ``_finished`` are both in finish order: the pruned DONE
         # orders are the head of ``completed``.
         del self.completed[:done]
+        for job_id in self._park_log:  # rack mode: ended PARK jobs go with them
+            self._job_log.pop(job_id, None)
+        self._park_log.clear()
         return n
 
     def containers_since(self, since: int, *, limit: int | None = None) -> tuple[int, list[ContainerView]]:
@@ -686,6 +703,9 @@ class Dispatcher:
         rec = self._record_for(ev)
         if rec is None:
             return
+        if self.rack_mode and self._discharge_place(rec, ev.equipment_id) is None:
+            self._rack_unknown(rec, ev.equipment_id, "box location unknown after the discharge")
+            return
         self._detach(rec)
         rec.watchdog_cancels, rec.stuck, rec.replan_streak = 0, False, 0  # the order made progress
         log.debug("completed %s on %s", ev.job_id, ev.equipment_id)
@@ -781,7 +801,9 @@ class Dispatcher:
     def _apply_state(self, eid: str, state: State | None) -> None:
         if state is State.IDLE:
             if self.auto_release:
-                if eid not in self._quarantined:
+                if eid in self._unknown.values():
+                    pass  # rack mode: an unknown box location waits for resolve_job
+                elif eid not in self._quarantined:
                     self._clear_release(eid)
                 elif self._box_free(eid):  # nothing to recover: no human needed
                     self._lift(eid, "auto_release (IDLE, no box on board)")
@@ -792,6 +814,8 @@ class Dispatcher:
             self._faulted.add(eid)
             self._need_release(eid, "fault")
             for job_id, jeq in list(self._job_eq.items()):
+                if job_id in self._park_jobs:
+                    continue  # its JOB_FAILED ends it (``_park_ended``)
                 if jeq == eid and job_id not in self._unknown:  # unknown ones wait for resolve_job
                     self._replan(self._by_job[job_id], jeq, "FAULT", streak=True)
 
@@ -834,6 +858,8 @@ class Dispatcher:
                 else:
                     self._on_failed(EquipmentEvent(EventKind.JOB_FAILED, eid, self.port.now(), job_id=job_id,
                                                    reason="FAULT_DURING_OUTAGE"))
+            elif job_id in self._park_jobs:  # a park leg needs no operator: look where the AGV is
+                self._park_reconcile(eid, job_id)
             else:
                 log.warning("outcome of %s on %s unknown after link loss", job_id, eid)
                 self._unknown[job_id] = eid
@@ -855,7 +881,7 @@ class Dispatcher:
         if outcome == "completed":
             self._on_completed(EquipmentEvent(EventKind.JOB_COMPLETED, eid, self.port.now(), job_id=job_id))
         else:
-            self._replan(rec, eid, "UNKNOWN_OUTCOME")
+            self._replan(rec, eid, "UNKNOWN_OUTCOME", verdict=True)
 
     def _outcome_seen(self, job_id: str) -> None:
         """A JOB_COMPLETED/JOB_FAILED arrived: the job's outcome is known after all.
@@ -899,19 +925,32 @@ class Dispatcher:
         self._need_release(agv, _QUARANTINE_CAUSE)
         self._release_cause[agv] = _QUARANTINE_CAUSE  # the most urgent cause wins
 
-    def _replan(self, rec: OrderRecord, eid: str, reason: str, *, streak: bool = False) -> None:
+    def _replan(self, rec: OrderRecord, eid: str, reason: str, *, streak: bool = False,
+                verdict: bool = False) -> None:
         """Roll the order back to its last stable stage; it keeps its TOS position.
 
         ``streak``: a JOB_FAILED/FAULT-driven replan. ``WATCHDOG_MAX_CANCELS`` of them in
-        a row (no completion between) fail the order (``REPLAN_STREAK``)."""
+        a row (no completion between) fail the order (``REPLAN_STREAK``).
+
+        Rack mode fails closed: before a crane job is re-issued the equipment must show where
+        the box is; when it cannot, the job's outcome is unknown (``_rack_unknown``). With
+        ``verdict`` (an operator's ``resolve_job(.., "failed")``) the check is skipped."""
+        if self.rack_mode and not verdict:
+            done = self._rack_handover_done(rec, eid)
+            if done is None:
+                self._rack_unknown(rec, eid, reason)
+                return
+            if done:
+                # The crane failed after it had set the box down: the step is done, not replanned.
+                self._detach(rec)
+                self._excluded.add(eid)
+                log.warning("%s: %s failed on %s (%s) after the hand-over; carrying on",
+                            rec.cid, rec.stage, eid, reason)
+                rec.watchdog_cancels, rec.stuck, rec.replan_streak = 0, False, 0
+                self._rack_completed(rec, EquipmentEvent(EventKind.JOB_COMPLETED, eid, self.port.now()))
+                return
         self._detach(rec)
         self._excluded.add(eid)
-        if self.rack_mode and self._rack_handover_done(rec, eid):
-            # The crane failed after it had set the box down: the step is done, not replanned.
-            log.warning("%s: %s failed on %s (%s) after the hand-over; carrying on", rec.cid, rec.stage, eid, reason)
-            rec.watchdog_cancels, rec.stuck, rec.replan_streak = 0, False, 0
-            self._rack_completed(rec, EquipmentEvent(EventKind.JOB_COMPLETED, eid, self.port.now()))
-            return
         self._replans += 1
         old = rec.stage
         if self.rack_mode:
@@ -954,6 +993,12 @@ class Dispatcher:
                 self._last_progress[eid] = now  # the clock stands still while we cannot see it
                 continue
             if eid not in self._agvs or now - self._last_progress.get(eid, now) <= self.watchdog_s:
+                continue
+            if job_id in self._park_jobs:
+                log.error("watchdog: %s made no progress on %s; parking again", eid, job_id)
+                self._park_drop(job_id)  # first, so the CANCELLED event is ignored
+                self.port.cancel_job(eid)
+                self.port.reset(eid)
                 continue
             rec = self._by_job[job_id]
             if rec.watchdog_cancels >= WATCHDOG_MAX_CANCELS:
@@ -1011,9 +1056,9 @@ class Dispatcher:
 
     def _init_rack_mode(self, t: TerminalLayout) -> None:
         ids = set(self.port.equipment_ids())
+        self._check_rack_port(t, ids)
         self._asc_by_block = {b.id: b.asc_ws_id for b in t.blocks if b.asc_ws_id in ids}
         self._other_asc = [b.asc_ls_id for b in t.blocks if b.asc_ls_id in ids]
-        self._blocks = {b.id: b for b in t.blocks}
         self._sts_spec = {s.id: s for s in t.sts}
         self._berths = {b.id: b for b in t.quay.berths}
         self._lanes: dict[str, list[str]] = {s.id: [ln.id for ln in s.lanes] for s in t.sts}
@@ -1030,11 +1075,31 @@ class Dispatcher:
         order = {s.id: i for i, s in enumerate(t.sts)}
         bufs = sorted(t.apron.buffers, key=lambda b: order.get(b.sts_id, len(order)))
         by_cell = {c: b.id for b, c in zip(bufs, g.agv_start_cells, strict=False)}
+        self._buffer_cell = {b: c for c, b in by_cell.items()}
+        self._cell_m = g.cell_m
         for agv in self._agvs:
             p = self.port.snapshot(agv).position
             buf = by_cell.get(cell_of(p.x, p.y, g.cell_m))
             if buf is not None and buf not in self._buffer_agv:
                 self._buffer_agv[buf] = agv
+
+    def _check_rack_port(self, t: TerminalLayout, ids: set[str]) -> None:
+        """Rack mode fails closed, so it needs to see where boxes are: ``rack_occupancy`` on the
+        port, ``holding`` from every STS and ASC, ``lane_buffer`` from every STS and the load
+        (``loaded_container_id``) from every AGV. Devices OFFLINE at start are checked when
+        they matter (a missing key then makes the outcome unknown)."""
+        missing: list[str] = []
+        if not isinstance(self.port, RackOccupancyPort):
+            missing.append("port: rack_occupancy")
+        need = {Kind.STS: ("holding", "lane_buffer"), Kind.ASC: ("holding",), Kind.AGV: ("loaded_container_id",)}
+        for eid in sorted(ids):
+            snap = self.port.snapshot(eid)
+            if snap.state is State.OFFLINE:
+                continue
+            missing += [f"{eid}: {k}" for k in need.get(snap.kind, ()) if k not in snap.extra]
+        if missing:
+            raise LayoutError("rack mode needs holding/lane_buffer/load from the equipment port; missing "
+                              + ", ".join(missing))
 
     def _vessel_for(self, o: WorkOrder) -> str:
         """The order's vessel cell: its ``vessel_slot``, else the next cell of the STS's home bay
@@ -1237,8 +1302,8 @@ class Dispatcher:
         rec.lane = None
 
     def _rack_occupied(self, block: str) -> Mapping[str, object]:
-        occ = getattr(self.port, "rack_occupancy", None)
-        return occ(block) if occ is not None else {}
+        assert isinstance(self.port, RackOccupancyPort)  # checked at start
+        return self.port.rack_occupancy(block)
 
     def _free_rack(self, block: str, reefer: bool, avoid: set[str]) -> str | None:
         """First rack of ``block``'s zone (zone order) of the box's kind that no order claims and
@@ -1277,7 +1342,9 @@ class Dispatcher:
         return None
 
     def _load_rack(self, rec: OrderRecord) -> str | None:
-        """A free rack for a STACK_OUT, leaving at least one rack of the kind to discharges."""
+        """A free rack for a STACK_OUT. Loads hold at most all but one rack of the box's kind in
+        the block, so a discharge always finds one; a kind with a single rack (reefer) is
+        shared: a load may take it (it leaves again when its AGV fetches it)."""
         reefer = rec.order.reefer
         kind = [r.id for r in self._racks.get(rec.block, []) if r.reefer == reefer]
         loads = sum(
@@ -1335,36 +1402,59 @@ class Dispatcher:
             if buf is None:
                 return
             job = Job(f"PARK-{agv}-{next(self._park_seq)}", JobType.TRANSPORT, "", agv, f"BUFFER:{buf}")
+            # Book-keep before assign_job (events may come synchronously), like ``_issue``.
             self._buffer_agv[buf] = agv
             self._park_jobs[job.job_id] = (agv, buf)
+            self._job_eq[job.job_id] = agv
+            self._last_progress[agv] = self.port.now()
+            logged = self._job_log[job.job_id] = LoggedJob(job, agv, self.port.now())
+            self._new_jobs.append(logged)
             if not self.port.assign_job(agv, job):
-                self._park_jobs.pop(job.job_id, None)
-                if self._buffer_agv.get(buf) == agv:
-                    del self._buffer_agv[buf]
+                del self._job_log[job.job_id]
+                self._park_drop(job.job_id)
+
+    def _park_drop(self, job_id: str) -> None:
+        """Forget a PARK job; its AGV counts as not parked (parked again on a later tick)."""
+        agv, buf = self._park_jobs.pop(job_id)
+        self._job_eq.pop(job_id, None)
+        self._park_log.append(job_id)
+        if self._buffer_agv.get(buf) == agv:
+            del self._buffer_agv[buf]
 
     def _park_ended(self, ev: EquipmentEvent) -> bool:
         """A PARK job ended (True); a failed one leaves its AGV unparked (parked again later)."""
-        ended = self._park_jobs.pop(ev.job_id, None) if ev.job_id else None
-        if ended is None:
+        if not ev.job_id or ev.job_id not in self._park_jobs:
             return False
-        agv, buf = ended
-        if ev.kind is EventKind.JOB_FAILED and self._buffer_agv.get(buf) == agv:
-            del self._buffer_agv[buf]
+        if ev.kind is EventKind.JOB_FAILED:
+            self._park_drop(ev.job_id)
+        else:
+            self._park_jobs.pop(ev.job_id)
+            self._job_eq.pop(ev.job_id, None)
+            self._park_log.append(ev.job_id)
         return True
+
+    def _at_buffer(self, agv: str, buf: str) -> bool:
+        p = self.port.snapshot(agv).position
+        return cell_of(p.x, p.y, self._cell_m) == self._buffer_cell.get(buf)
+
+    def _park_reconcile(self, agv: str, job_id: str) -> None:
+        """A PARK leg ended during a link outage with an unknown outcome: the AGV is parked
+        only if it actually stands on the buffer."""
+        _, buf = self._park_jobs[job_id]
+        if self._at_buffer(agv, buf):
+            log.info("park %s of %s ended during the outage: on buffer %s", job_id, agv, buf)
+            self._park_jobs.pop(job_id)
+            self._job_eq.pop(job_id, None)
+            self._park_log.append(job_id)
+        else:
+            log.info("park %s of %s ended during the outage off buffer %s: parking again", job_id, agv, buf)
+            self._park_drop(job_id)
 
     # -------------------------------------------------------------- events
 
-    def _agv_carries(self, agv: str | None, cid: str) -> bool:
-        """The AGV reports ``cid`` on board; one that does not report its load is assumed to."""
-        if agv is None:
-            return False
-        extra = self.port.snapshot(agv).extra
-        if "loaded_container_id" not in extra:
-            return True
-        return cid in (extra.get("loaded_container_id"), extra.get("load_a"), extra.get("load_b"))
-
-    def _reports_carrying(self, agv: str | None, cid: str) -> bool | None:
-        """Whether the AGV reports ``cid`` on board; None if it does not report its load."""
+    def _carrying(self, agv: str | None, cid: str) -> bool | None:
+        """Whether the AGV reports ``cid`` on board; None (unknown) without an AGV or when it
+        does not report its load. Callers treat None as an unknown box location."""
         if agv is None:
             return None
         extra = self.port.snapshot(agv).extra
@@ -1372,29 +1462,71 @@ class Dispatcher:
             return None
         return cid in (extra.get("loaded_container_id"), extra.get("load_a"), extra.get("load_b"))
 
-    def _rack_handover_done(self, rec: OrderRecord, eid: str) -> bool:
+    def _discharge_place(self, rec: OrderRecord, sts: str) -> Literal["agv", "buffer", "n/a"] | None:
+        """Where a completed DISCHARGE (AT_LANE) put its box: "agv" or "buffer" (one of the two,
+        seen from the AGV load or the STS ``lane_buffer``), None when neither shows it or they
+        contradict each other; "n/a" for any other order, stage or equipment."""
+        if not (rec.stage is Stage.AT_LANE and rec.order.type is JobType.DISCHARGE and sts == rec.order.sts_id):
+            return "n/a"
+        carrying = self._carrying(rec.agv_id, rec.cid)
+        buffered = self.port.snapshot(sts).extra.get("lane_buffer")
+        in_buffer = rec.cid in buffered.values() if isinstance(buffered, Mapping) else None
+        if carrying and not in_buffer:
+            return "agv"
+        if in_buffer and not carrying:
+            return "buffer"
+        if carrying is None and in_buffer is False:
+            return "agv"  # the STS set it down and not in the buffer
+        if carrying is False and in_buffer is None:
+            return "buffer"  # the STS set it down and not on the AGV
+        return None
+
+    def _rack_handover_done(self, rec: OrderRecord, eid: str) -> bool | None:
         """A crane job of ``rec`` failed (fault, unknown outcome): True if the equipment
         reports that the box had already been set down (the crane hoists up empty after the
-        hand-over). Re-issuing such a job would pick a box that is no longer there. Needs the
-        crane's ``holding`` and the AGV load / rack occupancy; without them: False."""
+        hand-over; re-issuing would pick a box that is no longer there), False if it is still
+        at the source or in the spreader (re-issue), None if the equipment does not show it
+        (``holding``, AGV load, ``lane_buffer``, rack occupancy missing): fail closed.
+        AGV jobs hand over and complete in one step: always False."""
         cid = rec.cid
-        extra = self.port.snapshot(eid).extra
-        if "holding" not in extra or extra["holding"] == cid:
+        crane = rec.stage is Stage.AT_LANE and eid == rec.order.sts_id
+        stack = rec.stage in (Stage.STACKING, Stage.UNSTACKING) and eid == self._asc_by_block.get(rec.block)
+        if not (crane or stack):
             return False
-        if rec.stage is Stage.AT_LANE and eid == rec.order.sts_id:
-            carrying = self._reports_carrying(rec.agv_id, cid)
-            if rec.order.type is JobType.DISCHARGE:
-                buffered = extra.get("lane_buffer") or {}
-                assert isinstance(buffered, Mapping)
-                return bool(carrying) or cid in buffered.values()
-            return carrying is False  # LOAD: neither in the spreader nor on the AGV -> on board
-        if rec.stage in (Stage.STACKING, Stage.UNSTACKING) and rec.rack is not None:
-            occ = getattr(self.port, "rack_occupancy", None)
-            if occ is None:
-                return False
-            on_rack = occ(rec.block).get(rec.rack) == cid
-            return not on_rack if rec.stage is Stage.STACKING else on_rack
-        return False
+        extra = self.port.snapshot(eid).extra
+        if "holding" not in extra:
+            return None
+        if extra["holding"] == cid:
+            return False
+        if crane:
+            carrying = self._carrying(rec.agv_id, cid)
+            if rec.order.type is JobType.LOAD:
+                return None if carrying is None else not carrying  # not in the spreader nor on the AGV: on board
+            buffered = extra.get("lane_buffer")
+            if carrying:
+                return True
+            if not isinstance(buffered, Mapping):
+                return None
+            if cid in buffered.values():
+                return True
+            return False if carrying is False else None
+        if rec.rack is None:
+            return None
+        on_rack = self._rack_occupied(rec.block).get(rec.rack) == cid
+        return not on_rack if rec.stage is Stage.STACKING else on_rack
+
+    def _rack_unknown(self, rec: OrderRecord, eid: str, reason: str) -> None:
+        """Fail closed: the box of ``rec``'s running job cannot be located. Nothing is
+        re-issued; the job's outcome is unknown (alarm) until ``resolve_job``, the device
+        needs a release (also with ``auto_release``)."""
+        job_id = rec.current_job_id
+        assert job_id is not None
+        log.error("%s: cannot tell where %s is after %s on %s (%s); waiting for resolve_job",
+                  rec.cid, rec.cid, job_id, eid, reason)
+        self._excluded.add(eid)
+        self._unknown[job_id] = eid
+        self._raise(AlarmKind.UNKNOWN_OUTCOME, job_id)
+        self._need_release(eid, _UNKNOWN_CAUSE)
 
     def _rack_box_on_agv(self, rec: OrderRecord) -> bool:
         return rec.stage in BOX_ON_AGV or (rec.order.type is JobType.LOAD and rec.stage is Stage.AT_LANE)
@@ -1406,7 +1538,7 @@ class Dispatcher:
                 rec.agv_at = f"LANE:{rec.lane}"
                 self._enter(rec, Stage.AT_LANE)
             case Stage.AT_LANE if rec.order.type is JobType.DISCHARGE:
-                if self._agv_carries(rec.agv_id, rec.cid):
+                if self._discharge_place(rec, ev.equipment_id) == "agv":
                     self._enter(rec, Stage.TO_RACK)
                     self._transfer(rec, "sts_to_agv", ev.equipment_id, rec.agv_id)
                 else:  # the AGV was not ready: the box waits in the lane buffer

@@ -311,3 +311,30 @@ def test_sts_spreader_never_jumps_between_moves(world2):
     assert not jobs and sts.moves == 3
     assert max_dh <= kin.hoist_empty.v_max * 0.5 + 1e-6
     assert max_dy <= kin.trolley.v_max * 0.5 + 1e-6
+
+
+@pytest.mark.parametrize("where_", ["agv", "lane_buffer", "stack"])
+def test_reissued_discharge_for_a_box_already_ashore_is_refused(world2, rec, where_):
+    """A DISCHARGE re-issued for a box that already left the vessel fails BOX_NOT_AT_SOURCE;
+    the vessel never yields a second copy."""
+    w, r = world2, rec(world2)
+    if where_ == "agv":
+        w.agvs["AGV-01"].load("C1")
+    elif where_ == "lane_buffer":
+        w.equipment["STS-01"].lane_buffer["STS-01-L2"] = "C1"
+    else:
+        w.stack.put("A", 3, 3, "C1")
+    assert w.port.assign_job("STS-01", Job("D1", JobType.DISCHARGE, "C1", "VESSEL:A:6:11:12", "LANE:STS-01-L1"))
+    w.run(300)
+    assert r.failed("STS-01", "D1") == "BOX_NOT_AT_SOURCE"
+    assert w.locate_box("C1") is not None
+    assert w.equipment["STS-01"].lane_buffer["STS-01-L1"] is None and w.equipment["STS-01"].holding is None
+
+
+def test_reissued_stack_in_for_a_stacked_box_is_refused(world2, rec):
+    w, r = world2, rec(world2)
+    w.stack.put("A", 3, 3, "C1")
+    assert w.port.assign_job("ASC-A-WS", Job("S1", JobType.STACK_IN, "C1", "RACK:RK-A-1", "SLOT:A:5:3"))
+    w.run(10)
+    assert r.failed("ASC-A-WS", "S1") == "BOX_NOT_AT_SOURCE"
+    assert w.stack.locate("C1") == ("A", 3, 3, 0)

@@ -247,7 +247,8 @@ class Asc2(Equipment):
         if held:
             pass
         elif isinstance(src, RackLoc) and self.hub.rack_occupant(src.rack_id) != cid:
-            return "RACK_EMPTY"
+            # elsewhere (e.g. already stacked by an earlier run of this job) / not there at all
+            return "BOX_NOT_AT_SOURCE" if self.hub.locate_box(cid) is not None else "RACK_EMPTY"
         elif isinstance(src, SlotLoc2):
             loc = self.stack.locate(cid)
             if loc is None or loc[:3] != (src.block, src.bay, src.row):

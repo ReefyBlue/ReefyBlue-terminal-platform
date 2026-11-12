@@ -58,3 +58,12 @@ class EquipmentPort(Protocol):
     def subscribe(self, callback: Callable[[EquipmentEvent], None]) -> None: ...
 
     def now(self) -> float: ...
+
+
+@runtime_checkable
+class RackOccupancyPort(Protocol):
+    """Optional port capability (v2 layouts with transfer zones): what each transfer rack of a
+    block holds, ``{rack_id: container_id | None}``. The ECS needs it in rack mode; the sim port
+    of ``World2`` and the OPC UA port (``TransferZone`` objects) implement it."""
+
+    def rack_occupancy(self, block: str) -> Mapping[str, str | None]: ...

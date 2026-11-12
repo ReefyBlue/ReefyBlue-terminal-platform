@@ -7,9 +7,11 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from terminal_ecs.alarms import AlarmKind
 from terminal_ecs.dispatcher import Dispatcher
 from terminal_ecs.orders import Stage
 from terminal_ecs.workorders import WorkOrder
+from terminal_model.layout import LayoutError
 from terminal_model.locations import SlotLoc
 from terminal_model.port import EquipmentEvent, EventKind, LinkReason
 from terminal_model.types import JobType, State
@@ -303,7 +305,8 @@ def test_asc_fault_during_on_rack_keeps_the_box_and_the_order_continues(in_sprea
     assert rec.stage is Stage.ON_RACK and rec.current_job_id is None and rec.rack == "RK-A-1"
     assert where(world, "D1") == (["asc:ASC-A-WS"] if in_spreader else ["rack:RK-A-1"])
     world.run(world.now() + 300)
-    assert rec.stage is Stage.ON_RACK and where(world, "D1")  # nothing re-issued while down
+    assert rec.stage is Stage.ON_RACK  # nothing re-issued while down
+    assert where(world, "D1") == (["asc:ASC-A-WS"] if in_spreader else ["rack:RK-A-1"])
     asc.set_state(State.IDLE)  # repaired
     world.run(world.now() + 60)
     assert rec.stage is Stage.ON_RACK  # needs the operator's release
@@ -383,11 +386,13 @@ class LinkPort:
     def __init__(self, inner) -> None:
         self.inner = inner
         self.down: set[str] = set()
+        self.strip: dict[str, set[str]] = {}  # snapshot extra keys the device does not report
+        self.frozen: dict[str, object] = {}  # muted device -> position it keeps reporting
         self._subs = []
         inner.subscribe(self._on)
 
     def _on(self, ev) -> None:
-        if ev.equipment_id not in self.down:
+        if ev.equipment_id not in self.down and ev.equipment_id not in self.frozen:
             for cb in list(self._subs):
                 cb(ev)
 
@@ -400,6 +405,10 @@ class LinkPort:
 
     def snapshot(self, eid):
         s = self.inner.snapshot(eid)
+        if eid in self.strip:
+            s = replace(s, extra={k: v for k, v in s.extra.items() if k not in self.strip[eid]})
+        if eid in self.frozen:
+            s = replace(s, position=self.frozen[eid])
         return replace(s, state=State.OFFLINE) if eid in self.down else s
 
     def assign_job(self, eid, job) -> bool:
@@ -481,3 +490,149 @@ def test_link_loss_fault_during_outage_replans_and_reissues():
     s = d.status()
     assert (s["done"], s["failed"], s["replans"], s["offline"]) == (1, 0, 1, 0)
     assert where(world, "D1") == ["stack"]
+
+
+# ------------------------------------------------------------------ fail closed (review round 1)
+
+def test_rack_mode_refuses_to_start_without_box_locations():
+    layout = load_layout(MV_SMALL)
+    world = make_world(layout, load_scenario(MV_SCENARIO, layout))
+    port = LinkPort(world.port)
+    port.strip = {"STS-02": {"holding"}, "AGV-03": {"loaded_container_id"}}
+    with pytest.raises(LayoutError, match="holding/lane_buffer/load") as e:
+        Dispatcher(port, Slots(), layout=layout.terminal)
+    assert "STS-02: holding" in str(e.value) and "AGV-03: loaded_container_id" in str(e.value)
+
+    class NoRacks:  # an equipment port without rack_occupancy
+        def __init__(self, inner):
+            self.inner = inner
+
+        def equipment_ids(self):
+            return self.inner.equipment_ids()
+
+        def snapshot(self, eid):
+            return self.inner.snapshot(eid)
+
+        def assign_job(self, eid, job):
+            return self.inner.assign_job(eid, job)
+
+        def cancel_job(self, eid):
+            return self.inner.cancel_job(eid)
+
+        def reset(self, eid):
+            return self.inner.reset(eid)
+
+        def subscribe(self, cb):
+            self.inner.subscribe(cb)
+
+        def now(self):
+            return self.inner.now()
+
+    with pytest.raises(LayoutError, match="rack_occupancy"):
+        Dispatcher(NoRacks(world.port), Slots(), layout=layout.terminal)
+
+
+def test_missing_holding_after_a_fault_is_unknown_not_reissued():
+    """The STS faults with the box in its spreader but its snapshot no longer reports
+    ``holding``: the dispatcher cannot tell where the box is, so it re-issues nothing; the job's
+    outcome is UNKNOWN (alarm) and the STS needs a release even with auto_release."""
+    world, port, d = make_linked(auto_release=True)
+    d.submit([discharge("D1", "STS-01", "A/6/1/1")])
+    rec = d._open["D1"]
+    sts = world.equipment["STS-01"]
+    run_until(world, d, lambda: sts.holding == "D1", step=0.5)
+    job_id = rec.current_job_id
+    port.strip["STS-01"] = {"holding"}
+    _fault(sts)
+    world.run(world.now() + 60)
+    sts.set_state(State.IDLE)
+    world.run(world.now() + 300)
+    assert [lj.job.job_id for lj in jobs_for(d, "D1") if lj.job.type is JobType.DISCHARGE] == [job_id]
+    assert rec.stage is Stage.AT_LANE and rec.current_job_id == job_id
+    assert d.unknown_jobs() == {job_id}
+    assert {(a.kind, a.equipment_id) for a in d.alarms()} >= {(AlarmKind.UNKNOWN_OUTCOME, "STS-01"),
+                                                              (AlarmKind.NEEDS_RELEASE, "STS-01")}
+    # the operator checks the crane: the box is still in the spreader -> failed, re-issue
+    del port.strip["STS-01"]
+    d.resolve_job(job_id, "failed")
+    d.release("STS-01")
+    run_until(world, d, lambda: d.status()["open"] == 0)
+    assert where(world, "D1") == ["stack"]
+    s = d.status()
+    assert (s["done"], s["failed"], s["replans"], s["unknown_outcomes"]) == (1, 0, 1, 0)
+
+
+def test_unknown_agv_load_at_discharge_completion_waits_for_resolve():
+    """The discharge completes but neither the AGV (no load reported) nor the STS (no
+    ``lane_buffer``) shows where the box went: the order waits (UNKNOWN), nothing is issued."""
+    world, port, d = make_linked()
+    d.submit([discharge("D1", "STS-01", "A/6/1/1")])
+    rec = d._open["D1"]
+    sts = world.equipment["STS-01"]
+    run_until(world, d, lambda: any(lj.job.type is JobType.DISCHARGE for lj in jobs_for(d, "D1")), step=0.5)
+    job_id, agv = rec.current_job_id, rec.agv_id
+    port.strip = {agv: {"loaded_container_id", "load_a", "load_b"}, "STS-01": {"lane_buffer"}}
+    assert d._carrying(agv, "D1") is None
+    run_until(world, d, lambda: sts.last_job_id == job_id, step=0.5)
+    world.run(world.now() + 120)
+    assert rec.stage is Stage.AT_LANE and rec.current_job_id == job_id
+    assert d.unknown_jobs() == {job_id} and len(jobs_for(d, "D1")) == 2
+    port.strip = {}
+    d.resolve_job(job_id, "completed")
+    assert rec.stage is Stage.TO_RACK
+    d.release("STS-01")
+    run_until(world, d, lambda: d.status()["open"] == 0)
+    assert where(world, "D1") == ["stack"] and d.alarms() == []
+
+
+def _parking(world, d, port):
+    """Run a discharge; return (agv, park job id) of the freed AGV while its PARK leg runs."""
+    d.submit([discharge("D1", "STS-01", "A/6/1/1")])
+
+    def running_park():
+        return next((lj for jid, lj in d.job_log.items() if jid.startswith("PARK-")
+                     and world.agvs[lj.equipment_id].current_job is lj.job), None)
+
+    run_until(world, d, lambda: running_park() is not None, step=0.5)
+    lj = running_park()
+    return lj.equipment_id, lj.job.job_id
+
+
+@pytest.mark.parametrize("outcome", ["failed", "unknown"])
+def test_park_ended_during_link_outage_is_parked_again(outcome):
+    world, port, d = make_linked()
+    agv_id, park = _parking(world, d, port)
+    agv = world.agvs[agv_id]
+    port.cut(agv_id)
+    if outcome == "failed":  # faults mid-park: the JOB_FAILED is lost
+        _fault(agv)
+        world.run(world.now() + 30)
+        agv.set_state(State.IDLE)
+    else:  # moved elsewhere by hand: its last job is not the park leg
+        agv.cancel_job()
+        agv.reset()
+        from terminal_model.types import Job
+        assert world.port.assign_job(agv_id, Job("MANUAL", JobType.TRANSPORT, "", agv_id, "LANE:STS-02-L1"))
+        run_until(world, d, lambda: agv.last_job_id == "MANUAL", step=0.5)
+    port.restore(agv_id)
+    assert park not in d._job_eq and park not in d._park_jobs
+    agv_parks = [jid for jid, lj in d.job_log.items() if jid.startswith("PARK-") and lj.equipment_id == agv_id]
+    assert len(agv_parks) == 2  # parked again at once
+    run_until(world, d, lambda: d.status()["open"] == 0 and agv.current_job is None)
+    assert agv.at_point is None and agv_id in d._buffer_agv.values()
+    assert d.alarms() == [] and d.unknown_jobs() == frozenset()
+
+
+def test_stalled_park_is_cancelled_by_the_watchdog_and_parked_again():
+    world, port, d = make_linked(watchdog_s=5.0)
+    agv_id, park = _parking(world, d, port)
+    port.frozen[agv_id] = port.inner.snapshot(agv_id).position  # no progress seen
+    world.run(world.now() + 10)
+    d.tick()  # watchdog: cancel + reset, and the same tick parks it again
+    assert park not in d._park_jobs and park not in d._job_eq
+    assert world.agvs[agv_id].current_job.job_id != park
+    del port.frozen[agv_id]
+    agv_parks = [jid for jid, lj in d.job_log.items() if jid.startswith("PARK-") and lj.equipment_id == agv_id]
+    assert len(agv_parks) == 2
+    run_until(world, d, lambda: d.status()["open"] == 0 and world.agvs[agv_id].current_job is None)
+    assert world.agvs[agv_id].at_point is None
