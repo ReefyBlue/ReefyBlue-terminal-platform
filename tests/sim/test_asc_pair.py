@@ -311,3 +311,22 @@ def test_a_stale_yield_request_never_drives_a_crane_towards_its_partner(world2, 
     assert r.done("ASC-A-WS", "J1") is not None and r.done("ASC-A-LS", "J2") is not None
     assert idle_moves == []
     assert ws.state is State.IDLE and ls.state is State.IDLE
+
+
+def test_an_idle_ws_still_yields_when_the_ls_needs_its_bay(world2, rec):
+    """The other half of the stale-yield filter: an idle WS parked landward of a bay the LS needs
+    moves waterward out of the way (without a job) and the LS job completes."""
+    r = rec(world2)
+    ws, ls = world2.equipment["ASC-A-WS"], world2.equipment["ASC-A-LS"]
+    world2.stack.put("A", 20, 0, "C1")
+    world2.port.assign_job("ASC-A-WS", _job("J1", JobType.STACK_MOVE, "C1", "SLOT:A:20:0", "SLOT:A:21:0"))
+    world2.run(1000)
+    assert r.done("ASC-A-WS", "J1") is not None and ws.gantry_bay == 21.0 and ws.state is State.IDLE
+    world2.stack.put("A", 15, 5, "C2")
+    t0 = world2.now()
+    world2.port.assign_job("ASC-A-LS", _job("J2", JobType.STACK_MOVE, "C2", "SLOT:A:15:5", "SLOT:A:14:5"))
+    world2.run(t0 + 1500)
+    assert r.done("ASC-A-LS", "J2") is not None
+    assert ws.current_job is None and ws.gantry_bay <= 14.0 - 2 + 1e-9  # yielded waterward
+    assert world2.stack.locate("C2") == ("A", 14, 5, 0)
+    assert ws.state is State.IDLE and ls.state is State.IDLE

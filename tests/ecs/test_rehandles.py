@@ -5,9 +5,10 @@ all of them. The ECS works from its own column model (order slots, ``register_st
 outcomes of its own jobs)."""
 from __future__ import annotations
 
+import pytest
 from terminal_ecs.alarms import AlarmKind
 from terminal_ecs.orders import Stage
-from terminal_ecs.workorders import WorkOrder
+from terminal_ecs.workorders import WorkOrder, WorkOrderError
 from terminal_model.locations import SlotLoc
 from terminal_model.types import JobType, State
 from terminal_sim.loc2 import parse_loc2
@@ -154,7 +155,13 @@ def test_no_free_column_in_the_block_the_load_waits():
     world.run(world.now() + 1500)
     rec = d._open["L0"]
     assert rec.stage is Stage.AWAIT_ASC and rec.current_job_id is None
-    assert order_jobs(d, "L0") == [] and d.alarms() == []
+    assert order_jobs(d, "L0") == []
+    (alarm,) = d.alarms()  # one WARNING, raised once, blocking nothing
+    assert (alarm.kind, alarm.severity, alarm.equipment_id) == (AlarmKind.NO_FREE_COLUMN, "WARNING", "ASC-A-LS")
+    assert "L0" in alarm.detail and "X1" in alarm.detail
+    world.run(world.now() + 300)
+    assert [a.since for a in d.alarms()] == [alarm.since]
+    assert d.status()["needs_release"] == 0
     # A truck takes a box away: the column it leaves is the only free one.
     d.submit([WorkOrder("F33-2-4", JobType.TRUCK_OUT, "", stack["F33-2-4"])])
     run_until(world, d, lambda: d.status()["open"] == 0)
@@ -162,6 +169,7 @@ def test_no_free_column_in_the_block_the_load_waits():
     move = next(lj for lj in order_jobs(d, "L0") if lj.job.type is JobType.STACK_MOVE)
     assert col_of(move.job.to_loc) == (BLOCK, 32, 1)
     assert where(world, "L0") == ["vessel:A"]
+    assert d.alarms() == []  # cleared when the order dug on
 
 
 def _fill_target_of_moves(world, n: int):
@@ -259,3 +267,93 @@ def test_a_buried_head_load_keeps_a_rack_against_non_head_loads():
     assert d.rehandles("H") == 2
     loaded = [lj.job.container_id for lj in d.job_log.values() if lj.job.type is JobType.LOAD]
     assert loaded == ["H", "N0", "N1", "N2", "N3"]  # TOS order per STS
+
+
+# ------------------------------------------------------------------ review fixes (round 1)
+
+def test_register_stack_rejects_boxes_it_must_not_take():
+    world, d, _ = make()
+    slot = put(world, "L0", BLOCK, 20, 5)
+    d.register_stack({"X1": put(world, "X1", BLOCK, 20, 5)})
+    d.submit([load("L0", slot), load("L9", "A/30/3/1")])
+    with pytest.raises(ValueError, match="open order"):
+        d.register_stack({"L9": "A/31/3/1"})
+    with pytest.raises(WorkOrderError, match="outside block"):
+        d.register_stack({"Z1": "A/41/1/1"})
+    with pytest.raises(WorkOrderError, match="outside block"):
+        d.register_stack({"Z1": "A/1/1/6"})
+    with pytest.raises(WorkOrderError):
+        d.register_stack({"Z1": "Q/1/1/1"})
+    with pytest.raises(ValueError, match="collides with X1"):
+        d.register_stack({"Z1": "A/20/5/2"})  # X1's column and tier
+    with pytest.raises(ValueError, match="collides with L9"):
+        d.register_stack({"Z1": "A/30/3/1"})  # an order's box
+    with pytest.raises(ValueError, match="collides with Z1"):
+        d.register_stack({"Z1": "A/2/2/1", "Z2": "A/2/2/1"})
+    assert "Z1" not in d._box_col  # all or nothing
+    d.register_stack({"Z1": "A/2/2/1"})
+    d.register_stack({"Z1": "A/2/3/1"})  # registered again: moved
+    assert d._box_col["Z1"] == (BLOCK, 1, 2)
+    ls = world.equipment["ASC-A-LS"]
+    run_until(world, d, lambda: ls.current_job is not None, step=0.5)
+    assert ls.current_job.container_id == "X1"
+    with pytest.raises(ValueError, match="running job"):
+        d.register_stack({"X1": "A/3/3/1"})
+
+
+def test_ls_refusal_before_the_pick_is_a_bounded_replan_not_unknown():
+    """NOT_ON_TOP on a STACK_MOVE (a box the ECS does not know lies on top): the box never moved,
+    so the order is replanned like on the WS path (REPLAN_STREAK cap), with no alarm and no
+    release; the LS-ASC keeps working."""
+    world, d, _ = make()
+    slot = put(world, "L0", BLOCK, 20, 5)
+    d.register_stack({"X1": put(world, "X1", BLOCK, 20, 5)})
+    put(world, "U1", BLOCK, 20, 5)  # unknown to the ECS
+    d.submit([load("L0", slot)])
+    run_until(world, d, lambda: d.status()["open"] == 0)
+    s = d.status()
+    assert (s["failed"], s["unknown_outcomes"], s["needs_release"]) == (1, 0, 0)
+    assert d._finished["L0"].fail_reason == "REPLAN_STREAK"
+    moves = [lj for lj in order_jobs(d, "L0") if lj.job.type is JobType.STACK_MOVE]
+    assert len(moves) == 5 and all(lj.job.container_id == "X1" for lj in moves)
+    assert d.alarms() == [] and where(world, "X1") == ["stack"]
+    d.submit([WorkOrder("T1", JobType.TRUCK_IN, "", "A/38/6/1")])  # the LS-ASC is not excluded
+    run_until(world, d, lambda: d.status()["open"] == 0)
+    assert d.status()["done"] == 1 and where(world, "T1") == ["stack"]
+
+
+def test_a_stale_inventory_box_is_dropped_when_the_move_finds_no_box():
+    world, d, _ = make()
+    slot = put(world, "L0", BLOCK, 20, 5)
+    d.register_stack({"G1": "A/20/5/2"})  # the TOS thinks a box lies on top; there is none
+    d.submit([load("L0", slot)])
+    run_until(world, d, lambda: d.status()["open"] == 0)
+    assert (d.status()["done"], d.status()["failed"]) == (1, 0)
+    assert "G1" not in d._box_col and d.rehandles("L0") == 0
+    assert where(world, "L0") == ["vessel:A"] and d.alarms() == []
+
+
+def test_head_waiting_for_a_free_column_does_not_hold_back_the_load_that_frees_one():
+    """Reefer kind: one rack per block, load cap 1. The STS head H is buried on a reefer row and
+    every other reefer column is full; a later load N of the same STS sits on top of one of them.
+    Only N's STACK_OUT frees a column, so H (waiting for a column) must not reserve the rack."""
+    world, d, _ = make()
+    inv = {}
+    for bay in range(1, 41):
+        while world.stack.column_height(BLOCK, bay - 1, REEFER_ROW) < TIERS and bay != 20:
+            cid = f"R{bay}-{world.stack.column_height(BLOCK, bay - 1, REEFER_ROW)}"
+            inv[cid] = put(world, cid, BLOCK, bay, REEFER_ROW + 1)
+    head = put(world, "H", BLOCK, 20, REEFER_ROW + 1)
+    inv["X1"] = put(world, "X1", BLOCK, 20, REEFER_ROW + 1)
+    n_slot = inv.pop("R33-4")  # top of a full reefer column: the later load's box
+    world.stack.take("R33-4")
+    world.yard.occupy(SlotLoc(BLOCK, 33, REEFER_ROW + 1, 5), "N")
+    d.register_stack(inv)
+    d.submit([load("H", head, reefer=True), load("N", n_slot, reefer=True)])
+    run_until(world, d, lambda: d.status()["open"] == 0)
+    assert (d.status()["done"], d.status()["failed"]) == (2, 0)
+    move = next(lj for lj in order_jobs(d, "H") if lj.job.type is JobType.STACK_MOVE)
+    assert col_of(move.job.to_loc) == (BLOCK, 32, REEFER_ROW)
+    loaded = [lj.job.container_id for lj in d.job_log.values() if lj.job.type is JobType.LOAD]
+    assert loaded == ["H", "N"]
+    assert d.alarms() == []

@@ -30,7 +30,15 @@ def test_truck_in_out_fixed_cycle():
         WorkOrder("T1", JobType.TRUCK_IN, "", "A/38/6/1"),
         WorkOrder("T2", JobType.TRUCK_OUT, "", out_slot),
     ])
-    run_until(world, d, lambda: d.status()["open"] == 0)
+    racks0 = {b: world.port.rack_occupancy(b) for b in "ABCD"}
+    seen = []
+
+    def watch():
+        seen.append({b: world.port.rack_occupancy(b) for b in "ABCD"})
+        return d.status()["open"] == 0
+
+    run_until(world, d, watch, step=1.0)
+    assert all(r == racks0 for r in seen)  # no rack used during the truck cycles
     assert (d.status()["done"], d.status()["failed"]) == (2, 0)
     (tin,), (tout,) = order_jobs(d, "T1"), order_jobs(d, "T2")
     assert tin.job.type is JobType.TRUCK_IN and tout.job.type is JobType.TRUCK_OUT

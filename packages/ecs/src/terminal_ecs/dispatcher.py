@@ -108,7 +108,11 @@ DIGGING (LOAD and TRUCK_OUT, before the STACK_OUT / TRUCK_OUT)
     being dug, not a pending discharge's column; lowest first, then nearest), preferring columns
     without a box of an open LOAD / TRUCK_OUT. No free column: the order waits. ``COLUMN_FULL`` /
     ``TIER_NOT_ON_TOP`` / ``SAME_COLUMN`` re-pick the target once (the full column is avoided),
-    a second such failure is an UNKNOWN outcome (alarm, ``resolve_job``).
+    a second such failure is an UNKNOWN outcome (alarm, ``resolve_job``). Waiting for a free
+    column raises a WARNING alarm ``NO_FREE_COLUMN`` (once, cleared when the order digs on).
+    LS-ASC refusals before the pick (``NOT_ON_TOP``, ``SLOT_EMPTY`` - a stale inventory box is
+    dropped from the model -, ``HOLDING_BOX``, ``CONTAINER_PLACED``) are bounded replans
+    (``REPLAN_STREAK``); only a fault / unknown reason with nothing held is UNKNOWN.
 TRUCK_IN / TRUCK_OUT (no STS, no AGV, no rack)
     AWAIT_ASC(None) --TRUCK_IN (TRUCK->SLOT) / TRUCK_OUT (SLOT->TRUCK), LS-ASC--> TRUCK(job) --done--> DONE
     A TRUCK_IN refused with ``COLUMN_FULL`` / ``TIER_NOT_ON_TOP`` is re-slotted; a TRUCK_OUT
@@ -117,7 +121,9 @@ TRUCK_IN / TRUCK_OUT (no STS, no AGV, no rack)
 The ECS keeps its own column model (``_box_col`` / ``_col_tiers``): the slots of LOAD and
 TRUCK_OUT orders (with tier), ``register_stack`` (TOS yard inventory without an order) and the
 outcomes of its own STACK_IN / STACK_OUT / STACK_MOVE / truck jobs (set down on top). Boxes it
-does not know are not dug out (the crane then refuses the job). A moved box of an open order
+does not know are not dug out (the crane then refuses the job), and a box it sets down on a
+column with unknown boxes below gets too low a tier (``register_stack`` of the TOS prefill
+avoids both). A moved box of an open order
 takes its order's slot along. No box is set down on a column while it is being dug, and no
 ASC job touches a column another ASC job or a held STACK_MOVE box uses.
 
@@ -209,6 +215,8 @@ _RACK_RETRY = frozenset({"RACK_OCCUPIED"})
 _RESLOT_REASONS = frozenset({"COLUMN_FULL", "TIER_NOT_ON_TOP"})
 _MOVE_RETRY = frozenset({"COLUMN_FULL", "TIER_NOT_ON_TOP", "SAME_COLUMN"})  # STACK_MOVE: re-pick once
 _TRUCK_TYPES = frozenset({JobType.TRUCK_IN, JobType.TRUCK_OUT})
+# LS-ASC refusals emitted before the pick (``Asc2._check`` / the pick itself): the box never moved.
+_LS_REFUSED = frozenset({"NOT_ON_TOP", "SLOT_EMPTY", "HOLDING_BOX", "CONTAINER_PLACED"})
 _FROM_STACK = frozenset({JobType.LOAD, JobType.TRUCK_OUT})  # orders whose box starts in the stack
 _ASC_JOBS = frozenset({JobType.STACK_IN, JobType.STACK_OUT, JobType.STACK_MOVE, JobType.TRUCK_IN, JobType.TRUCK_OUT})
 
@@ -351,11 +359,20 @@ class Dispatcher:
         return container_id in self._known
 
     def register_stack(self, boxes: Mapping[str, str]) -> None:
-        """Rack mode: boxes the TOS knows in the stack without an order (container id -> 1-based
-        ``block/bay/row/tier``), so a LOAD / TRUCK_OUT under them is dug out. Replaces what the
-        ECS knew about those boxes."""
+        """Rack mode, TOS prefill: boxes in the stack that have NO order (container id -> 1-based
+        ``block/bay/row/tier``), so a LOAD / TRUCK_OUT under them is dug out and the known column
+        heights are right. Boxes of orders come with their order, never through here.
+
+        All or nothing: ``ValueError`` (``WorkOrderError`` INVALID_SLOT for a bad slot) if any box
+        belongs to an open order, is in a running job or a held STACK_MOVE, lies outside its
+        block's bays/rows/tiers, or takes the column and tier of another known box (or of
+        another box in ``boxes``). A box already registered may be registered again (moved)."""
         if not self.rack_mode:
             raise ValueError("register_stack needs rack mode (a v2 layout)")
+        in_jobs = {j.container_id for j in self.jobs.values()}
+        in_jobs |= {r.move[0] for r in self._open.values() if r.move is not None}
+        taken: dict[tuple[Column, int], str] = {
+            (col, t): c for col, tiers in self._col_tiers.items() for c, t in tiers.items() if c not in boxes}
         for cid, slot in boxes.items():
             try:
                 loc = parse_location(slot)
@@ -363,6 +380,18 @@ class Dispatcher:
                 loc = None
             if not isinstance(loc, SlotLoc) or loc.block not in self._block_spec:
                 raise WorkOrderError("INVALID_SLOT", f"{cid}: {slot}")
+            b = self._block_spec[loc.block]
+            if loc.bay > b.bays or loc.row > b.rows or loc.tier > b.tiers:
+                raise WorkOrderError("INVALID_SLOT", f"{cid}: {slot} outside block {b.id} "
+                                                     f"({b.bays}x{b.rows}x{b.tiers})")
+            if cid in self._open:
+                raise ValueError(f"register_stack: {cid} belongs to an open order")
+            if cid in in_jobs:
+                raise ValueError(f"register_stack: {cid} is in a running job")
+            key = ((loc.block, loc.bay - 1, loc.row - 1), loc.tier - 1)
+            if key in taken:
+                raise ValueError(f"register_stack: {cid} at {slot} collides with {taken[key]}")
+            taken[key] = cid
         for cid, slot in boxes.items():
             self._stack_note(cid, slot)
         self.tick()
@@ -433,7 +462,8 @@ class Dispatcher:
         return (items[-1].seq if items else self._change_hw), items
 
     def alarms(self) -> list[Alarm]:
-        """What the operator has to act on, oldest first (derived from the state sets)."""
+        """What the operator has to act on (``severity`` ERROR) or should know about (WARNING),
+        oldest first (derived from the state sets)."""
         now = self.port.now()
         since = self._alarm_since
         out = [Alarm(AlarmKind.LINK_LOST, eid, None, since.get((AlarmKind.LINK_LOST, eid), now),
@@ -442,6 +472,10 @@ class Dispatcher:
                       f"{self._release_cause.get(eid, 'fault')}: release required") for eid in self._needs_release]
         out += [Alarm(AlarmKind.UNKNOWN_OUTCOME, eid, job_id, since.get((AlarmKind.UNKNOWN_OUTCOME, job_id), now),
                       f"outcome of {job_id} unknown after link loss") for job_id, eid in self._unknown.items()]
+        if self.rack_mode:  # WARNING, blocks nothing: the order digs on once a column frees up
+            out += [Alarm(AlarmKind.NO_FREE_COLUMN, ls or "", None, since.get((AlarmKind.NO_FREE_COLUMN, cid), now),
+                          f"{cid}: no free column to dig out {box}", severity="WARNING")
+                    for cid, (ls, box) in self._no_col.items()]
         return sorted(out, key=lambda a: (a.since, a.kind, a.equipment_id, a.job_id or ""))
 
     def has_equipment(self, equipment_id: str) -> bool:
@@ -994,7 +1028,8 @@ class Dispatcher:
 
         Rack mode fails closed: before a crane job is re-issued the equipment must show where
         the box is; when it cannot, the job's outcome is unknown (``_rack_unknown``). With
-        ``verdict`` (an operator's ``resolve_job(.., "failed")``) the check is skipped."""
+        ``verdict`` (an operator's ``resolve_job(.., "failed")``, or an LS-ASC refusal before the
+        pick, which proves the box never moved) the check is skipped."""
         if self.rack_mode and not verdict:
             done = self._rack_handover_done(rec, eid)
             if done is None:
@@ -1125,6 +1160,7 @@ class Dispatcher:
         self._truck_rr: dict[str, int] = {}  # block -> truck lanes handed out
         self._box_col: dict[str, Column] = {}  # ECS column model: box -> column
         self._col_tiers: dict[Column, dict[str, int]] = {}  # column -> box -> tier (0-based)
+        self._no_col: dict[str, tuple[str | None, str]] = {}  # order -> (LS-ASC, box): no free dig column
         self._sts_spec = {s.id: s for s in t.sts}
         self._berths = {b.id: b for b in t.quay.berths}
         self._lanes: dict[str, list[str]] = {s.id: [ln.id for ln in s.lanes] for s in t.sts}
@@ -1350,7 +1386,9 @@ class Dispatcher:
         return max(tiers.values()) + 1 if tiers else 0
 
     def _stack_put(self, cid: str, col: Column) -> int:
-        """The box was set down on top of ``col``; its tier."""
+        """The box was set down on top of ``col``; its tier, derived from the known height: it is
+        too low when boxes the ECS was never told about lie below (``register_stack`` of the
+        TOS prefill avoids that)."""
         self._stack_remove(cid)
         tier = self._height(col)
         self._stack_set(cid, col, tier)
@@ -1423,6 +1461,7 @@ class Dispatcher:
         above = self._rehandles_for(rec.cid)
         if not above:
             rec.dig_col = None
+            self._no_col_clear(rec)
             return False
         box = above[0]
         src = self._box_col[box]
@@ -1434,8 +1473,12 @@ class Dispatcher:
             return True
         dst = self._rehandle_target(rec, src)
         if dst is None:
-            log.debug("%s: no free column in block %s to dig out %s; waiting", rec.cid, rec.block, box)
+            if rec.cid not in self._no_col:  # once per wait: a WARNING alarm, nothing blocked
+                log.warning("%s: no free column in block %s to dig out %s; waiting", rec.cid, rec.block, box)
+                self._no_col[rec.cid] = (ls, box)
+                self._raise(AlarmKind.NO_FREE_COLUMN, rec.cid)
             return True
+        self._no_col_clear(rec)
         job = Job(rec.next_job_id(JobType.STACK_MOVE), JobType.STACK_MOVE, box, _slot_str(src), _slot_str(dst))
         prev, rec.move = rec.move, (box, src, dst)
         if self._issue(ls, rec, job, Stage.REHANDLE):
@@ -1443,6 +1486,10 @@ class Dispatcher:
         else:
             rec.move = prev
         return True
+
+    def _no_col_clear(self, rec: OrderRecord) -> None:
+        if self._no_col.pop(rec.cid, None) is not None:
+            self._alarm_since.pop((AlarmKind.NO_FREE_COLUMN, rec.cid), None)
 
     def _plan_truck(self, rec: OrderRecord, used: set[str]) -> None:
         """TRUCK_IN (truck -> slot) / TRUCK_OUT (slot -> truck) to the block's LS-ASC."""
@@ -1590,6 +1637,7 @@ class Dispatcher:
                 if (h := self._rack_head(sts)) is not None and h is not rec and h.order.type is JobType.LOAD
                 and h.block == rec.block and h.order.reefer == reefer and h.rack is None
                 and h.stage in (Stage.AWAIT_ASC, Stage.REHANDLE)
+                and h.cid not in self._no_col  # a head waiting for a free column needs boxes to leave
             )
         if loads + heads >= max(1, len(kind) - 1):
             return None
@@ -1628,6 +1676,7 @@ class Dispatcher:
         self._free_lane(rec)
         self._drop_rack(rec)
         rec.move = rec.dig_col = None
+        self._no_col_clear(rec)
         # A quarantined AGV stays where it is: its buffer stays taken (it parks there).
         if rec.buffer is not None and rec.agv_id not in self._quarantined:
             if self._buffer_agv.get(rec.buffer) == rec.agv_id:
@@ -1872,6 +1921,17 @@ class Dispatcher:
             self._detach(rec)
             self._enter(rec, Stage.AWAIT_ASC)
             self._reslot(rec)
+            return True
+        if ev.reason in _LS_REFUSED and rec.stage in (Stage.REHANDLE, Stage.TRUCK):
+            # Refused before the pick: the box never moved. Bounded replan (REPLAN_STREAK), like
+            # the WS path; no location check, no UNKNOWN, no release.
+            if ev.reason == "SLOT_EMPTY" and rec.stage is Stage.REHANDLE and rec.move is not None:
+                ghost = rec.move[0]
+                if ghost not in self._open:  # a stale inventory box: not there, forget it
+                    log.warning("%s: %s not in %s; dropped from the column model", rec.cid, ghost, rec.move[1])
+                    self._stack_remove(ghost)
+                rec.move = None
+            self._replan(rec, ev.equipment_id, ev.reason or "UNKNOWN", streak=True, verdict=True)
             return True
         return False
 
