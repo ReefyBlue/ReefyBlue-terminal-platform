@@ -636,3 +636,63 @@ def test_stalled_park_is_cancelled_by_the_watchdog_and_parked_again():
     assert len(agv_parks) == 2
     run_until(world, d, lambda: d.status()["open"] == 0 and world.agvs[agv_id].current_job is None)
     assert world.agvs[agv_id].at_point is None
+
+
+_NO_LAST_JOB = {"last_job_id", "last_job_outcome"}  # the device does not say what its last job was
+
+
+@pytest.mark.parametrize("case", ["sts_discharge", "asc_stack_in"])
+def test_auto_release_reconcile_of_an_unknown_outcome_checks_where_the_box_is(case):
+    """The crane sets the box down during a link outage and comes back without reporting its last
+    job: the outcome is unknown and auto_release resolves it as failed - but in rack mode that
+    still looks where the box is first. It moved, so nothing is re-issued and the order goes on."""
+    world, port, d = make_linked(auto_release=True)
+    d.submit([discharge("D1", "STS-01", "A/6/1/1")])
+    rec = d._open["D1"]
+    if case == "sts_discharge":
+        eid, jtype = "STS-01", JobType.DISCHARGE
+        eq = world.equipment[eid]
+        run_until(world, d, lambda: eq.holding == "D1", step=0.5)
+        moved = lambda: any(a.carries("D1") for a in world.agvs.values())
+    else:
+        eid, jtype = "ASC-A-WS", JobType.STACK_IN
+        eq = world.equipment[eid]
+        run_until(world, d, lambda: eq.holding == "D1", step=0.5)
+        moved = lambda: world.stack.locate("D1") is not None
+    port.cut(eid)
+    port.strip[eid] = set(_NO_LAST_JOB)
+    run_until(world, d, lambda: moved() and eq.current_job is None, step=0.5)
+    port.restore(eid)
+    run_until(world, d, lambda: d.status()["open"] == 0)
+    assert sum(lj.job.type is jtype for lj in jobs_for(d, "D1")) == 1  # not re-issued
+    assert where(world, "D1") == ["stack"]
+    s = d.status()
+    assert (s["done"], s["failed"], s["replans"], s["unknown_outcomes"]) == (1, 0, 0, 0)
+    assert d.alarms() == []
+    assert rec.stage is Stage.DONE
+
+
+def test_auto_release_reconcile_without_the_box_location_stays_unknown():
+    """Same, but the STS does not report ``holding`` either: the box cannot be located, so the
+    automatic verdict does not re-issue; UNKNOWN alarm and release until the operator decides."""
+    world, port, d = make_linked(auto_release=True)
+    d.submit([discharge("D1", "STS-01", "A/6/1/1")])
+    rec = d._open["D1"]
+    sts = world.equipment["STS-01"]
+    run_until(world, d, lambda: sts.holding == "D1", step=0.5)
+    job_id = rec.current_job_id
+    port.cut("STS-01")
+    port.strip["STS-01"] = _NO_LAST_JOB | {"holding"}
+    run_until(world, d, lambda: sts.current_job is None, step=0.5)
+    port.restore("STS-01")
+    world.run(world.now() + 300)
+    assert rec.stage is Stage.AT_LANE and rec.current_job_id == job_id
+    assert d.unknown_jobs() == {job_id}
+    assert {(a.kind, a.equipment_id) for a in d.alarms()} >= {(AlarmKind.UNKNOWN_OUTCOME, "STS-01"),
+                                                              (AlarmKind.NEEDS_RELEASE, "STS-01")}
+    assert [lj.job.job_id for lj in jobs_for(d, "D1") if lj.job.type is JobType.DISCHARGE] == [job_id]
+    del port.strip["STS-01"]
+    d.resolve_job(job_id, "completed")  # the operator saw the box on the AGV
+    d.release("STS-01")
+    run_until(world, d, lambda: d.status()["open"] == 0)
+    assert where(world, "D1") == ["stack"] and d.alarms() == []

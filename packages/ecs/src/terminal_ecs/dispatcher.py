@@ -433,7 +433,7 @@ class Dispatcher:
             raise ValueError(f"outcome must be 'completed' or 'failed', not {outcome!r}")
         if job_id not in self._unknown:
             raise KeyError(job_id)
-        self._resolve(job_id, outcome)
+        self._resolve(job_id, outcome, operator=True)
         if tick:
             self.tick()
 
@@ -870,7 +870,10 @@ class Dispatcher:
                     self._need_release(eid, _UNKNOWN_CAUSE)
         self._apply_state(eid, state)
 
-    def _resolve(self, job_id: str, outcome: str) -> None:
+    def _resolve(self, job_id: str, outcome: str, *, operator: bool = False) -> None:
+        """Apply a verdict on an unknown outcome. Only an ``operator`` verdict "failed" skips the
+        rack-mode location check; the automatic one (``auto_release``) still runs it and, when
+        the box cannot be located, the outcome stays unknown (``_rack_unknown``)."""
         eid = self._unknown.pop(job_id)
         self._alarm_since.pop((AlarmKind.UNKNOWN_OUTCOME, job_id), None)
         rec = self._by_job.get(job_id)
@@ -881,7 +884,7 @@ class Dispatcher:
         if outcome == "completed":
             self._on_completed(EquipmentEvent(EventKind.JOB_COMPLETED, eid, self.port.now(), job_id=job_id))
         else:
-            self._replan(rec, eid, "UNKNOWN_OUTCOME", verdict=True)
+            self._replan(rec, eid, "UNKNOWN_OUTCOME", verdict=operator)
 
     def _outcome_seen(self, job_id: str) -> None:
         """A JOB_COMPLETED/JOB_FAILED arrived: the job's outcome is known after all.
