@@ -8,6 +8,7 @@ import logging
 from collections.abc import Callable
 
 from asyncua import Server, ua
+from terminal_model.layout import TransferZone
 from terminal_model.locations import SlotLoc, parse_location
 from terminal_model.port import EquipmentEvent
 from terminal_model.types import Kind
@@ -18,10 +19,13 @@ from terminal_opcua.nodeset import (
     block_folder,
     create_control_object,
     create_equipment_object,
+    create_zone_object,
     ensure_folders,
     get_var,
     register_types,
     write_snapshot,
+    write_zone,
+    zones_folder,
 )
 
 from terminal_sim.equipment.base import Equipment
@@ -30,8 +34,14 @@ log = logging.getLogger(__name__)
 
 
 class EquipmentServer:
-    def __init__(self, equipment: Equipment, *, port: int, host: str = "0.0.0.0") -> None:
+    """``v2``: the object is of the kind's v2 subtype (``STS2Type``...) with the C1b variables,
+    and ``LastDataReceivedAt`` is the sim time of each sync."""
+
+    def __init__(
+        self, equipment: Equipment, *, port: int, host: str = "0.0.0.0", v2: bool = False,
+    ) -> None:
         self.equipment = equipment
+        self.v2 = v2
         self.port = port
         self.host = host
         self.endpoint = f"opc.tcp://{host}:{port}/terminal/{equipment.equipment_id}"
@@ -56,7 +66,7 @@ class EquipmentServer:
         server = Server()
         await server.init()
         server.set_endpoint(self.endpoint)
-        idx, types = await register_types(server)
+        idx, types = await register_types(server, v2=self.v2)
         folders = await ensure_folders(server, idx, server.nodes.objects)
         snap = self.equipment.snapshot()
         if snap.kind == Kind.STS:
@@ -70,7 +80,8 @@ class EquipmentServer:
             cancel_job=self.equipment.cancel_job,
             reset=self.equipment.reset,
         )
-        self._obj = await create_equipment_object(server, idx, types, parent, snap, handlers)
+        self._obj = await create_equipment_object(
+            server, idx, types, parent, snap, handlers, v2=self.v2)
         self._emitter = await EventEmitter.create(
             server, types.events, self._obj, self.equipment.equipment_id)
         await server.start()
@@ -83,11 +94,55 @@ class EquipmentServer:
 
     async def sync(self) -> None:
         assert self._obj is not None and self._emitter is not None, "server not started"
-        await write_snapshot(self._obj, self.equipment.snapshot())
+        if self.v2:
+            await write_snapshot(self._obj, self.equipment.snapshot(), v2=True,
+                                 sim_time=float(self.equipment.env.now()))
+        else:
+            await write_snapshot(self._obj, self.equipment.snapshot())
         pending, self._pending = self._pending, []
         for ev in pending:
             await self._emitter.emit(ev)
             await asyncio.sleep(0)
+
+
+class ZoneServer:
+    """One transfer zone of a v2 world (``World2``): ``Terminal/TransferZones/<block>`` with the
+    occupant of each rack, refreshed by ``sync``. ``racks`` is the world's ``Racks``."""
+
+    def __init__(self, zone: TransferZone, racks, *, port: int, host: str = "0.0.0.0") -> None:
+        self.zone = zone
+        self.racks = racks
+        self.port = port
+        self.host = host
+        self.endpoint = f"opc.tcp://{host}:{port}/terminal/zone/{zone.block}"
+        self._server: Server | None = None
+        self._obj = None
+
+    def occupancy(self) -> dict[str, str | None]:
+        return {r.id: self.racks.occupant(r.id) for r in self.zone.racks}
+
+    async def start(self) -> None:
+        server = Server()
+        await server.init()
+        server.set_endpoint(self.endpoint)
+        idx, types = await register_types(server, v2=True)
+        folders = await ensure_folders(server, idx, server.nodes.objects)
+        parent = await zones_folder(server, idx, folders["Terminal"])
+        self._obj = await create_zone_object(
+            server, idx, types, parent, self.zone.block,
+            [(r.id, r.reefer, r.size) for r in self.zone.racks])
+        await write_zone(self._obj, self.occupancy())
+        await server.start()
+        self._server = server
+
+    async def stop(self) -> None:
+        if self._server is not None:
+            await self._server.stop()
+            self._server = None
+
+    async def sync(self) -> None:
+        assert self._obj is not None, "server not started"
+        await write_zone(self._obj, self.occupancy())
 
 
 class ControlServer:

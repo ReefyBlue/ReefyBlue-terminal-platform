@@ -50,9 +50,10 @@ def free_base_port(n_slots: int = 13) -> int:
     raise RuntimeError("no free port range")
 
 
-async def _gateway_ready(endpoint: str, n_equipment: int) -> bool:
+async def _gateway_ready(endpoint: str, n_equipment: int, n_zones: int = 0) -> bool:
     """True once the gateway answers and mirrors ``n_equipment`` devices, none FAULT or
-    OFFLINE (OFFLINE: the gateway's placeholder before its first upstream connection), and its
+    OFFLINE (OFFLINE: the gateway's placeholder before its first upstream connection), its
+    ``n_zones`` transfer zones are ``Online`` (v2), and its
     clock link to the sim's control server is up (``Clock/SpeedFactor`` stays 0.0 until the
     gateway has read it from the sim, whose speed factor is > 0). Without the clock check a
     ``Start`` right after readiness can be dropped ("Start not forwarded")."""
@@ -65,6 +66,7 @@ async def _gateway_ready(endpoint: str, n_equipment: int) -> bool:
         idx = await client.get_namespace_index("urn:terminal:model")
         terminal = await client.nodes.objects.get_child(f"{idx}:Terminal")
         states: list[str] = []
+        online: list[bool] = []
         stack = [terminal]
         while stack:
             node = stack.pop()
@@ -72,10 +74,14 @@ async def _gateway_ready(endpoint: str, n_equipment: int) -> bool:
                 name = (await child.read_browse_name()).Name
                 if name == "State":
                     states.append(await child.read_value())
+                elif name == "Online":
+                    online.append(await child.read_value())
                 elif name not in ("Clock",) and (await child.read_node_class()).name == "Object":
                     stack.append(child)
         down = {State.FAULT.value, State.OFFLINE.value}
         if len(states) != n_equipment or any(s in down for s in states):
+            return False
+        if len(online) != n_zones or not all(online):
             return False
         clock = await terminal.get_child(f"{idx}:Clock")
         return await (await clock.get_child(f"{idx}:SpeedFactor")).read_value() > 0
@@ -106,7 +112,7 @@ def sim_and_gateway(
 
     ``proxied_sts``: the gateway's upstream links run through a ``LinkProxy`` (gateway base
     port P, every slot ``P+i -> B+i`` of the sim's base port B, control slot
-    ``n_equipment`` included);
+    ``n_equipment`` and zone slots included);
     ``info["proxy"]`` is it and ``info["sts_port"]`` the proxy port of STS-01 (slot 0), so
     ``proxy.cut([sts_port])`` drops only the gateway's link to STS-01.
 
@@ -115,13 +121,15 @@ def sim_and_gateway(
     ``layout`` is passed to the sim (``--layout``) and the gateway (``--config``); the fleet
     the gateway mirrors is ``n_sts``/``n_agv`` plus one ASC per block of that layout (two on a
     v2 layout: WS and LS), and
-    sim and gateway put the clock server on ``base + n_equipment``.
+    sim and gateway put the clock server on ``base + n_equipment`` and, on a v2 layout, the
+    transfer zone servers on ``base + n_equipment + 1 + i``.
 
     On exit both get SIGTERM; their exit codes land in ``returncodes`` (sim, gateway).
     """
     lay = load_layout(layout)
     n_equipment = n_sts + n_agv + len(lay.blocks) * (1 if lay.terminal is None else 2)
-    n_slots = n_equipment + 1  # + the clock server
+    n_zones = 0 if lay.terminal is None else len(lay.terminal.transfer_zones)
+    n_slots = n_equipment + 1 + n_zones  # + the clock server + the zone servers
     base = free_base_port(n_slots)
     gw_base = base
     proxy = None
@@ -147,7 +155,7 @@ def sim_and_gateway(
             "proxy": proxy, "sts_port": gw_base if proxy else None}
     try:
         deadline = time.monotonic() + READY_TIMEOUT_S
-        while not asyncio.run(_gateway_ready(endpoint, n_equipment)):
+        while not asyncio.run(_gateway_ready(endpoint, n_equipment, n_zones)):
             if sim.poll() is not None or gw.poll() is not None:
                 raise RuntimeError(f"process died during startup; see {info['logs']}")
             if time.monotonic() > deadline:

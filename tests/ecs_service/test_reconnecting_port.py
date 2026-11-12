@@ -147,3 +147,24 @@ def test_rebind_emits_link_restored_for_all():
     assert by_id["AGV-01"].new_state is State.FAULT
     assert by_id["STS-01"].new_state is State.IDLE
     assert sorted(snaps, key=lambda s: s.value) == sorted([State.FAULT, State.IDLE], key=lambda s: s.value)
+
+
+def test_reconnecting_port_rack_occupancy():
+    """Forwarded to the bound port (``RackOccupancyPort``), the last answer while unbound."""
+    import pytest
+    from terminal_model.port import RackOccupancyPort
+
+    rp = ReconnectingPort()
+    assert isinstance(rp, RackOccupancyPort)
+    p = _fake()
+    rp.bind(p)
+    with pytest.raises(TypeError):  # a legacy port has no rack occupancy
+        rp.rack_occupancy("A")
+    occ = {"RK-A-1": "C1", "RK-A-2": None}
+    p.rack_occupancy = lambda block: dict(occ) if block == "A" else {}[block]  # type: ignore[attr-defined]
+    assert rp.rack_occupancy("A") == occ
+    rp.unbind()
+    occ["RK-A-1"] = None  # not seen while unbound
+    assert rp.rack_occupancy("A") == {"RK-A-1": "C1", "RK-A-2": None}
+    with pytest.raises(KeyError):
+        rp.rack_occupancy("B")

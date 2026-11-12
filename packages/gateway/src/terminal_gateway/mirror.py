@@ -21,12 +21,15 @@ from terminal_opcua.nodeset import (
     EQUIPMENT_VARS,
     KIND_VARS,
     NAMESPACE_URI,
+    V2_KIND_VARS,
     EquipmentHandlers,
     Types,
     create_control_object,
     create_equipment_object,
+    create_zone_object,
     get_var,
     to_variant,
+    zone_rack_vars,
 )
 
 log = logging.getLogger(__name__)
@@ -169,6 +172,7 @@ class EquipmentMirror(_UpstreamLink):
     def __init__(
         self, server: Server, idx: int, types: Types, parent: Node, *,
         equipment_id: str, kind: Kind, endpoint: str, reconnect_s: float = RECONNECT_S,
+        v2: bool = False,
     ) -> None:
         super().__init__(endpoint, reconnect_s=reconnect_s)
         self.server = server
@@ -178,7 +182,8 @@ class EquipmentMirror(_UpstreamLink):
         self.equipment_id = equipment_id
         self.name = equipment_id
         self.kind = kind
-        self.var_names = (*EQUIPMENT_VARS, *KIND_VARS[kind])
+        self.v2 = v2  # mirror the v2 object type (its upstream must serve it too)
+        self.var_names = (*EQUIPMENT_VARS, *KIND_VARS[kind], *(V2_KIND_VARS[kind] if v2 else ()))
         self.obj: Node | None = None
         self._sim_time = 0.0
         self._emitter: EventEmitter | None = None
@@ -206,7 +211,7 @@ class EquipmentMirror(_UpstreamLink):
         handlers = EquipmentHandlers(
             assign_job=self._assign, cancel_job=self._cancel, reset=self._reset)
         self.obj = await create_equipment_object(
-            self.server, self.idx, self.types, self.parent, snap, handlers)
+            self.server, self.idx, self.types, self.parent, snap, handlers, v2=self.v2)
         self._emitter = await EventEmitter.create(
             self.server, self.types.events, self.obj, self.equipment_id)
         self._path = await self._upstream_path()
@@ -456,3 +461,84 @@ class ControlMirror(_UpstreamLink):
 
     async def _on_lost(self) -> None:
         self._uobj = None
+
+
+class ZoneMirror(_UpstreamLink):
+    """``Terminal/TransferZones/<block>`` on the gateway, mirroring the sim's zone server.
+
+    The racks come from the layout; the upstream must serve the same rack ids (else the link
+    is retried). Each rack's ``ContainerId`` and the zone's ``RacksOccupied`` follow the
+    upstream by subscription. ``Online`` is True while the link is up; when it is lost the
+    last values stay and ``Online`` becomes False (the occupancy is then stale)."""
+
+    def __init__(
+        self, server: Server, idx: int, types: Types, parent: Node, *, zone, endpoint: str,
+        reconnect_s: float = RECONNECT_S,
+    ) -> None:
+        super().__init__(endpoint, reconnect_s=reconnect_s)
+        self.server = server
+        self.idx = idx
+        self.types = types
+        self.parent = parent
+        self.zone = zone
+        self.block = zone.block
+        self.name = f"zone-{zone.block}"
+        self.obj: Node | None = None
+        self._names: dict[ua.NodeId, tuple[str | None, str]] = {}  # upstream node -> (rack, var)
+        self._lock = asyncio.Lock()
+
+    async def start(self) -> None:
+        self.obj = await create_zone_object(
+            self.server, self.idx, self.types, self.parent, self.block,
+            [(r.id, r.reefer, r.size) for r in self.zone.racks])
+        self._launch()
+
+    async def _local(self, rack: str | None, var: str) -> Node:
+        assert self.obj is not None
+        if rack is None:
+            return await get_var(self.obj, var)
+        return (await zone_rack_vars(self.obj))[rack][var]
+
+    async def _on_connected(self, client: Client) -> None:
+        uidx = await client.get_namespace_index(NAMESPACE_URI)
+        uobj = await client.nodes.objects.get_child(
+            [f"{uidx}:Terminal", f"{uidx}:TransferZones", f"{uidx}:{self.block}"])
+        ufolder = await uobj.get_child(f"{uidx}:Racks")
+        up_racks = {(await c.read_browse_name()).Name: c for c in await ufolder.get_children()}
+        want = [r.id for r in self.zone.racks]
+        if sorted(up_racks) != sorted(want):
+            raise ValueError(f"zone {self.block}: upstream racks {sorted(up_racks)} != layout {want}")
+        keys: list[tuple[str | None, str]] = [(None, "RacksOccupied")]
+        nodes = [await uobj.get_child(f"{uidx}:RacksOccupied")]
+        for rid in want:
+            keys.append((rid, "ContainerId"))
+            nodes.append(await up_racks[rid].get_child(f"{uidx}:ContainerId"))
+        self._names = {n.nodeid: k for n, k in zip(nodes, keys, strict=True)}
+        sub = await client.create_subscription(SUBSCRIPTION_PERIOD_MS, self)
+        await sub.subscribe_data_change(nodes, sampling_interval=0.0)
+        async with self._lock:  # subscribed first: a newer value is not overwritten
+            for (rack, var), value in zip(keys, await client.read_values(nodes), strict=True):
+                await (await self._local(rack, var)).write_value(to_variant(var, value))
+            await (await self._local(None, "Online")).write_value(to_variant("Online", True))
+
+    async def datachange_notification(self, node: Node, val, data) -> None:
+        key = self._names.get(node.nodeid)
+        if key is None or self.obj is None:
+            return
+        async with self._lock:
+            try:
+                await (await self._local(*key)).write_value(to_variant(key[1], val))
+            except Exception:
+                log.exception("%s: mirroring %s failed", self.name, key)
+
+    async def status_change_notification(self, status) -> None:
+        """Subscription status changes are handled by the connection-loss path."""
+
+    async def _on_lost(self) -> None:
+        if self.obj is None:
+            return
+        try:
+            async with self._lock:
+                await (await self._local(None, "Online")).write_value(to_variant("Online", False))
+        except Exception:
+            log.exception("%s: writing Online=False failed", self.name)

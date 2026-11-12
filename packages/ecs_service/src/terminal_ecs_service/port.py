@@ -16,7 +16,13 @@ import logging
 from collections.abc import Callable
 from dataclasses import replace
 
-from terminal_model.port import EquipmentEvent, EquipmentPort, EquipmentSnapshot, EventKind, LinkReason
+from terminal_model.port import (
+    EquipmentEvent,
+    EquipmentPort,
+    EquipmentSnapshot,
+    EventKind,
+    LinkReason,
+)
 from terminal_model.types import Job, State
 
 log = logging.getLogger(__name__)
@@ -33,6 +39,7 @@ class ReconnectingPort:
         self._now = 0.0
         self._generation = 0  # bumped on every bind/unbind
         self._lost = False  # unbound after having been bound: next bind emits LINK_RESTORED
+        self._racks: dict[str, dict[str, str | None]] = {}  # last rack_occupancy per block
 
     @property
     def connected(self) -> bool:
@@ -146,3 +153,14 @@ class ReconnectingPort:
         if self._port is not None:
             self._now = self._port.now()
         return self._now
+
+    # -- RackOccupancyPort (v2 layouts) ------------------------------------------------
+    def rack_occupancy(self, block: str) -> dict[str, str | None]:
+        """The bound port's rack occupancy of ``block``; while unbound the last one read
+        (``KeyError`` if never read). ``TypeError`` if the bound port has none (legacy)."""
+        if self._port is not None:
+            read = getattr(self._port, "rack_occupancy", None)
+            if read is None:
+                raise TypeError("the equipment port reports no rack occupancy")
+            self._racks[block] = dict(read(block))
+        return dict(self._racks[block])

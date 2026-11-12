@@ -18,9 +18,10 @@ from terminal_model.logging import configure_json_logging
 from terminal_model.port import EquipmentEvent
 
 from terminal_sim.layout import Layout, load_layout
-from terminal_sim.opcua_servers import ControlServer, EquipmentServer
+from terminal_sim.opcua_servers import ControlServer, EquipmentServer, ZoneServer
 from terminal_sim.scenario import Scenario, load_scenario
 from terminal_sim.world import make_world
+from terminal_sim.world2 import World2
 
 SIM_TICK_S = 1.0
 LAG_WARN_S = 5.0
@@ -38,14 +39,24 @@ class SimService:
         # Ports: equipment i (World order STS, AGV, ASC) on base_port + i, the clock server on
         # base_port + n_equipment (n_sts + n_agv + one ASC per block, two - WS and LS - on a v2
         # layout; the gateway derives the same). The legacy fleet 2 + 6 + 4 keeps base_port + 12.
+        # A v2 world also serves its transfer zones (layout order) on base_port + n_equipment +
+        # 1 + i, and its equipment as the v2 object types.
+        v2 = isinstance(self.world, World2)
         self.servers: dict[str, EquipmentServer] = {
-            eid: EquipmentServer(eq, port=base_port + i, host=host)
+            eid: EquipmentServer(eq, port=base_port + i, host=host, v2=v2)
             for i, (eid, eq) in enumerate(self.world.equipment.items())
         }
+        n_equipment = len(self.world.equipment)
         self.control = ControlServer(
-            self.world, port=base_port + len(self.world.equipment), on_stop=self.stop, host=host,
+            self.world, port=base_port + n_equipment, on_stop=self.stop, host=host,
             on_start=self.start,
         )
+        self.zones: list[ZoneServer] = []
+        if v2:
+            self.zones = [
+                ZoneServer(z, self.world.racks, port=base_port + n_equipment + 1 + i, host=host)
+                for i, z in enumerate(self.world.terminal.transfer_zones)
+            ]
         self.world.port.subscribe(self._route)
         self._stop_event: asyncio.Event | None = None
         self._stop_requested = False
@@ -72,7 +83,8 @@ class SimService:
             self._stop_event.set()
 
     async def _sync(self) -> None:
-        await asyncio.gather(*[s.sync() for s in self.servers.values()], self.control.sync())
+        await asyncio.gather(*[s.sync() for s in self.servers.values()], self.control.sync(),
+                             *[z.sync() for z in self.zones])
 
     async def run(self) -> None:
         self._stop_event = asyncio.Event()
@@ -83,7 +95,7 @@ class SimService:
             self._start_event.set()
         started: list = []
         try:
-            started = [*self.servers.values(), self.control]
+            started = [*self.servers.values(), self.control, *self.zones]
             await asyncio.gather(*[s.start() for s in started])
             await self._sync()
             if not self._start_event.is_set() and not self._stop_event.is_set():

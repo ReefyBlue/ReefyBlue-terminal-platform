@@ -111,6 +111,9 @@ class OpcUaEquipmentPort:
         self._by_node: dict[ua.NodeId, str] = {}
         self._clock_methods: dict[str, ua.NodeId] = {}
         self._clock: Node | None = None
+        # block -> (rack ids in zone order, their ContainerId nodes, the zone's Online node)
+        self._zones: dict[str, tuple[list[str], list[Node], Node]] = {}
+        self._zone_offline: set[str] = set()  # blocks whose stale occupancy was logged
         self._events: queue.SimpleQueue[EquipmentEvent] = queue.SimpleQueue()
         self._callbacks: list[Callable[[EquipmentEvent], None]] = []
         self._now = 0.0
@@ -165,6 +168,19 @@ class OpcUaEquipmentPort:
             methods = {n: m.nodeid for n, m in kids[ua.NodeClass.Method].items()}
             self._equipment[eid] = _Equipment(eid, obj, variables, methods)
 
+        if "TransferZones" in top:
+            for block, zone in await objects(top["TransferZones"]):
+                zkids = (await _children(zone, client))
+                racks = []
+                for rack_id, rack in (await _children(zkids[ua.NodeClass.Object]["Racks"], client))[
+                        ua.NodeClass.Object].items():
+                    rvars = (await _children(rack, client))[ua.NodeClass.Variable]
+                    racks.append((int(await rvars["Index"].read_value()), rack_id,
+                                  rvars["ContainerId"]))
+                racks.sort(key=lambda r: r[0])
+                self._zones[block] = ([r[1] for r in racks], [r[2] for r in racks],
+                                      zkids[ua.NodeClass.Variable]["Online"])
+
         self._clock = top["Clock"]
         clock_kids = await _children(self._clock, client)
         sim_time = clock_kids[ua.NodeClass.Variable]["SimTime"]
@@ -210,6 +226,7 @@ class OpcUaEquipmentPort:
         self._loop = self._thread = None
         self._client = self._subscription = self._clock = self._types = None
         self._equipment, self._by_node, self._clock_methods = {}, {}, {}
+        self._zones, self._zone_offline = {}, set()
 
     async def _disconnect(self) -> None:
         client = self._client
@@ -303,6 +320,29 @@ class OpcUaEquipmentPort:
     def now(self) -> float:
         """Last SimTime received (read once at connect, then by subscription)."""
         return self._now
+
+    # -- RackOccupancyPort --------------------------------------------------------------
+    def rack_occupancy(self, block: str) -> dict[str, str | None]:
+        """``{rack_id: container_id | None}`` of ``block``'s transfer zone (``TransferZone``
+        objects, mirrored by the gateway), racks in zone order; ``KeyError`` for a block
+        without one. While the gateway's link to the zone is down (``Online`` False) the last
+        mirrored values are returned and a warning is logged once per outage."""
+        if not self._connected:
+            raise RuntimeError("port not connected")
+        rack_ids, nodes, online = self._zones[block]
+        assert self._client is not None
+        values = self._run(self._client.read_values([online, *nodes]))
+        if not values[0]:
+            if block not in self._zone_offline:
+                self._zone_offline.add(block)
+                log.warning("transfer zone %s offline at the gateway: occupancy may be stale", block)
+        else:
+            self._zone_offline.discard(block)
+        return {rid: (str(v) if v else None) for rid, v in zip(rack_ids, values[1:], strict=True)}
+
+    def zone_blocks(self) -> list[str]:
+        """Blocks with a ``TransferZone`` object (empty on a legacy gateway)."""
+        return list(self._zones)
 
     # -- beyond the protocol -----------------------------------------------------------
     def drain_events(self) -> int:

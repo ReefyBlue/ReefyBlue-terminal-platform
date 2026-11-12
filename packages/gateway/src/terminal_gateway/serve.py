@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-from terminal_model.layout import is_v2, load_terminal
+from terminal_model.layout import TransferZone, is_v2, load_terminal
 from terminal_model.logging import configure_json_logging
 
 from terminal_gateway.gateway import Gateway
@@ -35,13 +35,15 @@ class GatewayLayout:
     blocks: list[_Block]
     opcua_base_port: int = 48400
     opcua_host: str = "localhost"
+    v2: bool = False  # v2 object types for the equipment
+    zones: tuple[TransferZone, ...] = ()  # v2: mirrored from the sim's zone servers
 
 
 def load_gateway_layout(path: Path) -> GatewayLayout:
     """The equipment ids and ``opcua`` block of a layout file (no simulator import).
 
     A v2 (metre) layout gives the ids of the simulator's ``World2``: two ASCs per block, the
-    waterside (``asc_ws_id``) then the landside one (``asc_ls_id``)."""
+    waterside (``asc_ws_id``) then the landside one (``asc_ls_id``), and its transfer zones."""
     raw = yaml.safe_load(Path(path).read_text())
     if isinstance(raw, dict) and is_v2(raw):
         t = load_terminal(path)
@@ -50,6 +52,8 @@ def load_gateway_layout(path: Path) -> GatewayLayout:
             blocks=[_Block(b.id, a) for b in t.blocks for a in (b.asc_ws_id, b.asc_ls_id)],
             opcua_base_port=t.opcua.base_port,
             opcua_host=t.opcua.host,
+            v2=True,
+            zones=tuple(t.transfer_zones),
         )
     opcua = raw.get("opcua") or {}
     return GatewayLayout(
