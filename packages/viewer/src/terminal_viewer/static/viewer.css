@@ -103,6 +103,7 @@ main {
 
 #alarms li.link_lost { border-left-color: #6d5f8a; background: #f5f3f8; }
 #alarms li.unknown_outcome { border-left-color: #c62828; background: #fdf3f3; }
+#alarms li.no_free_column { border-left-color: #f9a825; background: #fffde7; }
 
 #alarms .actions { margin-top: 4px; display: flex; gap: 6px; }
 #alarms .error { margin-top: 4px; color: #c62828; font-size: 12px; }

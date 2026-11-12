@@ -21,6 +21,7 @@ class Alarm:
     since: float  # sim time the condition arose
     detail: str
     severity: str = "ERROR"  # "ERROR": the operator must act; "WARNING": informational, blocks nothing
+    container_id: str | None = None  # the order an alarm is about (NO_FREE_COLUMN), else None
 
 
 class ReleaseRefused(Exception):

@@ -196,7 +196,7 @@ def create_app(core: EcsCore, *, run_loop: bool = True) -> FastAPI:
         """Open alarms, oldest first (``since_sim_time``, then kind); last-known while
         the link is down, ``[]`` before the first connection."""
         return guarded(lambda: sorted(core.alarms(), key=lambda a: (
-            a["since_sim_time"], a["kind"], a["equipment_id"], a["job_id"] or "")))
+            a["since_sim_time"], a["kind"], a["equipment_id"], a["job_id"] or "", a["container_id"] or "")))
 
     @app.post("/equipment/{equipment_id}/release", response_model=ReleaseOut, responses={
         404: {"model": RefusedOut, "description": "UNKNOWN_EQUIPMENT"},

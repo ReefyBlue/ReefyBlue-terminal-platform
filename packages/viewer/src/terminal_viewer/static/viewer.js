@@ -190,7 +190,7 @@ const model = {
 
   /** "kind|equipment_id|job_id" with "" for a null job id. */
   alarmKey(a) {
-    return `${a.kind}|${a.equipment_id}|${a.job_id ?? ""}`;
+    return `${a.kind}|${a.equipment_id}|${a.job_id ?? ""}` + (a.container_id ? `|${a.container_id}` : "");
   },
 
   /** Replace the alarm list with `items` (the GET /alarms list). */
@@ -286,7 +286,8 @@ function applyAlarm(state, message) {
 
 function alarmOf(a) {
   return { kind: a.kind, equipment_id: a.equipment_id, job_id: a.job_id ?? null,
-           since_sim_time: a.since_sim_time, detail: a.detail ?? "" };
+           since_sim_time: a.since_sim_time, detail: a.detail ?? "",
+           severity: a.severity ?? "ERROR", container_id: a.container_id ?? null };
 }
 
 function sortAlarms(alarms) {
@@ -615,6 +616,7 @@ const ALARM_LABELS = {
   LINK_LOST: "Verbinding verbroken",
   NEEDS_RELEASE: "Vrijgave nodig",
   UNKNOWN_OUTCOME: "Uitkomst onbekend",
+  NO_FREE_COLUMN: "Geen vrije kolom",
 };
 
 const RELEASABLE = new Set(["NEEDS_RELEASE", "LINK_LOST"]);

@@ -474,7 +474,7 @@ class Dispatcher:
                       f"outcome of {job_id} unknown after link loss") for job_id, eid in self._unknown.items()]
         if self.rack_mode:  # WARNING, blocks nothing: the order digs on once a column frees up
             out += [Alarm(AlarmKind.NO_FREE_COLUMN, ls or "", None, since.get((AlarmKind.NO_FREE_COLUMN, cid), now),
-                          f"{cid}: no free column to dig out {box}", severity="WARNING")
+                          f"{cid}: no free column to dig out {box}", severity="WARNING", container_id=cid)
                     for cid, (ls, box) in self._no_col.items()]
         return sorted(out, key=lambda a: (a.since, a.kind, a.equipment_id, a.job_id or ""))
 

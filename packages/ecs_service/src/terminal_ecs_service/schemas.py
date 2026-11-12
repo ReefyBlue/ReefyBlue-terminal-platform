@@ -53,11 +53,13 @@ class ContainersOut(BaseModel):
 
 
 class AlarmOut(BaseModel):
-    kind: Literal["LINK_LOST", "NEEDS_RELEASE", "UNKNOWN_OUTCOME"]
+    kind: Literal["LINK_LOST", "NEEDS_RELEASE", "UNKNOWN_OUTCOME", "NO_FREE_COLUMN"]
     equipment_id: str
     job_id: str | None
     since_sim_time: float
     detail: str
+    severity: Literal["WARNING", "ERROR"]  # ERROR: the operator must act; WARNING: informational
+    container_id: str | None  # the order the alarm is about (NO_FREE_COLUMN), else null
 
 
 class ReleaseOut(BaseModel):

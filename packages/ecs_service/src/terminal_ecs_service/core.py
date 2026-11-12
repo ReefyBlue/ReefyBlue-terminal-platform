@@ -110,7 +110,7 @@ class EcsCore:
         self.layout = layout  # static geometry, served by GET /layout
         self.auto_release = auto_release
         self.known_retention = known_retention
-        self._last_alarms: dict[tuple[str, str, str | None], dict] = {}
+        self._last_alarms: dict[tuple[str, str, str | None, str | None], dict] = {}
         self._connect = connect  # returns a connected port or raises ConnectionError
         self.port = ReconnectingPort()
         self.broadcaster = broadcaster if broadcaster is not None else Broadcaster()
@@ -385,6 +385,8 @@ class EcsCore:
                 "job_id": a.job_id,
                 "since_sim_time": float(a.since),
                 "detail": a.detail,
+                "severity": a.severity,
+                "container_id": a.container_id,
             }
             for a in self.dispatcher.alarms()
         ]
@@ -445,7 +447,7 @@ class EcsCore:
         """Publish ``alarm`` raised/cleared messages for the diff against the last call."""
         if self.dispatcher is None:
             return
-        current = {(a["kind"], a["equipment_id"], a["job_id"]): a for a in self.alarms()}
+        current = {(a["kind"], a["equipment_id"], a["job_id"], a["container_id"]): a for a in self.alarms()}
         now = self.port.now()
         for key, a in current.items():
             if key not in self._last_alarms:

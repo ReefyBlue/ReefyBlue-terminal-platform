@@ -341,7 +341,9 @@ async def test_alarms_endpoint_lists_sorted():
         assert [(a["kind"], a["equipment_id"], a["since_sim_time"]) for a in alarms] == [
             ("NEEDS_RELEASE", "AGV-01", 10.0), ("NEEDS_RELEASE", "ASC-A", 10.0),
             ("NEEDS_RELEASE", "STS-01", 15.0)]
-        assert set(alarms[0]) == {"kind", "equipment_id", "job_id", "since_sim_time", "detail"}
+        assert set(alarms[0]) == {"kind", "equipment_id", "job_id", "since_sim_time", "detail", "severity",
+                                  "container_id"}
+        assert all(a["severity"] == "ERROR" and a["container_id"] is None for a in alarms)
         assert alarms[0]["job_id"] is None and isinstance(alarms[0]["detail"], str)
         core.on_link_lost()  # LINK_LOST alarms at sim time 15 sort after the NEEDS_RELEASE at 15
         kinds = [(a["kind"], a["since_sim_time"]) for a in (await client.get("/alarms")).json()]
@@ -467,7 +469,8 @@ def test_ws_alarm_messages():
             msg = next_alarm()
             assert msg == {"type": "alarm", "action": "raised", "kind": "NEEDS_RELEASE",
                            "equipment_id": "AGV-01", "job_id": None, "since_sim_time": 3.0,
-                           "detail": msg["detail"], "sim_time": 3.0}
+                           "detail": msg["detail"], "severity": "ERROR", "container_id": None,
+                           "sim_time": 3.0}
             fake.set_state("AGV-01", State.IDLE)
             assert client.post("/equipment/AGV-01/release").status_code == 200
             msg = next_alarm()
