@@ -151,3 +151,16 @@ Eisen die hieruit volgen:
 - **C2 (lane routing):** AGV-paden zijn gebogen in-/uitvoeglussen per STS en slingerpaden tussen kade en blokken, geen rechte gridcellen. Model: polylines/bogen met keerlussen in de apron; de 20 m-grid blijft alleen reservering/collision-laag.
 - **C3 (viewer):** per STS een kraanstatus (richting op/neer, teller, lanebezetting) en AGV-posities op de lanes zoals in de TOS-weergave; ASC's als balk met id per blokzijde (`ASC23W`-stijl).
 - **Bevestigd:** processtappen (STS → AGV → zeezijde transfer → ASC → slot → ASC → landzijde transfer → truck) = stage-machine C1b T4/T5.
+
+### 10.1 Konecranes ECS-schermen (referentie uit de praktijk, niet in repo opgenomen)
+
+Dertien schermfoto's van een Konecranes ECS in bedrijf. Schermtypes en afgeleide eisen:
+
+| Scherm | Inhoud | Eis |
+|---|---|---|
+| Terminaloverzicht | plattegrond, STS/blokken/AGV-paden, statuskleur per machine | C3: overzichtskaart op schaal, statuskleur per equipment |
+| Joblijst | tabel equipment/container/van/naar/status, actieve rij geel | C3: joblijst-paneel; T7: zelfde velden in KPI/joblog-export |
+| Equipmentdetail (ASC, STS-trolley/spreader, AGV-vloot, AGV) | afbeelding + statuspanelen met lampjes: positie per as, snelheid, modus auto/remote/manual, spreader (twistlocks, 20/40), storingscode | T6: deze variabelen als OPC UA-variabelen per machine (`holding`, `lane_buffer`, rackbezetting inbegrepen); C3: detailpaneel per machine |
+| Blokweergave | bays genummerd, rijen × tiers als bezettingsraster, kraanpositie (blauw), equipment-boom links (Module → ASC WS/LS), rode alarmlijst onder | C3: blokweergave met bays/tiers + kraanpositie + alarmpaneel; equipment-boom als navigatie |
+| TOS (Navis) inquiry/jobs | containerinquiry, jobtabellen | buiten scope ECS-viewer; TOS-koppelvlak blijft API |
+| Remote-operatorstation | camerabeelden per ASC, "BROKEN CAMERA", knoppenpaneel | C3: geen camera's; wel ASC-exceptiepaneel (vrijgeven/voltooid/mislukt) per kraan |
