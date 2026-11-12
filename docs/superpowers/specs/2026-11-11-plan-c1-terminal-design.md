@@ -142,3 +142,12 @@ C1a en C1b worden als twee plannen uitgevoerd (SDD, aparte PR's op `feat/plan-b2
 6. Digging/rehandles worden gemodelleerd (anders klopt de ASC-productiviteit nooit).
 7. Twistlocks als vaste 12 s; lashing platform en dual-trolley later.
 8. Konecranes-ordegrootte als defaults, allemaal overschrijfbaar per equipment in de layout (`kinematics:`), zodat een ander merk later alleen andere getallen is.
+
+## 10. Referentiebeelden (toegevoegd 2026-11-12)
+
+`docs/superpowers/references/c1-terminal/ref_lbct_tos_and_aerial.png` (TOS-weergave + luchtfoto van een Konecranes-stijl terminal) en `ref_import_export_process.png` (import/export-processchema).
+
+Eisen die hieruit volgen:
+- **C2 (lane routing):** AGV-paden zijn gebogen in-/uitvoeglussen per STS en slingerpaden tussen kade en blokken, geen rechte gridcellen. Model: polylines/bogen met keerlussen in de apron; de 20 m-grid blijft alleen reservering/collision-laag.
+- **C3 (viewer):** per STS een kraanstatus (richting op/neer, teller, lanebezetting) en AGV-posities op de lanes zoals in de TOS-weergave; ASC's als balk met id per blokzijde (`ASC23W`-stijl).
+- **Bevestigd:** processtappen (STS → AGV → zeezijde transfer → ASC → slot → ASC → landzijde transfer → truck) = stage-machine C1b T4/T5.
